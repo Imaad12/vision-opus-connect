@@ -1,0 +1,192 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+
+export type Lang = "en" | "ar";
+
+type Dict = Record<string, { en: string; ar: string }>;
+
+export const dict: Dict = {
+  "app.name": { en: "Vision Contracting Co.", ar: "شركة الرؤية للمقاولات" },
+  "app.short": { en: "VINCO ERP", ar: "نظام فينكو" },
+  "app.tagline": {
+    en: "Internal ERP & CRM — sales, delivery, procurement and finance in one place.",
+    ar: "نظام داخلي متكامل — المبيعات والتنفيذ والمشتريات والمالية في مكان واحد.",
+  },
+  "auth.signin": { en: "Sign in with Google", ar: "الدخول بحساب Google" },
+  "auth.signout": { en: "Sign out", ar: "تسجيل الخروج" },
+  "auth.company_only": {
+    en: "Company accounts only. Access is granted by your administrator.",
+    ar: "حسابات الشركة فقط. يمنح الوصول من قبل مسؤول النظام.",
+  },
+  "auth.signing_in": { en: "Signing in…", ar: "جارٍ الدخول…" },
+  "auth.open_workspace": { en: "Open workspace", ar: "فتح النظام" },
+
+  "nav.dashboard": { en: "Dashboard", ar: "لوحة المعلومات" },
+  "nav.crm": { en: "CRM", ar: "علاقات العملاء" },
+  "nav.customers": { en: "Customers", ar: "العملاء" },
+  "nav.contacts": { en: "Contacts", ar: "جهات الاتصال" },
+  "nav.leads": { en: "Leads", ar: "الفرص البيعية" },
+  "nav.sales": { en: "Sales", ar: "المبيعات" },
+  "nav.quotations": { en: "Quotations", ar: "عروض الأسعار" },
+  "nav.approvals": { en: "Approvals", ar: "الاعتمادات" },
+  "nav.delivery": { en: "Delivery", ar: "التنفيذ" },
+  "nav.projects": { en: "Projects", ar: "المشاريع" },
+  "nav.contracts": { en: "Contracts", ar: "العقود" },
+  "nav.procurement": { en: "Procurement", ar: "المشتريات" },
+  "nav.suppliers": { en: "Suppliers", ar: "الموردون" },
+  "nav.purchase_orders": { en: "Purchase orders", ar: "أوامر الشراء" },
+  "nav.finance": { en: "Finance", ar: "المالية" },
+  "nav.invoices": { en: "Invoices", ar: "الفواتير" },
+  "nav.payments": { en: "Payments", ar: "المدفوعات" },
+  "nav.expenses": { en: "Expenses", ar: "المصروفات" },
+  "nav.vat": { en: "VAT report", ar: "تقرير الضريبة" },
+  "nav.documents": { en: "Documents", ar: "المستندات" },
+  "nav.administration": { en: "Administration", ar: "الإدارة" },
+  "nav.employees": { en: "Employees & roles", ar: "الموظفون والأدوار" },
+  "nav.audit": { en: "Audit log", ar: "سجل التغييرات" },
+  "nav.settings": { en: "Company settings", ar: "إعدادات الشركة" },
+
+  "common.search": { en: "Search…", ar: "بحث…" },
+  "common.new": { en: "New", ar: "جديد" },
+  "common.edit": { en: "Edit", ar: "تعديل" },
+  "common.delete": { en: "Delete", ar: "حذف" },
+  "common.save": { en: "Save", ar: "حفظ" },
+  "common.cancel": { en: "Cancel", ar: "إلغاء" },
+  "common.close": { en: "Close", ar: "إغلاق" },
+  "common.actions": { en: "Actions", ar: "إجراءات" },
+  "common.none": { en: "None", ar: "بدون" },
+  "common.empty": { en: "No records yet", ar: "لا توجد سجلات بعد" },
+  "common.loading": { en: "Loading…", ar: "جارٍ التحميل…" },
+  "common.no_access": {
+    en: "You do not have permission to view this module.",
+    ar: "لا تملك صلاحية الوصول إلى هذه الشاشة.",
+  },
+  "common.saved": { en: "Saved", ar: "تم الحفظ" },
+  "common.deleted": { en: "Deleted", ar: "تم الحذف" },
+  "common.total": { en: "Total", ar: "الإجمالي" },
+  "common.status": { en: "Status", ar: "الحالة" },
+  "common.details": { en: "Details", ar: "التفاصيل" },
+  "common.items": { en: "Line items", ar: "البنود" },
+  "common.add_item": { en: "Add line", ar: "إضافة بند" },
+  "common.subtotal": { en: "Subtotal", ar: "المجموع" },
+  "common.vat": { en: "VAT 15%", ar: "ضريبة القيمة المضافة ١٥٪" },
+  "common.language": { en: "العربية", ar: "English" },
+  "common.confirm_delete": {
+    en: "Delete this record permanently?",
+    ar: "حذف هذا السجل نهائياً؟",
+  },
+  "common.upload": { en: "Upload", ar: "رفع" },
+  "common.download": { en: "Download", ar: "تنزيل" },
+  "common.approve": { en: "Approve", ar: "اعتماد" },
+  "common.reject": { en: "Reject", ar: "رفض" },
+  "common.submit": { en: "Submit for approval", ar: "إرسال للاعتماد" },
+  "common.send": { en: "Mark as sent", ar: "تم الإرسال" },
+  "common.sod": {
+    en: "You cannot approve a record you created or submitted.",
+    ar: "لا يمكنك اعتماد سجل أنشأته أو أرسلته.",
+  },
+  "common.my_profile": { en: "My profile", ar: "ملفي" },
+
+  "dash.pipeline": { en: "Open pipeline value", ar: "قيمة الفرص المفتوحة" },
+  "dash.awaiting": { en: "Quotes awaiting approval", ar: "عروض بانتظار الاعتماد" },
+  "dash.active_projects": { en: "Active projects", ar: "مشاريع قائمة" },
+  "dash.receivables": { en: "Outstanding receivables", ar: "مستحقات غير محصلة" },
+  "dash.vat_quarter": { en: "VAT collected (year)", ar: "الضريبة المحصلة (السنة)" },
+  "dash.po_pending": { en: "POs awaiting approval", ar: "أوامر شراء بانتظار الاعتماد" },
+  "dash.recent_activity": { en: "Recent activity", ar: "أحدث النشاطات" },
+  "dash.pipeline_stage": { en: "Pipeline by stage", ar: "الفرص حسب المرحلة" },
+  "items.title": { en: "Line items", ar: "بنود المستند" },
+  "items.description": { en: "Description", ar: "الوصف" },
+  "items.unit": { en: "Unit", ar: "الوحدة" },
+  "items.qty": { en: "Qty", ar: "الكمية" },
+  "items.price": { en: "Unit price", ar: "سعر الوحدة" },
+  "items.line_total": { en: "Line total", ar: "إجمالي البند" },
+  "items.add": { en: "Add line", ar: "إضافة بند" },
+  "items.subtotal": { en: "Subtotal", ar: "المجموع قبل الضريبة" },
+  "items.discount": { en: "Discount", ar: "الخصم" },
+  "items.vat": { en: "VAT", ar: "ضريبة القيمة المضافة" },
+  "items.total": { en: "Total", ar: "الإجمالي" },
+  "doc.items": { en: "Items", ar: "البنود" },
+  "doc.submitted": { en: "Submitted for approval", ar: "تم الإرسال للاعتماد" },
+  "doc.approved": { en: "Approved", ar: "تم الاعتماد" },
+  "doc.rejected": { en: "Rejected", ar: "تم الرفض" },
+  "doc.reject_reason": { en: "Reason for rejection", ar: "سبب الرفض" },
+  "doc.record_payment": { en: "Record payment", ar: "تسجيل دفعة" },
+  "vat.title": { en: "VAT report", ar: "تقرير ضريبة القيمة المضافة" },
+  "vat.output": { en: "Output VAT (sales)", ar: "ضريبة المخرجات (المبيعات)" },
+  "vat.input": { en: "Input VAT (purchases)", ar: "ضريبة المدخلات (المشتريات)" },
+  "vat.net": { en: "Net VAT payable", ar: "صافي الضريبة المستحقة" },
+  "vat.period": { en: "Period", ar: "الفترة" },
+  "emp.roles": { en: "Roles", ar: "الأدوار" },
+  "emp.scope": { en: "Data scope", ar: "نطاق البيانات" },
+  "emp.manage": { en: "Manage access", ar: "إدارة الصلاحيات" },
+  "dash.welcome": { en: "Welcome back", ar: "مرحباً بعودتك" },
+};
+
+type I18nValue = {
+  lang: Lang;
+  dir: "ltr" | "rtl";
+  setLang: (l: Lang) => void;
+  toggle: () => void;
+  t: (key: string) => string;
+};
+
+const I18nContext = createContext<I18nValue | null>(null);
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>("en");
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem("vinco.lang");
+    if (stored === "ar" || stored === "en") setLangState(stored);
+  }, []);
+
+  useEffect(() => {
+    const dir = lang === "ar" ? "rtl" : "ltr";
+    document.documentElement.setAttribute("dir", dir);
+    document.documentElement.setAttribute("lang", lang);
+    window.localStorage.setItem("vinco.lang", lang);
+  }, [lang]);
+
+  const setLang = useCallback((l: Lang) => setLangState(l), []);
+  const toggle = useCallback(() => setLangState((p) => (p === "en" ? "ar" : "en")), []);
+  const t = useCallback((key: string) => dict[key]?.[lang] ?? key, [lang]);
+
+  const value = useMemo<I18nValue>(
+    () => ({ lang, dir: lang === "ar" ? "rtl" : "ltr", setLang, toggle, t }),
+    [lang, setLang, toggle, t],
+  );
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n() {
+  const ctx = useContext(I18nContext);
+  if (!ctx) throw new Error("useI18n must be used inside I18nProvider");
+  return ctx;
+}
+
+export function formatMoney(value: number | null | undefined, lang: Lang = "en") {
+  const n = Number(value ?? 0);
+  return new Intl.NumberFormat(lang === "ar" ? "ar-SA" : "en-SA", {
+    style: "currency",
+    currency: "SAR",
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+export function formatDate(value: string | null | undefined, lang: Lang = "en") {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat(lang === "ar" ? "ar-SA" : "en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(value));
+}
