@@ -19,6 +19,7 @@ import { Route as AuthenticatedDashboardRouteImport } from './routes/_authentica
 import { Route as AuthenticatedExpensesRouteImport } from './routes/_authenticated/expenses'
 import { Route as AuthenticatedLeadsRouteImport } from './routes/_authenticated/leads'
 import { Route as AuthenticatedProjectsRouteImport } from './routes/_authenticated/projects'
+import { Route as AuthenticatedQuotationsRouteImport } from './routes/_authenticated/quotations'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
 
 const IndexRoute = IndexRouteImport.update({
@@ -70,6 +71,11 @@ const AuthenticatedProjectsRoute = AuthenticatedProjectsRouteImport.update({
   path: '/projects',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedQuotationsRoute = AuthenticatedQuotationsRouteImport.update({
+  id: '/quotations',
+  path: '/quotations',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedSuppliersRoute = AuthenticatedSuppliersRouteImport.update({
   id: '/suppliers',
   path: '/suppliers',
@@ -86,6 +92,7 @@ export interface FileRoutesByFullPath {
   '/expenses': typeof AuthenticatedExpensesRoute
   '/leads': typeof AuthenticatedLeadsRoute
   '/projects': typeof AuthenticatedProjectsRoute
+  '/quotations': typeof AuthenticatedQuotationsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
 }
 export interface FileRoutesByTo {
@@ -98,6 +105,7 @@ export interface FileRoutesByTo {
   '/expenses': typeof AuthenticatedExpensesRoute
   '/leads': typeof AuthenticatedLeadsRoute
   '/projects': typeof AuthenticatedProjectsRoute
+  '/quotations': typeof AuthenticatedQuotationsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
 }
 export interface FileRoutesById {
@@ -112,6 +120,7 @@ export interface FileRoutesById {
   '/_authenticated/expenses': typeof AuthenticatedExpensesRoute
   '/_authenticated/leads': typeof AuthenticatedLeadsRoute
   '/_authenticated/projects': typeof AuthenticatedProjectsRoute
+  '/_authenticated/quotations': typeof AuthenticatedQuotationsRoute
   '/_authenticated/suppliers': typeof AuthenticatedSuppliersRoute
 }
 export interface FileRouteTypes {
@@ -126,6 +135,7 @@ export interface FileRouteTypes {
     | '/expenses'
     | '/leads'
     | '/projects'
+    | '/quotations'
     | '/suppliers'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -138,6 +148,7 @@ export interface FileRouteTypes {
     | '/expenses'
     | '/leads'
     | '/projects'
+    | '/quotations'
     | '/suppliers'
   id:
     | '__root__'
@@ -151,6 +162,7 @@ export interface FileRouteTypes {
     | '/_authenticated/expenses'
     | '/_authenticated/leads'
     | '/_authenticated/projects'
+    | '/_authenticated/quotations'
     | '/_authenticated/suppliers'
   fileRoutesById: FileRoutesById
 }
@@ -232,6 +244,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedProjectsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/quotations': {
+      id: '/_authenticated/quotations'
+      path: '/quotations'
+      fullPath: '/quotations'
+      preLoaderRoute: typeof AuthenticatedQuotationsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/suppliers': {
       id: '/_authenticated/suppliers'
       path: '/suppliers'
@@ -250,6 +269,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedExpensesRoute: typeof AuthenticatedExpensesRoute
   AuthenticatedLeadsRoute: typeof AuthenticatedLeadsRoute
   AuthenticatedProjectsRoute: typeof AuthenticatedProjectsRoute
+  AuthenticatedQuotationsRoute: typeof AuthenticatedQuotationsRoute
   AuthenticatedSuppliersRoute: typeof AuthenticatedSuppliersRoute
 }
 
@@ -261,6 +281,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedExpensesRoute: AuthenticatedExpensesRoute,
   AuthenticatedLeadsRoute: AuthenticatedLeadsRoute,
   AuthenticatedProjectsRoute: AuthenticatedProjectsRoute,
+  AuthenticatedQuotationsRoute: AuthenticatedQuotationsRoute,
   AuthenticatedSuppliersRoute: AuthenticatedSuppliersRoute,
 }
 
