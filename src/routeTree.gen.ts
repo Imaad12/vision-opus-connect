@@ -12,6 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as AuthenticatedApprovalsRouteImport } from './routes/_authenticated/approvals'
+import { Route as AuthenticatedAuditLogsRouteImport } from './routes/_authenticated/audit-logs'
 import { Route as AuthenticatedContactsRouteImport } from './routes/_authenticated/contacts'
 import { Route as AuthenticatedContractsRouteImport } from './routes/_authenticated/contracts'
 import { Route as AuthenticatedCustomersRouteImport } from './routes/_authenticated/customers'
@@ -25,6 +27,7 @@ import { Route as AuthenticatedProjectsRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedPurchaseOrdersRouteImport } from './routes/_authenticated/purchase-orders'
 import { Route as AuthenticatedQuotationsRouteImport } from './routes/_authenticated/quotations'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
+import { Route as AuthenticatedVatRouteImport } from './routes/_authenticated/vat'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -39,6 +42,16 @@ const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedApprovalsRoute = AuthenticatedApprovalsRouteImport.update({
+  id: '/approvals',
+  path: '/approvals',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedAuditLogsRoute = AuthenticatedAuditLogsRouteImport.update({
+  id: '/audit-logs',
+  path: '/audit-logs',
+  getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedContactsRoute = AuthenticatedContactsRouteImport.update({
   id: '/contacts',
@@ -106,10 +119,17 @@ const AuthenticatedSuppliersRoute = AuthenticatedSuppliersRouteImport.update({
   path: '/suppliers',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedVatRoute = AuthenticatedVatRouteImport.update({
+  id: '/vat',
+  path: '/vat',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/approvals': typeof AuthenticatedApprovalsRoute
+  '/audit-logs': typeof AuthenticatedAuditLogsRoute
   '/contacts': typeof AuthenticatedContactsRoute
   '/contracts': typeof AuthenticatedContractsRoute
   '/customers': typeof AuthenticatedCustomersRoute
@@ -123,10 +143,13 @@ export interface FileRoutesByFullPath {
   '/purchase-orders': typeof AuthenticatedPurchaseOrdersRoute
   '/quotations': typeof AuthenticatedQuotationsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
+  '/vat': typeof AuthenticatedVatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/approvals': typeof AuthenticatedApprovalsRoute
+  '/audit-logs': typeof AuthenticatedAuditLogsRoute
   '/contacts': typeof AuthenticatedContactsRoute
   '/contracts': typeof AuthenticatedContractsRoute
   '/customers': typeof AuthenticatedCustomersRoute
@@ -140,12 +163,15 @@ export interface FileRoutesByTo {
   '/purchase-orders': typeof AuthenticatedPurchaseOrdersRoute
   '/quotations': typeof AuthenticatedQuotationsRoute
   '/suppliers': typeof AuthenticatedSuppliersRoute
+  '/vat': typeof AuthenticatedVatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/auth': typeof AuthRoute
+  '/_authenticated/approvals': typeof AuthenticatedApprovalsRoute
+  '/_authenticated/audit-logs': typeof AuthenticatedAuditLogsRoute
   '/_authenticated/contacts': typeof AuthenticatedContactsRoute
   '/_authenticated/contracts': typeof AuthenticatedContractsRoute
   '/_authenticated/customers': typeof AuthenticatedCustomersRoute
@@ -159,12 +185,15 @@ export interface FileRoutesById {
   '/_authenticated/purchase-orders': typeof AuthenticatedPurchaseOrdersRoute
   '/_authenticated/quotations': typeof AuthenticatedQuotationsRoute
   '/_authenticated/suppliers': typeof AuthenticatedSuppliersRoute
+  '/_authenticated/vat': typeof AuthenticatedVatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/auth'
+    | '/approvals'
+    | '/audit-logs'
     | '/contacts'
     | '/contracts'
     | '/customers'
@@ -178,10 +207,13 @@ export interface FileRouteTypes {
     | '/purchase-orders'
     | '/quotations'
     | '/suppliers'
+    | '/vat'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/auth'
+    | '/approvals'
+    | '/audit-logs'
     | '/contacts'
     | '/contracts'
     | '/customers'
@@ -195,11 +227,14 @@ export interface FileRouteTypes {
     | '/purchase-orders'
     | '/quotations'
     | '/suppliers'
+    | '/vat'
   id:
     | '__root__'
     | '/'
     | '/_authenticated'
     | '/auth'
+    | '/_authenticated/approvals'
+    | '/_authenticated/audit-logs'
     | '/_authenticated/contacts'
     | '/_authenticated/contracts'
     | '/_authenticated/customers'
@@ -213,6 +248,7 @@ export interface FileRouteTypes {
     | '/_authenticated/purchase-orders'
     | '/_authenticated/quotations'
     | '/_authenticated/suppliers'
+    | '/_authenticated/vat'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -243,6 +279,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/approvals': {
+      id: '/_authenticated/approvals'
+      path: '/approvals'
+      fullPath: '/approvals'
+      preLoaderRoute: typeof AuthenticatedApprovalsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/audit-logs': {
+      id: '/_authenticated/audit-logs'
+      path: '/audit-logs'
+      fullPath: '/audit-logs'
+      preLoaderRoute: typeof AuthenticatedAuditLogsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/contacts': {
       id: '/_authenticated/contacts'
@@ -335,10 +385,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSuppliersRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/vat': {
+      id: '/_authenticated/vat'
+      path: '/vat'
+      fullPath: '/vat'
+      preLoaderRoute: typeof AuthenticatedVatRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
 interface AuthenticatedRouteRouteChildren {
+  AuthenticatedApprovalsRoute: typeof AuthenticatedApprovalsRoute
+  AuthenticatedAuditLogsRoute: typeof AuthenticatedAuditLogsRoute
   AuthenticatedContactsRoute: typeof AuthenticatedContactsRoute
   AuthenticatedContractsRoute: typeof AuthenticatedContractsRoute
   AuthenticatedCustomersRoute: typeof AuthenticatedCustomersRoute
@@ -352,9 +411,12 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedPurchaseOrdersRoute: typeof AuthenticatedPurchaseOrdersRoute
   AuthenticatedQuotationsRoute: typeof AuthenticatedQuotationsRoute
   AuthenticatedSuppliersRoute: typeof AuthenticatedSuppliersRoute
+  AuthenticatedVatRoute: typeof AuthenticatedVatRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedApprovalsRoute: AuthenticatedApprovalsRoute,
+  AuthenticatedAuditLogsRoute: AuthenticatedAuditLogsRoute,
   AuthenticatedContactsRoute: AuthenticatedContactsRoute,
   AuthenticatedContractsRoute: AuthenticatedContractsRoute,
   AuthenticatedCustomersRoute: AuthenticatedCustomersRoute,
@@ -368,6 +430,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedPurchaseOrdersRoute: AuthenticatedPurchaseOrdersRoute,
   AuthenticatedQuotationsRoute: AuthenticatedQuotationsRoute,
   AuthenticatedSuppliersRoute: AuthenticatedSuppliersRoute,
+  AuthenticatedVatRoute: AuthenticatedVatRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
