@@ -126,6 +126,19 @@ Division guards against `None` and `0` denominators and returns `None`
 (not `0` and not an exception) when a margin is undefined, so "no revenue
 recorded yet" is never silently displayed as "0% margin".
 
+Two conventions keep this table accurate under real-world contract terms
+(see `DATABASE_SCHEMA.md` §4 for the full lifecycle walkthrough):
+
+- **VAT/tax is never revenue.** `quoted_value`, `contract_value`, and
+  variation amounts are always stated exclusive of VAT. VAT only appears
+  at the `Invoice` level (`tax_amount`, a component within the invoice's
+  total `amount`) and is stripped back out via `calculate_net_of_tax()`
+  before any figure is treated as revenue.
+- **Retention is invoiced revenue, not yet collectible cash.** A
+  counterparty withholding part of a certified invoice
+  (`Invoice.retention_amount`) doesn't change what was earned — it changes
+  what's currently payable, via `calculate_amount_due_after_retention()`.
+
 ### `Money` and currency
 
 `app/core/money.py` defines a small `Money` value object: a `Decimal`

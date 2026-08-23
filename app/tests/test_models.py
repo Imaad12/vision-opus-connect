@@ -73,6 +73,75 @@ def test_invoice_direction_check_constraint(db_session: Session) -> None:
     db_session.rollback()
 
 
+def _make_client_invoice(session: Session, project: Project, **kwargs: Decimal) -> Invoice:
+    client = Client(name="Acme Developers 2")
+    session.add(client)
+    session.flush()
+    invoice = Invoice(
+        project_id=project.id,
+        direction=InvoiceDirection.CLIENT,
+        client_id=client.id,
+        amount=kwargs.pop("amount", Decimal("105000")),
+        **kwargs,
+    )
+    session.add(invoice)
+    return invoice
+
+
+def test_invoice_tax_amount_within_range_is_accepted(db_session: Session) -> None:
+    project = _make_project(db_session)
+    invoice = _make_client_invoice(
+        db_session, project, amount=Decimal("105000"), tax_amount=Decimal("5000")
+    )
+    db_session.commit()
+    assert invoice.tax_amount == Decimal("5000")
+
+
+def test_invoice_tax_amount_exceeding_amount_is_rejected(db_session: Session) -> None:
+    project = _make_project(db_session)
+    _make_client_invoice(db_session, project, amount=Decimal("1000"), tax_amount=Decimal("2000"))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_invoice_negative_tax_on_positive_invoice_is_rejected(db_session: Session) -> None:
+    project = _make_project(db_session)
+    _make_client_invoice(db_session, project, amount=Decimal("1000"), tax_amount=Decimal("-50"))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_invoice_credit_note_with_matching_negative_tax_is_accepted(db_session: Session) -> None:
+    # A credit note reversing a prior invoice: both amount and tax are negative.
+    project = _make_project(db_session)
+    invoice = _make_client_invoice(
+        db_session, project, amount=Decimal("-1050"), tax_amount=Decimal("-50")
+    )
+    db_session.commit()
+    assert invoice.amount == Decimal("-1050")
+
+
+def test_invoice_retention_amount_within_range_is_accepted(db_session: Session) -> None:
+    project = _make_project(db_session)
+    invoice = _make_client_invoice(
+        db_session, project, amount=Decimal("100000"), retention_amount=Decimal("10000")
+    )
+    db_session.commit()
+    assert invoice.retention_amount == Decimal("10000")
+
+
+def test_invoice_retention_amount_exceeding_amount_is_rejected(db_session: Session) -> None:
+    project = _make_project(db_session)
+    _make_client_invoice(
+        db_session, project, amount=Decimal("1000"), retention_amount=Decimal("5000")
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
 def test_estimated_and_actual_costs_are_independent(db_session: Session) -> None:
     """Estimated and actual costs must be stored in separate tables/rows so
     one can never silently overwrite the other."""

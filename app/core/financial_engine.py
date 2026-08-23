@@ -83,6 +83,19 @@ def calculate_actual_revenue(
 ) -> Decimal | None:
     """actual_revenue = contract_value + approved variations.
 
+    This is the accrual/earned-value figure — what the company is entitled
+    to for the contract as it currently stands — and doubles as the
+    *revised* (current) contract value, as distinct from
+    `Project.contract_value`, which always holds the *original* awarded
+    value and must never be overwritten when a variation is approved (see
+    DATABASE_SCHEMA.md, "Financial Lifecycle"). It is deliberately not the
+    same thing as "invoiced revenue" (the sum of client invoices actually
+    raised so far, which may lag behind this figure on an in-progress
+    project) or "cash received" (the sum of payments actually collected,
+    which additionally lags invoiced revenue by whatever is unpaid or held
+    as retention). All three are legitimate, differently-named figures;
+    conflating them is the most common way a profit figure becomes wrong.
+
     A project with a contract value but no variations yet has an actual
     revenue equal to its contract value (approved_variation_total defaults
     to 0 in that case, not None) — the absence of variations is a known
@@ -91,6 +104,59 @@ def calculate_actual_revenue(
     if contract_value is None:
         return None
     return contract_value + (approved_variation_total or ZERO)
+
+
+# --- Invoice-level pass-through calculations (VAT, retention, collection) ---
+#
+# These are separate from the project-level accrual figures above. An
+# invoice's face value (`Invoice.amount`) is never itself "revenue" or
+# "cost" without first removing the parts that are not the company's
+# money: VAT/tax collected on the government's behalf (a pass-through
+# liability, not profit) and retention withheld by the counterparty (money
+# earned but not yet collectible). Getting these wrong is the classic way
+# tax accidentally inflates a profit figure.
+
+
+def calculate_net_of_tax(gross_amount: Decimal | None, tax_amount: Decimal | None) -> Decimal | None:
+    """The tax-exclusive value of an invoice: gross_amount - tax_amount.
+
+    A missing `tax_amount` is treated as zero (no VAT recorded), but a
+    missing `gross_amount` means the invoice itself is unknown, so the
+    result is None rather than 0.
+    """
+    if gross_amount is None:
+        return None
+    return gross_amount - (tax_amount or ZERO)
+
+
+def calculate_amount_due_after_retention(
+    invoice_amount: Decimal | None, retention_amount: Decimal | None
+) -> Decimal | None:
+    """The amount currently payable/collectible on an invoice, excluding
+    whatever portion is being held back as retention.
+
+    This is distinct from `calculate_net_of_tax`: retention is withheld
+    from the invoice's face value (which normally includes tax), it does
+    not remove tax from the calculation.
+    """
+    if invoice_amount is None:
+        return None
+    return invoice_amount - (retention_amount or ZERO)
+
+
+def calculate_outstanding_balance(
+    amount_due: Decimal | None, amount_paid: Decimal | None
+) -> Decimal | None:
+    """How much of an amount due remains unpaid: amount_due - amount_paid.
+
+    A missing `amount_paid` is treated as zero (nothing collected yet, a
+    known fact); a missing `amount_due` means the obligation itself is
+    unknown, so the result is None. A negative result means the amount due
+    has been overpaid.
+    """
+    if amount_due is None:
+        return None
+    return amount_due - (amount_paid or ZERO)
 
 
 def calculate_cost_variance(

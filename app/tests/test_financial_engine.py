@@ -15,9 +15,12 @@ from app.core.financial_engine import (
     calculate_actual_margin,
     calculate_actual_profit,
     calculate_actual_revenue,
+    calculate_amount_due_after_retention,
     calculate_cost_variance,
     calculate_estimated_margin,
     calculate_estimated_profit,
+    calculate_net_of_tax,
+    calculate_outstanding_balance,
     safe_margin,
     safe_subtract,
 )
@@ -121,6 +124,59 @@ class TestCostVariance:
 
     def test_no_actuals_yet(self) -> None:
         assert calculate_cost_variance(Decimal("75000"), None) is None
+
+
+class TestNetOfTax:
+    def test_normal_case(self) -> None:
+        # AED 105,000 invoice including AED 5,000 VAT (5%) -> AED 100,000 net.
+        assert calculate_net_of_tax(Decimal("105000"), Decimal("5000")) == Decimal("100000")
+
+    def test_missing_tax_treated_as_zero(self) -> None:
+        # No VAT recorded is a known fact (no tax), not "unknown".
+        assert calculate_net_of_tax(Decimal("100000"), None) == Decimal("100000")
+
+    def test_missing_gross_amount_is_unknown(self) -> None:
+        assert calculate_net_of_tax(None, Decimal("5000")) is None
+
+    def test_credit_note_with_negative_tax(self) -> None:
+        # A credit note reversing a prior invoice: both amount and tax are negative.
+        assert calculate_net_of_tax(Decimal("-1050"), Decimal("-50")) == Decimal("-1000")
+
+
+class TestAmountDueAfterRetention:
+    def test_normal_case(self) -> None:
+        # AED 100,000 invoice with 10% retention withheld.
+        assert calculate_amount_due_after_retention(Decimal("100000"), Decimal("10000")) == Decimal(
+            "90000"
+        )
+
+    def test_no_retention_recorded(self) -> None:
+        assert calculate_amount_due_after_retention(Decimal("100000"), None) == Decimal("100000")
+
+    def test_missing_invoice_amount_is_unknown(self) -> None:
+        assert calculate_amount_due_after_retention(None, Decimal("10000")) is None
+
+    def test_does_not_also_strip_tax(self) -> None:
+        # Retention is withheld from the face value, independent of tax.
+        result = calculate_amount_due_after_retention(Decimal("105000"), Decimal("10000"))
+        assert result == Decimal("95000")
+
+
+class TestOutstandingBalance:
+    def test_partial_payment_leaves_a_balance(self) -> None:
+        assert calculate_outstanding_balance(Decimal("100000"), Decimal("40000")) == Decimal("60000")
+
+    def test_no_payments_yet(self) -> None:
+        assert calculate_outstanding_balance(Decimal("100000"), None) == Decimal("100000")
+
+    def test_fully_paid(self) -> None:
+        assert calculate_outstanding_balance(Decimal("100000"), Decimal("100000")) == Decimal("0")
+
+    def test_missing_amount_due_is_unknown(self) -> None:
+        assert calculate_outstanding_balance(None, Decimal("1000")) is None
+
+    def test_overpayment_is_negative(self) -> None:
+        assert calculate_outstanding_balance(Decimal("100000"), Decimal("110000")) == Decimal("-10000")
 
 
 class TestProjectFinancials:
