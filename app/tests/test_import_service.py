@@ -342,3 +342,60 @@ def test_confirm_after_reject_is_rejected(db_session: Session, tmp_path: Path) -
 
     with pytest.raises(ValidationError):
         confirm_import(db_session, document, new_client_name="ABC Holdings", new_project_name="Villa ABC Renovation")
+
+
+def test_confirm_import_failure_rolls_back_the_new_client_and_project(db_session: Session, tmp_path: Path) -> None:
+    """`confirm_import` creates a client, then a project, then a quotation —
+    all in one caller-managed transaction (`session_scope()` in production,
+    which commits once at the end and rolls back everything on any
+    exception). If the quotation step fails (e.g. a duplicate reference
+    number collides with an already-committed quotation), the client and
+    project it just created inside this same call must not survive a
+    rollback — otherwise a failed import could still leave an orphaned,
+    unlinked client/project behind.
+    """
+    # Pre-existing, already-committed data that the new import will collide with.
+    existing_client = client_service.create_client(db_session, name="Existing Client")
+    existing_project = project_service.create_project(
+        db_session, name="Existing Project", client_id=existing_client.id
+    )
+    from app.services.quotation_service import create_quotation
+
+    create_quotation(db_session, existing_project, reference_number="Q-DUP", quoted_value=None)
+    db_session.commit()
+
+    colliding_text = QUOTATION_TEXT.replace("Q-2024-0091", "Q-DUP")
+    path = tmp_path / "colliding_quote.txt"
+    path.write_text(colliding_text, encoding="utf-8")
+    document = stage_document(db_session, path)
+    # In production, staging a document is its own committed transaction
+    # (app/ui/imports/imports_page.py opens a fresh session_scope() per
+    # file) — separate from the later, also separately-scoped, confirm
+    # step. Commit here so the rollback below only undoes confirm_import's
+    # own work, exactly as it would in production.
+    db_session.commit()
+
+    with pytest.raises(ValidationError, match="already in use"):
+        confirm_import(
+            db_session,
+            document,
+            new_client_name="Brand New Client",
+            new_project_name="Brand New Project",
+        )
+
+    # Mirror what app.database.session.session_scope() does on any exception
+    # raised out of a service call: roll back the whole transaction.
+    db_session.rollback()
+
+    client_names = {c.name for c in client_service.list_clients(db_session)}
+    project_names = {p.name for p in project_service.list_projects(db_session)}
+    assert "Brand New Client" not in client_names
+    assert "Brand New Project" not in project_names
+    # The pre-existing, already-committed data must survive the rollback.
+    assert "Existing Client" in client_names
+    assert "Existing Project" in project_names
+
+    document = get_imported_document(db_session, document.id)
+    assert document.review_status == ImportReviewStatus.NEEDS_REVIEW
+    assert document.resulting_client_id is None
+    assert document.resulting_project_id is None

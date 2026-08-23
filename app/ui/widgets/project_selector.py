@@ -35,6 +35,11 @@ class ProjectSelector(QWidget):
     def reload(self, *, select_project_id: int | None = None) -> None:
         current = select_project_id if select_project_id is not None else self.selected_project_id()
         self.combo.clear()
+        # See ClientSelector.reload for why this placeholder matters: without
+        # it, Qt auto-selects the first real project, so "no selection" would
+        # silently resolve to an arbitrary (and likely wrong) existing
+        # project the moment any project exists.
+        self.combo.addItem("— Select Project —", None)
         with session_scope() as session:
             for project in list_projects(session):
                 self.combo.addItem(_label_for(project), project.id)
