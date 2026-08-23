@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Date, DateTime
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, String, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import DEFAULT_CURRENCY, Currency, ProjectStatus
 from app.database.base import Base, SoftDeleteMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.client import Client
 
 
 class Project(Base, TimestampMixin, SoftDeleteMixin):
@@ -23,6 +27,7 @@ class Project(Base, TimestampMixin, SoftDeleteMixin):
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     project_code: Mapped[str | None] = mapped_column(String(50))
+    description: Mapped[str | None] = mapped_column(Text)
     primary_trade_id: Mapped[int | None] = mapped_column(ForeignKey("trades.id"))
     status: Mapped[ProjectStatus] = mapped_column(
         SAEnum(ProjectStatus, native_enum=False),
@@ -47,6 +52,8 @@ class Project(Base, TimestampMixin, SoftDeleteMixin):
     )
 
     notes: Mapped[str | None] = mapped_column(Text)
+
+    client: Mapped["Client"] = relationship("Client", foreign_keys=[client_id])
 
     def __repr__(self) -> str:
         return f"Project(id={self.id!r}, name={self.name!r}, status={self.status!r})"

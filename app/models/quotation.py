@@ -3,13 +3,18 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Date
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import DEFAULT_CURRENCY, Currency, QuotationStatus
 from app.database.base import Base, SoftDeleteMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.project import Project
 
 
 class Quotation(Base, TimestampMixin, SoftDeleteMixin):
@@ -23,6 +28,8 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     reference_number: Mapped[str | None] = mapped_column(String(100))
     title: Mapped[str | None] = mapped_column(String(255))
+
+    project: Mapped["Project"] = relationship("Project", foreign_keys=[project_id])
 
     def __repr__(self) -> str:
         return f"Quotation(id={self.id!r}, project_id={self.project_id!r})"
@@ -52,6 +59,8 @@ class QuotationVersion(Base, TimestampMixin, SoftDeleteMixin):
     issued_date: Mapped[date | None] = mapped_column(Date)
     valid_until: Mapped[date | None] = mapped_column(Date)
     notes: Mapped[str | None] = mapped_column(Text)
+
+    quotation: Mapped["Quotation"] = relationship("Quotation", foreign_keys=[quotation_id])
 
     def __repr__(self) -> str:
         return (
