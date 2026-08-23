@@ -107,3 +107,64 @@ class DocumentType(StrEnum):
     PHOTO = "PHOTO"
     CORRESPONDENCE = "CORRESPONDENCE"
     OTHER = "OTHER"
+
+
+class DocumentSourceType(StrEnum):
+    """Where an imported document's bytes actually live. LOCAL is the only
+    source Phase 4 implements; GOOGLE_DRIVE is reserved so the staging
+    model doesn't need a schema change when Drive sync is added later."""
+
+    LOCAL = "LOCAL"
+    GOOGLE_DRIVE = "GOOGLE_DRIVE"
+
+
+class ImportDocumentKind(StrEnum):
+    """What an imported document appears to represent, decided by the
+    importer/normalizer from its content — never trusted blindly, always
+    reviewable."""
+
+    QUOTATION = "QUOTATION"
+    BOQ = "BOQ"
+    UNKNOWN = "UNKNOWN"
+
+
+class ExtractionStatus(StrEnum):
+    """Progress of turning a source file's bytes into candidate data.
+    Independent of ReviewStatus: a document can be EXTRACTION_COMPLETE and
+    still be awaiting human review."""
+
+    PENDING = "PENDING"
+    EXTRACTING = "EXTRACTING"
+    EXTRACTION_COMPLETE = "EXTRACTION_COMPLETE"
+    FAILED = "FAILED"
+    UNSUPPORTED = "UNSUPPORTED"
+    OCR_REQUIRED = "OCR_REQUIRED"
+
+
+class ImportReviewStatus(StrEnum):
+    """Where a staged document sits in the human review/confirmation
+    workflow. NEEDS_REVIEW is the starting point once extraction has
+    produced (or failed to produce) candidate data."""
+
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+
+
+class ConfidenceLevel(StrEnum):
+    """Categorical extraction confidence. Deliberately not a percentage —
+    the deterministic parsers in Phase 4 have no statistically meaningful
+    accuracy model, so presenting "98% confidence" would be fabricated
+    precision. See IMPORT_ARCHITECTURE.md."""
+
+    HIGH = "HIGH"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    LOW = "LOW"
+
+
+class ImportAuditEventType(StrEnum):
+    IMPORTED = "IMPORTED"
+    EXTRACTED = "EXTRACTED"
+    EDITED = "EDITED"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"

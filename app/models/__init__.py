@@ -9,6 +9,12 @@ from app.models.client import Client
 from app.models.company import Company
 from app.models.cost import ActualCost, EstimatedCost, EstimateRevision
 from app.models.document import GoogleDriveDocument
+from app.models.import_staging import (
+    ImportAuditLogEntry,
+    ImportedBoqLineCandidate,
+    ImportedDocument,
+    ImportedQuotationCandidate,
+)
 from app.models.invoice import Invoice, Payment
 from app.models.lookups import CostCategory, Trade
 from app.models.project import Project, ProjectStatusHistory
@@ -25,6 +31,10 @@ __all__ = [
     "EstimatedCost",
     "EstimateRevision",
     "GoogleDriveDocument",
+    "ImportAuditLogEntry",
+    "ImportedBoqLineCandidate",
+    "ImportedDocument",
+    "ImportedQuotationCandidate",
     "Invoice",
     "Payment",
     "CostCategory",

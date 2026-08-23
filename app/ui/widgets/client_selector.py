@@ -30,6 +30,12 @@ class ClientSelector(QWidget):
     def reload(self, *, select_client_id: int | None = None) -> None:
         current = select_client_id if select_client_id is not None else self.selected_client_id()
         self.combo.clear()
+        # A placeholder with data=None so this widget never defaults to an
+        # arbitrary real client when no explicit match/selection is made —
+        # Qt's QComboBox otherwise auto-selects the first added item, which
+        # would silently point "no selection" at a real (and likely wrong)
+        # client the moment any client exists.
+        self.combo.addItem("— Select Client —", None)
         with session_scope() as session:
             for client in list_clients(session):
                 self.combo.addItem(client.name, client.id)

@@ -14,6 +14,7 @@ from app.core.enums import DEFAULT_CURRENCY, Currency, QuotationStatus
 from app.database.base import Base, SoftDeleteMixin, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.boq import BOQ
     from app.models.project import Project
 
 
@@ -61,6 +62,9 @@ class QuotationVersion(Base, TimestampMixin, SoftDeleteMixin):
     notes: Mapped[str | None] = mapped_column(Text)
 
     quotation: Mapped["Quotation"] = relationship("Quotation", foreign_keys=[quotation_id])
+    boq: Mapped["BOQ | None"] = relationship(
+        "BOQ", foreign_keys="BOQ.quotation_version_id", uselist=False, viewonly=True
+    )
 
     def __repr__(self) -> str:
         return (
