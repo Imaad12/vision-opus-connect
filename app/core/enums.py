@@ -88,6 +88,16 @@ class VariationStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class CostPaymentStatus(StrEnum):
+    """Whether an ActualCost has been paid, tracked independently of any
+    linked vendor Invoice (which may not exist yet for a cost that has only
+    been recorded from a receipt/reference)."""
+
+    UNPAID = "UNPAID"
+    PARTIALLY_PAID = "PARTIALLY_PAID"
+    PAID = "PAID"
+
+
 class DocumentType(StrEnum):
     QUOTATION = "QUOTATION"
     BOQ = "BOQ"

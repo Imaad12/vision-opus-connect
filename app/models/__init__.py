@@ -7,7 +7,7 @@ what `init_db.create_all()` and Alembic's autogeneration rely on.
 from app.models.boq import BOQ, BOQLineItem
 from app.models.client import Client
 from app.models.company import Company
-from app.models.cost import ActualCost, EstimatedCost
+from app.models.cost import ActualCost, EstimatedCost, EstimateRevision
 from app.models.document import GoogleDriveDocument
 from app.models.invoice import Invoice, Payment
 from app.models.lookups import CostCategory, Trade
@@ -23,6 +23,7 @@ __all__ = [
     "Company",
     "ActualCost",
     "EstimatedCost",
+    "EstimateRevision",
     "GoogleDriveDocument",
     "Invoice",
     "Payment",
