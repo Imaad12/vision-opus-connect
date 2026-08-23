@@ -36,7 +36,15 @@ from app.models import (
     QuotationVersion,
     Vendor,
 )
-from app.services.financial_service import build_project_financial_snapshot
+from app.services.financial_service import (
+    build_estimate_accuracy_report,
+    build_project_financial_snapshot,
+    create_estimate_revision,
+    get_final_estimate_revision,
+    get_latest_estimate_revision,
+    get_original_estimate_revision,
+    sum_estimate_revision_cost,
+)
 
 
 def _make_project(session: Session, name: str = "Villa Renovation") -> Project:
@@ -454,3 +462,256 @@ def test_full_lifecycle_end_to_end_snapshot(db_session: Session) -> None:
     assert snapshot.cash_received == Decimal("700000")
     # Amount due after retention: 1,050,000 - 52,500 = 997,500; paid 700,000.
     assert snapshot.receivables_outstanding == Decimal("297500")
+
+
+# --- Estimate revision history (original -> revised -> final) ---
+
+
+def test_create_estimate_revision_auto_increments_revision_number(db_session: Session) -> None:
+    project = _make_project(db_session)
+
+    first = create_estimate_revision(db_session, project)
+    second = create_estimate_revision(db_session, project)
+    third = create_estimate_revision(db_session, project)
+    db_session.commit()
+
+    assert (first.revision_number, second.revision_number, third.revision_number) == (1, 2, 3)
+
+
+def test_create_estimate_revision_defaults_currency_to_project_currency(db_session: Session) -> None:
+    project = _make_project(db_session)
+    revision = create_estimate_revision(db_session, project)
+    db_session.commit()
+
+    assert revision.currency == project.contract_currency == Currency.AED
+
+
+def test_original_and_latest_revision_identification(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_category(db_session, "Materials")
+
+    rev1 = create_estimate_revision(db_session, project, effective_date=date(2026, 1, 1))
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=rev1.id,
+            cost_category_id=category.id,
+            amount=Decimal("780000"),
+        )
+    )
+    rev2 = create_estimate_revision(db_session, project, effective_date=date(2026, 3, 1))
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=rev2.id,
+            cost_category_id=category.id,
+            amount=Decimal("820000"),
+        )
+    )
+    db_session.commit()
+
+    original = get_original_estimate_revision(db_session, project)
+    latest = get_latest_estimate_revision(db_session, project)
+
+    assert original.id == rev1.id
+    assert latest.id == rev2.id
+    assert sum_estimate_revision_cost(db_session, original) == Decimal("780000")
+    assert sum_estimate_revision_cost(db_session, latest) == Decimal("820000")
+
+
+def test_original_revision_is_never_overwritten_by_a_later_one(db_session: Session) -> None:
+    """The core requirement: revising the estimate must never mutate the
+    original revision's cost lines."""
+    project = _make_project(db_session)
+    category = _make_category(db_session, "Materials")
+
+    rev1 = create_estimate_revision(db_session, project)
+    original_line = EstimatedCost(
+        project_id=project.id,
+        estimate_revision_id=rev1.id,
+        cost_category_id=category.id,
+        amount=Decimal("780000"),
+    )
+    db_session.add(original_line)
+    db_session.commit()
+
+    rev2 = create_estimate_revision(db_session, project)
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=rev2.id,
+            cost_category_id=category.id,
+            amount=Decimal("850000"),
+        )
+    )
+    rev3 = create_estimate_revision(db_session, project, is_final=True)
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=rev3.id,
+            cost_category_id=category.id,
+            amount=Decimal("820000"),
+        )
+    )
+    db_session.commit()
+
+    # The original row is untouched — same id, same amount — regardless of
+    # how many later revisions were created.
+    db_session.refresh(original_line)
+    assert original_line.amount == Decimal("780000")
+    assert sum_estimate_revision_cost(db_session, rev1) == Decimal("780000")
+    assert sum_estimate_revision_cost(db_session, rev2) == Decimal("850000")
+    assert sum_estimate_revision_cost(db_session, rev3) == Decimal("820000")
+
+
+def test_final_estimate_explicit_flag_wins_over_latest(db_session: Session) -> None:
+    project = _make_project(db_session)
+
+    create_estimate_revision(db_session, project)
+    explicit_final = create_estimate_revision(db_session, project, is_final=True)
+    latest_but_not_final = create_estimate_revision(db_session, project)
+    db_session.commit()
+
+    final = get_final_estimate_revision(db_session, project)
+
+    assert final.id == explicit_final.id
+    assert final.id != latest_but_not_final.id
+
+
+def test_final_estimate_falls_back_to_latest_before_completion_date(db_session: Session) -> None:
+    project = _make_project(db_session, name="Completed Project")
+    project.actual_completion_date = date(2026, 6, 1)
+
+    create_estimate_revision(db_session, project, effective_date=date(2026, 1, 1))
+    before_completion = create_estimate_revision(db_session, project, effective_date=date(2026, 5, 1))
+    after_completion = create_estimate_revision(db_session, project, effective_date=date(2026, 8, 1))
+    db_session.commit()
+
+    final = get_final_estimate_revision(db_session, project)
+
+    # The revision made AFTER completion must not be picked as "final as of completion".
+    assert final.id == before_completion.id
+    assert final.id != after_completion.id
+
+
+def test_final_estimate_falls_back_to_latest_when_project_not_completed(db_session: Session) -> None:
+    project = _make_project(db_session)
+    create_estimate_revision(db_session, project)
+    latest = create_estimate_revision(db_session, project)
+    db_session.commit()
+
+    final = get_final_estimate_revision(db_session, project)
+
+    assert final.id == latest.id
+
+
+def test_final_estimate_is_none_when_no_revision_precedes_completion(db_session: Session) -> None:
+    project = _make_project(db_session)
+    project.actual_completion_date = date(2026, 1, 1)
+    # Only revision is dated after the (unusually early) completion date.
+    create_estimate_revision(db_session, project, effective_date=date(2026, 6, 1))
+    db_session.commit()
+
+    assert get_final_estimate_revision(db_session, project) is None
+
+
+def test_final_estimate_uses_created_at_when_effective_date_missing(db_session: Session) -> None:
+    project = _make_project(db_session)
+    project.actual_completion_date = date(2026, 12, 31)
+    # No effective_date given -> falls back to created_at's date, which is "today".
+    only_revision = create_estimate_revision(db_session, project)
+    db_session.commit()
+
+    final = get_final_estimate_revision(db_session, project)
+    assert final.id == only_revision.id
+
+
+def test_estimate_revision_none_when_no_revisions_recorded(db_session: Session) -> None:
+    project = _make_project(db_session)
+    db_session.commit()
+
+    assert get_original_estimate_revision(db_session, project) is None
+    assert get_latest_estimate_revision(db_session, project) is None
+    assert get_final_estimate_revision(db_session, project) is None
+
+
+def test_build_estimate_accuracy_report_full_lifecycle(db_session: Session) -> None:
+    project = _make_project(db_session, name="Accuracy Report Project")
+    category = _make_category(db_session, "Materials")
+    project.actual_completion_date = date(2026, 12, 1)
+
+    original = create_estimate_revision(db_session, project, effective_date=date(2026, 1, 1))
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=original.id,
+            cost_category_id=category.id,
+            amount=Decimal("780000"),
+        )
+    )
+    create_estimate_revision(db_session, project, effective_date=date(2026, 6, 1))  # a mid-project revision
+    final = create_estimate_revision(db_session, project, is_final=True, effective_date=date(2026, 11, 1))
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=final.id,
+            cost_category_id=category.id,
+            amount=Decimal("820000"),
+        )
+    )
+    db_session.add(
+        ActualCost(project_id=project.id, cost_category_id=category.id, amount=Decimal("800000"))
+    )
+    db_session.commit()
+
+    report = build_estimate_accuracy_report(db_session, project)
+
+    assert report.original_revision_number == 1
+    assert report.original_estimate == Decimal("780000")
+    assert report.final_revision_number == 3
+    assert report.final_estimate == Decimal("820000")
+    assert report.actual_cost == Decimal("800000")
+    assert report.estimate_change == Decimal("40000")
+    # Original underestimated by 20,000; final overestimated by 20,000.
+    assert report.original_estimate_variance == Decimal("20000")
+    assert report.final_estimate_variance == Decimal("-20000")
+
+
+def test_build_estimate_accuracy_report_with_no_revisions_yet(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_category(db_session, "Materials")
+    db_session.add(
+        ActualCost(project_id=project.id, cost_category_id=category.id, amount=Decimal("500000"))
+    )
+    db_session.commit()
+
+    report = build_estimate_accuracy_report(db_session, project)
+
+    assert report.original_estimate is None
+    assert report.final_estimate is None
+    assert report.actual_cost == Decimal("500000")
+    assert report.estimate_change is None
+    assert report.original_estimate_variance is None
+
+
+def test_estimate_revision_is_independent_of_quotation_version(db_session: Session) -> None:
+    """A re-estimate made during execution (post-award) has no quotation
+    version to attach to at all — EstimateRevision must support that."""
+    project = _make_project(db_session)
+    category = _make_category(db_session, "Labour")
+    _award_project(db_session, project, Decimal("1000000"), Decimal("1000000"))
+
+    post_award_revision = create_estimate_revision(db_session, project)
+    assert post_award_revision.quotation_version_id is None
+
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=post_award_revision.id,
+            cost_category_id=category.id,
+            amount=Decimal("900000"),
+        )
+    )
+    db_session.commit()
+
+    assert sum_estimate_revision_cost(db_session, post_award_revision) == Decimal("900000")

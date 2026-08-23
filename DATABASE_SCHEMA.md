@@ -25,9 +25,12 @@ Company ──< Project >── Client
                 ├──< ProjectStatusHistory
                 ├──< ProjectVariation
                 ├──< Quotation ──< QuotationVersion ──1:1── BOQ ──< BOQLineItem >── Trade
-                │                                                                 └── CostCategory
-                ├──< EstimatedCost >── CostCategory
-                │                   └── Trade
+                │                       │                                        └── CostCategory
+                │                       └── (optional link) EstimateRevision
+                ├──< EstimateRevision (spans the whole project lifecycle,
+                │        not just quotation stage)
+                ├──< EstimatedCost >── CostCategory / Trade
+                │        (optionally tagged with QuotationVersion and/or EstimateRevision)
                 ├──< ActualCost >── CostCategory
                 │                └── Trade
                 │                └── Vendor
@@ -265,17 +268,73 @@ additive migration on this table, not a schema redesign.
 | payment_terms | str, nullable | e.g. "30 days" |
 | notes | text, nullable | |
 
-### 3.10 EstimatedCost
+### 3.10 EstimateRevision
 
-Line items making up the estimated cost for a project at tender stage.
-Linked to the quotation version so historical estimates are preserved even
-if a new version is created.
+A named, point-in-time snapshot of a project's cost estimate, used to
+preserve estimating history for multi-year accuracy analysis (see
+FINANCIAL_MODEL.md §14). Each re-estimate — at tender stage, at award, or
+at any point during execution — creates a NEW `EstimateRevision` row via
+`app.services.financial_service.create_estimate_revision`; existing
+revisions and their linked `EstimatedCost` rows are never edited or
+deleted, only added to.
+
+Deliberately independent of `QuotationVersion`: a quotation is only
+revised before award, but the cost estimate keeps evolving after award too
+(there is no quotation to hook a post-award re-forecast onto).
+`quotation_version_id` is an optional traceability link for revisions that
+do coincide with a quotation revision (e.g. revision 1 is naturally the
+estimate behind quotation version 1).
 
 | Column | Type | Notes |
 |---|---|---|
 | id | PK | |
 | project_id | FK → Project.id, required | |
-| quotation_version_id | FK → QuotationVersion.id, nullable, `SET NULL` | which estimate this belongs to |
+| quotation_version_id | FK → QuotationVersion.id, nullable | optional link to a coinciding quotation revision |
+| revision_number | int, required | sequential per project (1, 2, 3, ...), assigned automatically by `create_estimate_revision` |
+| effective_date | date, nullable | when this estimate is considered effective; falls back to `created_at`'s date if not given |
+| is_final | bool, required, default `False` | an explicit declaration that this is the project's closing estimate for accuracy analysis; at most one per project |
+| currency | Currency, default `AED` | |
+| notes | text, nullable | |
+
+Constraints: `UNIQUE(project_id, revision_number)`; `CHECK(revision_number > 0)`;
+a partial unique index on `project_id` `WHERE is_final = 1` enforces at
+most one final revision per project at the database level.
+
+No total is stored on this table — a revision's cost total is always
+computed on demand by summing its linked `EstimatedCost` rows
+(`app.services.financial_service.sum_estimate_revision_cost`), consistent
+with this project's "nothing computed is stored" rule (§6).
+
+- The **original** estimate is the revision with the lowest `revision_number`.
+- The **latest** estimate is the revision with the highest `revision_number`.
+- The **final** estimate is whichever revision has `is_final=True`; if none
+  is flagged, it falls back to the latest revision effective at or before
+  `Project.actual_completion_date`, or to the latest revision overall if
+  the project isn't completed yet.
+
+### 3.11 EstimatedCost
+
+Line items making up the estimated cost for a project. `quotation_version_id`
+and `estimate_revision_id` are independent, both-optional links serving two
+different purposes:
+
+- `quotation_version_id` ties a line to a specific tender-stage quotation
+  revision — used by the LIVE "current estimate" scoping in
+  `build_project_financial_snapshot` (§4).
+- `estimate_revision_id` ties a line to a named `EstimateRevision` snapshot
+  spanning the whole project lifecycle — used for original/final
+  estimating-accuracy analysis (§14 of FINANCIAL_MODEL.md).
+
+A row may populate either, both, or neither (neither is the case for
+simple, non-versioned cost entries, which remains fully supported for
+backward compatibility).
+
+| Column | Type | Notes |
+|---|---|---|
+| id | PK | |
+| project_id | FK → Project.id, required | |
+| quotation_version_id | FK → QuotationVersion.id, nullable, `SET NULL` | which quotation-stage estimate this belongs to |
+| estimate_revision_id | FK → EstimateRevision.id, nullable | which named estimate-history revision this belongs to |
 | cost_category_id | FK → CostCategory.id, required | |
 | trade_id | FK → Trade.id, nullable | |
 | description | str, nullable | |
@@ -286,7 +345,7 @@ if a new version is created.
 | currency | Currency, default `AED` | |
 | notes | text, nullable | |
 
-### 3.11 ActualCost
+### 3.12 ActualCost
 
 Costs actually incurred during execution, recognized on an accrual basis —
 independent of whether a linked vendor invoice has itself been paid (see
@@ -312,9 +371,9 @@ FINANCIAL_MODEL.md §7).
 
 A `CHECK` constraint (`ck_actual_costs_tax_amount_range`) keeps `tax_amount`
 sign-consistent with, and no larger in magnitude than, `amount` — the same
-pattern as `Invoice.tax_amount` (§3.12).
+pattern as `Invoice.tax_amount` (§3.13).
 
-### 3.12 Invoice
+### 3.13 Invoice
 
 Covers both directions: money owed *by* the client (sales/AR) and money
 owed *to* a vendor (purchase/AP), distinguished by `direction`. Exactly one
@@ -344,7 +403,7 @@ magnitude than, `amount` — including for negative (credit note) invoices,
 where both must also be negative or zero. See §6 for how these three
 figures relate to revenue recognition.
 
-### 3.13 Payment
+### 3.14 Payment
 
 Payments recorded against an invoice (either received from a client or
 paid to a vendor — direction is inherited from the parent invoice).
@@ -361,7 +420,7 @@ paid to a vendor — direction is inherited from the parent invoice).
 | is_retention_release | bool, required, default `False` | marks a payment that releases previously withheld retention rather than an ordinary progress payment — lets "retention outstanding" shrink correctly as retention is released, instead of only ever growing (see FINANCIAL_MODEL.md §6) |
 | notes | text, nullable | |
 
-### 3.14 ProjectVariation
+### 3.15 ProjectVariation
 
 Change/variation orders that adjust the contract value (and often cost)
 after award.
@@ -380,7 +439,7 @@ after award.
 | submitted_date | date, nullable | |
 | decided_date | date, nullable | |
 
-### 3.15 GoogleDriveDocument
+### 3.16 GoogleDriveDocument
 
 A reference to a file stored in Google Drive — never the file content, and
 never a source of financial figures on its own.
@@ -534,19 +593,26 @@ imports them for column definitions.
   keeping `tax_amount`/`retention_amount` sign-consistent with and no
   larger in magnitude than `amount`; `ActualCost` has an equivalent `CHECK`
   for `tax_amount` against `amount`; unique constraints on
-  `(quotation_id, version_number)`, `BOQ.quotation_version_id`,
-  `Project.project_code`, `GoogleDriveDocument.drive_file_id`. New NOT NULL
-  columns added after a table already exists (e.g. `ActualCost.is_tax_recoverable`,
+  `(quotation_id, version_number)`, `(EstimateRevision.project_id, revision_number)`,
+  `BOQ.quotation_version_id`, `Project.project_code`,
+  `GoogleDriveDocument.drive_file_id`; a `CHECK(revision_number > 0)` on
+  `EstimateRevision`; a partial unique index on
+  `EstimateRevision.project_id WHERE is_final = 1` enforcing at most one
+  final estimate revision per project. New NOT NULL columns added after a
+  table already exists (e.g. `ActualCost.is_tax_recoverable`,
   `ActualCost.payment_status`, `Payment.is_retention_release`) always carry
   an explicit `server_default`, so the Alembic migration that adds them can
   backfill existing rows instead of failing on non-empty tables.
 - **Validation**: Pydantic schemas at the service boundary validate input
   before it reaches the ORM (e.g. amounts ≥ 0, dates in sensible order).
 - **Audit**: `created_at`/`updated_at` on every table; `ProjectStatusHistory`
-  for status changes; quotation *versions* rather than in-place edits.
+  for status changes; quotation *versions* rather than in-place edits;
+  `EstimateRevision` snapshots rather than in-place cost-estimate edits
+  (§3.10, §14 of FINANCIAL_MODEL.md).
 - **Soft deletion**: applied to `Project`, `Client`, `Vendor`, `Quotation`,
-  `QuotationVersion`, `BOQ`, `BOQLineItem`, `EstimatedCost`, `ActualCost`,
-  `Invoice`, `Payment`, `ProjectVariation`. Lookup tables (`Trade`,
-  `CostCategory`, `Company`) and `GoogleDriveDocument` are hard-deletable
+  `QuotationVersion`, `BOQ`, `BOQLineItem`, `EstimateRevision`,
+  `EstimatedCost`, `ActualCost`, `Invoice`, `Payment`, `ProjectVariation`.
+  Lookup tables (`Trade`, `CostCategory`, `Company`) and
+  `GoogleDriveDocument` are hard-deletable
   since they carry no independent financial history.
 - **No destructive migrations**: see `ARCHITECTURE.md` §5.

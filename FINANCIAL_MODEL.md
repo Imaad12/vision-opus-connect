@@ -306,8 +306,116 @@ This exact scenario is encoded as
 | `retention_outstanding` | Aggregated input | withheld total minus released total |
 | `receivables_outstanding` | Aggregated input | amount due after retention minus cash received |
 | everything else (`quoted_profit`, `estimated_margin`, `revised_contract_value`, `actual_profit`, every variance, ...) | **Computed property** | Derived on demand from the inputs above — never separately stored |
+| `EstimateAccuracyReport.original_estimate` | Aggregated input | `SUM(EstimatedCost.amount)` for the project's original `EstimateRevision` (see §14) |
+| `EstimateAccuracyReport.final_estimate` | Aggregated input | `SUM(EstimatedCost.amount)` for the project's final `EstimateRevision` (see §14) |
+| `estimate_change`, `original_estimate_variance`, `final_estimate_variance`, and their percentages | **Computed property** | Derived from the two rows above and `actual_cost` — never separately stored |
 
 No computed figure is ever also persisted as a database column (see
-DATABASE_SCHEMA.md §13 "Data integrity" for the no-duplicate-totals rule);
-a `ProjectFinancialSnapshot` is always built fresh from source records via
-`app.services.financial_service.build_project_financial_snapshot`.
+DATABASE_SCHEMA.md §6 "Data integrity summary" for the no-duplicate-totals
+rule); a `ProjectFinancialSnapshot` is always built fresh from source
+records via `app.services.financial_service.build_project_financial_snapshot`.
+
+## 14. Estimating accuracy history — original, revised, and final
+
+This application exists to let Vision Contracting analyze its estimating
+accuracy over multiple years, which requires something the figures above
+don't provide on their own: **estimated cost must never be silently
+overwritten**. `ProjectFinancialSnapshot.estimated_cost` (§13) always
+reflects whatever the *current* best estimate is — perfectly fine for
+live profitability, but useless for asking "what did we originally think
+this would cost, and how far off were we?" once that original number has
+been replaced.
+
+### 14.1 EstimateRevision
+
+An `EstimateRevision` is a named, point-in-time snapshot of a project's
+cost estimate (see DATABASE_SCHEMA.md §3.10 for the full schema). Every
+re-estimate — at tender stage, at award, or at any point during
+execution — creates a **new** revision via
+`app.services.financial_service.create_estimate_revision`, which assigns
+the next sequential `revision_number`. `EstimatedCost` rows are added
+under that revision; existing revisions and their cost lines are never
+edited or deleted. This is what makes the history reliable: there is no
+code path that mutates a past estimate, only ones that add a new one.
+
+It is deliberately independent of `QuotationVersion` — a quotation is only
+revised before award, but the cost estimate keeps being refined well after
+award, during execution, with no quotation to attach a new revision to.
+
+### 14.2 Identifying original, latest, and final
+
+| Question | Answer |
+|---|---|
+| What did we originally estimate? | The `EstimatedCost` rows under the revision with the lowest `revision_number` (`get_original_estimate_revision`). |
+| What was our latest estimate (regardless of completion)? | The revision with the highest `revision_number` (`get_latest_estimate_revision`). |
+| What was our final estimate before/at completion? | See §14.3 (`get_final_estimate_revision`) — not always the same as "latest". |
+| What did the project actually cost? | Unchanged: `SUM` of each `ActualCost`'s recognized amount — completely separate from any estimate, exactly as before. |
+
+### 14.3 Determining the "final" estimate
+
+"Final" is not simply "the newest revision" — a business may keep
+re-forecasting after a project nominally completes (e.g. during a
+closeout review), and that shouldn't retroactively redefine what the
+estimate was *at* completion. `get_final_estimate_revision` resolves it in
+this order:
+
+1. **Explicit flag.** If a revision is marked `is_final=True`, that one
+   wins, unconditionally. A database constraint guarantees at most one
+   revision per project can carry this flag.
+2. **Latest before completion.** If no revision is flagged final and the
+   project has an `actual_completion_date`, the latest revision whose
+   `effective_date` (falling back to its `created_at` date) is at or
+   before that completion date is used. If no revision qualifies, the
+   result is `None` rather than guessing.
+3. **Latest overall.** If the project hasn't completed yet and nothing is
+   flagged final, "final" and "latest" are the same thing — there's
+   nothing to distinguish them from until the project actually finishes.
+
+### 14.4 Estimating accuracy
+
+`EstimateAccuracyReport` (built by
+`app.services.financial_service.build_estimate_accuracy_report`) compares
+the original and final revisions against actual cost:
+
+```
+estimate_change            = final_estimate - original_estimate
+original_estimate_variance = actual_cost - original_estimate
+final_estimate_variance    = actual_cost - final_estimate
+```
+
+Both variances reuse `calculate_cost_variance` — accuracy is just "actual
+minus a specific estimate," the same formula already used for the live
+cost variance, just anchored to a named historical revision instead of
+whatever the current estimate happens to be. A percentage view of each is
+also available (`original_estimate_variance_percentage`,
+`final_estimate_variance_percentage`), following the same
+`safe_margin`-based null/zero handling as every other percentage in this
+document.
+
+**Worked example.** A project's estimate evolves as follows:
+
+```
+Revision 1 (original, at tender):  estimated cost = AED 780,000
+Revision 2 (mid-project):          estimated cost = AED 800,000
+Revision 3 (is_final=True):        estimated cost = AED 820,000
+Actual cost at completion:                          AED 800,000
+
+estimate_change            = 820,000 - 780,000 =  40,000  (estimate grew)
+original_estimate_variance = 800,000 - 780,000 =  20,000  (original underestimated)
+final_estimate_variance    = 800,000 - 820,000 = -20,000  (final overestimated)
+```
+
+The original estimate and the final estimate were each wrong by the same
+magnitude but in opposite directions — a distinction that would be
+completely invisible if only "the current estimated cost" were ever kept.
+
+### 14.5 What this does not do
+
+This is intentionally narrow. It does not version-control every project
+field, and it does not touch how `ActualCost` works — actual costs remain
+exactly as separate from estimates as they were before this feature: no
+`ActualCost` row references an `EstimateRevision`, and nothing here
+changes `build_project_financial_snapshot`'s existing "current estimate"
+scoping (§13), which continues to drive live profitability unchanged.
+`EstimateRevision` exists solely to answer estimating-accuracy questions
+across a project's lifetime.

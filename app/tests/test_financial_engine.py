@@ -18,12 +18,14 @@ import pytest
 
 from app.core.enums import Currency, ProjectStatus
 from app.core.financial_engine import (
+    EstimateAccuracyReport,
     ProjectFinancialSnapshot,
     calculate_actual_margin,
     calculate_actual_profit,
     calculate_actual_revenue,
     calculate_amount_due_after_retention,
     calculate_cost_variance,
+    calculate_estimate_change,
     calculate_estimated_margin,
     calculate_estimated_profit,
     calculate_gross_amount,
@@ -510,3 +512,75 @@ class TestBriefScenarios:
         variance = calculate_margin_variance(estimated_margin, actual_margin)
         assert variance == actual_margin - estimated_margin
         assert variance > Decimal("0")
+
+
+class TestEstimateChange:
+    def test_estimate_grew(self) -> None:
+        assert calculate_estimate_change(Decimal("780000"), Decimal("820000")) == Decimal("40000")
+
+    def test_estimate_shrank(self) -> None:
+        assert calculate_estimate_change(Decimal("780000"), Decimal("750000")) == Decimal("-30000")
+
+    def test_no_original_estimate_is_unknown(self) -> None:
+        assert calculate_estimate_change(None, Decimal("820000")) is None
+
+    def test_no_final_estimate_is_unknown(self) -> None:
+        assert calculate_estimate_change(Decimal("780000"), None) is None
+
+
+class TestEstimateAccuracyReport:
+    def test_estimate_grew_and_original_was_more_accurate(self) -> None:
+        report = EstimateAccuracyReport(
+            original_revision_number=1,
+            original_estimate=Decimal("780000"),
+            final_revision_number=3,
+            final_estimate=Decimal("820000"),
+            actual_cost=Decimal("800000"),
+        )
+
+        assert report.estimate_change == Decimal("40000")
+        # Original underestimated by 20,000; final overestimated by 20,000.
+        assert report.original_estimate_variance == Decimal("20000")
+        assert report.final_estimate_variance == Decimal("-20000")
+        assert report.original_estimate_variance_percentage == quantize_expected("20000", "780000")
+        assert report.final_estimate_variance_percentage == quantize_expected("-20000", "820000")
+
+    def test_single_revision_original_equals_final(self) -> None:
+        report = EstimateAccuracyReport(
+            original_revision_number=1,
+            original_estimate=Decimal("780000"),
+            final_revision_number=1,
+            final_estimate=Decimal("780000"),
+            actual_cost=Decimal("800000"),
+        )
+
+        assert report.estimate_change == Decimal("0")
+        assert report.original_estimate_variance == report.final_estimate_variance == Decimal("20000")
+
+    def test_no_revisions_recorded_yet(self) -> None:
+        report = EstimateAccuracyReport(actual_cost=Decimal("800000"))
+
+        assert report.estimate_change is None
+        assert report.original_estimate_variance is None
+        assert report.final_estimate_variance is None
+
+    def test_no_actual_cost_yet(self) -> None:
+        report = EstimateAccuracyReport(
+            original_revision_number=1,
+            original_estimate=Decimal("780000"),
+            final_revision_number=1,
+            final_estimate=Decimal("780000"),
+        )
+
+        assert report.original_estimate_variance is None
+        assert report.final_estimate_variance is None
+        # The estimate-change figure doesn't need actual cost at all.
+        assert report.estimate_change == Decimal("0")
+
+    def test_is_immutable(self) -> None:
+        report = EstimateAccuracyReport(original_estimate=Decimal("1000"))
+        with pytest.raises(Exception):
+            report.original_estimate = Decimal("2000")  # type: ignore[misc]
+
+    def test_default_currency_is_aed(self) -> None:
+        assert EstimateAccuracyReport().currency == Currency.AED

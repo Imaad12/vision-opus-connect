@@ -306,6 +306,17 @@ def calculate_recognized_cost(
     return gross_amount
 
 
+def calculate_estimate_change(
+    original_estimate: Decimal | None, final_estimate: Decimal | None
+) -> Decimal | None:
+    """estimate_change = final_estimate - original_estimate.
+
+    How much the cost estimate drifted from the original (first) revision
+    to the final (closing) revision — positive means the estimate grew.
+    """
+    return safe_subtract(final_estimate, original_estimate)
+
+
 def calculate_line_total(quantity: Decimal | None, unit_rate: Decimal | None) -> Decimal | None:
     """line_total = quantity * unit_rate, rounded to 2 decimal places.
 
@@ -432,3 +443,50 @@ class ProjectFinancialSnapshot(BaseModel):
     @property
     def margin_variance(self) -> Decimal | None:
         return calculate_margin_variance(self.estimated_margin, self.actual_margin)
+
+
+class EstimateAccuracyReport(BaseModel):
+    """How a project's cost estimate evolved and how accurate it turned out
+    to be, comparing the ORIGINAL and FINAL `EstimateRevision` snapshots
+    against the actual cost.
+
+    Inputs are supplied by the caller (typically
+    `app.services.financial_service.build_estimate_accuracy_report`, which
+    locates the original/final `EstimateRevision` for a project and sums
+    their linked `EstimatedCost` rows); this model performs only the
+    deterministic arithmetic. `original_revision_number`/
+    `final_revision_number` are informational (which revision the figures
+    came from), not part of any calculation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    currency: Currency = DEFAULT_CURRENCY
+    original_revision_number: int | None = None
+    original_estimate: Decimal | None = None
+    final_revision_number: int | None = None
+    final_estimate: Decimal | None = None
+    actual_cost: Decimal | None = None
+
+    @property
+    def estimate_change(self) -> Decimal | None:
+        """How much the estimate grew (or shrank) from original to final."""
+        return calculate_estimate_change(self.original_estimate, self.final_estimate)
+
+    @property
+    def original_estimate_variance(self) -> Decimal | None:
+        """How far actual cost ended up from the ORIGINAL estimate."""
+        return calculate_cost_variance(self.original_estimate, self.actual_cost)
+
+    @property
+    def final_estimate_variance(self) -> Decimal | None:
+        """How far actual cost ended up from the FINAL estimate."""
+        return calculate_cost_variance(self.final_estimate, self.actual_cost)
+
+    @property
+    def original_estimate_variance_percentage(self) -> Decimal | None:
+        return safe_margin(self.original_estimate_variance, self.original_estimate)
+
+    @property
+    def final_estimate_variance_percentage(self) -> Decimal | None:
+        return safe_margin(self.final_estimate_variance, self.final_estimate)

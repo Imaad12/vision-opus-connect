@@ -16,6 +16,7 @@ from app.models import (
     Company,
     CostCategory,
     EstimatedCost,
+    EstimateRevision,
     Invoice,
     Payment,
     Project,
@@ -300,3 +301,84 @@ def test_project_variation_negative_approved_value_is_allowed(db_session: Sessio
     db_session.commit()
 
     assert variation.approved_value_change == Decimal("-25000")
+
+
+def test_estimate_revision_unique_per_project(db_session: Session) -> None:
+    project = _make_project(db_session)
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=1))
+    db_session.commit()
+
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=1))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_estimate_revision_number_must_be_positive(db_session: Session) -> None:
+    project = _make_project(db_session)
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=0))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_estimate_revision_only_one_final_per_project(db_session: Session) -> None:
+    project = _make_project(db_session)
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=1, is_final=True))
+    db_session.commit()
+
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=2, is_final=True))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_estimate_revision_multiple_non_final_revisions_allowed(db_session: Session) -> None:
+    project = _make_project(db_session)
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=1, is_final=False))
+    db_session.add(EstimateRevision(project_id=project.id, revision_number=2, is_final=False))
+    db_session.commit()
+
+    assert db_session.query(EstimateRevision).count() == 2
+
+
+def test_estimate_revision_final_flag_allowed_on_different_projects(db_session: Session) -> None:
+    project_a = _make_project(db_session)
+    project_b = _make_project(db_session)
+    db_session.add(EstimateRevision(project_id=project_a.id, revision_number=1, is_final=True))
+    db_session.add(EstimateRevision(project_id=project_b.id, revision_number=1, is_final=True))
+    db_session.commit()
+
+    assert db_session.query(EstimateRevision).count() == 2
+
+
+def test_estimated_cost_can_belong_to_an_estimate_revision(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session, "Materials")
+    revision = EstimateRevision(project_id=project.id, revision_number=1)
+    db_session.add(revision)
+    db_session.flush()
+
+    estimated = EstimatedCost(
+        project_id=project.id,
+        estimate_revision_id=revision.id,
+        cost_category_id=category.id,
+        amount=Decimal("780000"),
+    )
+    db_session.add(estimated)
+    db_session.commit()
+
+    assert estimated.estimate_revision_id == revision.id
+
+
+def test_estimated_cost_without_revision_still_works(db_session: Session) -> None:
+    """Backward compatibility: estimate_revision_id is optional, so existing
+    (or simple) EstimatedCost rows that don't participate in revision
+    history remain valid."""
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session, "Labour")
+    estimated = EstimatedCost(project_id=project.id, cost_category_id=category.id, amount=Decimal("1000"))
+    db_session.add(estimated)
+    db_session.commit()
+
+    assert estimated.estimate_revision_id is None
