@@ -458,6 +458,37 @@ never a source of financial figures on its own.
 | mime_type | str, nullable | |
 | synced_at | datetime, nullable | last time metadata was refreshed from Drive |
 
+### 3.17 ImportedDocument / ImportedQuotationCandidate / ImportedBoqLineCandidate / ImportAuditLogEntry (Phase 4)
+
+The local-import staging area — see `IMPORT_ARCHITECTURE.md` for the full
+pipeline. None of these tables are read by `app.core.financial_engine`;
+they exist purely so extracted data is reviewable before it becomes a real
+`Client`/`Project`/`Quotation`/`BOQ` row.
+
+**ImportedDocument** — one row per imported source file.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | PK | |
+| source_type | DocumentSourceType enum, required | `LOCAL` today; `GOOGLE_DRIVE` reserved for a future phase |
+| document_kind | ImportDocumentKind enum, required | `QUOTATION`, `BOQ`, or `UNKNOWN`, decided by the extractor |
+| original_path | text, required | reference only — the source file is never moved/copied/modified |
+| filename, extension, file_size | required | |
+| file_hash | str(64), indexed | SHA-256; used for duplicate detection, never uniquely constrained (deliberate re-import must stay possible) |
+| extraction_status | ExtractionStatus enum, required | `PENDING`, `EXTRACTING`, `EXTRACTION_COMPLETE`, `FAILED`, `UNSUPPORTED`, `OCR_REQUIRED` |
+| extraction_error | text, nullable | human-readable reason, never a raw traceback |
+| raw_extracted_data | text (JSON), nullable | the RAW layer — exactly what the parser found, never discarded |
+| review_status | ImportReviewStatus enum, required | `NEEDS_REVIEW`, `CONFIRMED`, `REJECTED` |
+| confirmed_at / rejected_at | datetime, nullable | |
+| resulting_client_id / resulting_project_id / resulting_quotation_id / resulting_quotation_version_id / resulting_boq_id | FK, nullable | populated only after `CONFIRM IMPORT` |
+| created_at (from `TimestampMixin`) | datetime | doubles as "import date" — a staging record is created at import time |
+
+**ImportedQuotationCandidate** — one-to-one with `ImportedDocument` (unique FK), the NORMALIZED quotation-shaped candidate data: `quotation_number`, `quotation_date`, `client_name`, `project_name`, `project_number`, `description`, `currency` (plain string — may not yet be a valid `Currency` member), `net_value`/`tax_value`/`gross_value`, `valid_until`, `payment_terms`, `notes`, plus `raw_values`/`field_confidence` (small JSON dicts keyed by this table's own field names — see `IMPORT_ARCHITECTURE.md` §6 for why a dict instead of one column pair per field).
+
+**ImportedBoqLineCandidate** — many-to-one with `ImportedDocument`, one row per candidate BOQ line: `group_label` (sheet/table name), `item_number`, `description`, `category_label` (free text — matched to a `Trade` only at confirm time), `unit`, `quantity`, `unit_rate`, `extracted_amount` (what the source said) and `calculated_amount` (`quantity * unit_rate`, via `calculate_line_total` — never a second copy of that formula) kept side by side, `amount_flagged` (material mismatch between the two).
+
+**ImportAuditLogEntry** — immutable append-only log per `ImportedDocument`: `event_type` (`IMPORTED`, `EXTRACTED`, `EDITED`, `CONFIRMED`, `REJECTED`), `occurred_at`, and for `EDITED` events `field_name`/`old_value`/`new_value` (plain text, a historical record — not read back as typed data).
+
 ## 4. Financial lifecycle
 
 This section walks the full quote-to-cash lifecycle end to end — Quotation
@@ -586,6 +617,12 @@ imports them for column definitions.
 | `VariationStatus` | `PROPOSED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `CANCELLED` |
 | `DocumentType` | `QUOTATION`, `BOQ`, `CONTRACT`, `INVOICE`, `DRAWING`, `PHOTO`, `CORRESPONDENCE`, `OTHER` |
 | `CostPaymentStatus` | `UNPAID`, `PARTIALLY_PAID`, `PAID` |
+| `DocumentSourceType` (Phase 4) | `LOCAL`, `GOOGLE_DRIVE` |
+| `ImportDocumentKind` (Phase 4) | `QUOTATION`, `BOQ`, `UNKNOWN` |
+| `ExtractionStatus` (Phase 4) | `PENDING`, `EXTRACTING`, `EXTRACTION_COMPLETE`, `FAILED`, `UNSUPPORTED`, `OCR_REQUIRED` |
+| `ImportReviewStatus` (Phase 4) | `NEEDS_REVIEW`, `CONFIRMED`, `REJECTED` |
+| `ConfidenceLevel` (Phase 4) | `HIGH`, `NEEDS_REVIEW`, `LOW` — categorical, never a fabricated percentage |
+| `ImportAuditEventType` (Phase 4) | `IMPORTED`, `EXTRACTED`, `EDITED`, `CONFIRMED`, `REJECTED` |
 
 ## 6. Data integrity summary
 

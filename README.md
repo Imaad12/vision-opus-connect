@@ -5,21 +5,25 @@ construction projects, quotations and BOQs, and to track estimated vs.
 actual costs and profitability across projects, clients, trades and cost
 categories.
 
-This repository has completed **Phase 3: the first usable native desktop
-application** — a PySide6 UI (Dashboard, Projects, Quotations, Costs,
-Profitability) built on the Phase 2 financial engine (see
-`FINANCIAL_MODEL.md`) and the Phase 1 foundation (database schema, module
-structure). There is still no Google Drive/OAuth integration, no AI, no
-document importing, and no production packaging (`.app`/DMG). See
-`ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, `FINANCIAL_MODEL.md`, and
-`UI_ARCHITECTURE.md` for the design, and "Roadmap" below for what comes
-next.
+This repository has completed **Phase 4: local document import and
+review** — pick quotation/BOQ files (PDF, Excel, Word, CSV/text, images)
+from your computer, review deterministically extracted candidate data, and
+confirm before anything is written to the business database. This builds
+on **Phase 3's** desktop UI (Dashboard, Projects, Quotations, Costs,
+Profitability), the Phase 2 financial engine (see `FINANCIAL_MODEL.md`),
+and the Phase 1 foundation (database schema, module structure). There is
+still no Google Drive/OAuth integration, no AI, and no production
+packaging (`.app`/DMG). See `ARCHITECTURE.md`, `DATABASE_SCHEMA.md`,
+`FINANCIAL_MODEL.md`, `UI_ARCHITECTURE.md`, and `IMPORT_ARCHITECTURE.md`
+for the design, and "Roadmap" below for what comes next.
 
 ## Requirements
 
 - Python 3.12+
-- macOS (target platform for the eventual desktop app) — development also
-  works on Linux, since PySide6/SQLite are cross-platform.
+- macOS or Windows (both are first-class target platforms as of Phase 4 —
+  see `IMPORT_ARCHITECTURE.md` §14) — development also works on Linux,
+  since PySide6/SQLite/the document-import libraries are all
+  cross-platform.
 
 ## Setup
 
@@ -37,14 +41,23 @@ pytest
 
 The test suite covers the financial calculation engine
 (`app/core/financial_engine.py`), the database-backed aggregation service
-(`app/services/financial_service.py`), and the Phase 3 service layer
+(`app/services/financial_service.py`), the Phase 3 service layer
 (`client_service`, `project_service`, `quotation_service`, `cost_service`,
 `dashboard_service`) — validation rules, business rules (e.g. a lost
 quotation never sets a contract value, an estimate revision's history is
-never mutated), and aggregation. The UI layer itself (`app/ui/`) doesn't
-have automated widget tests yet — see `UI_ARCHITECTURE.md` §11 — but was
-verified by scripted end-to-end runs driving the real dialogs and pages
-during development.
+never mutated), and aggregation — and the Phase 4 document-import pipeline
+(every importer in `app/importers/`, `app/core/import_normalization.py`,
+`app/core/import_extraction.py`, `app/services/import_service.py`,
+`app/services/import_matching.py`): file-type detection, hashing/duplicate
+detection, extraction for every supported format, normalization
+(including the explicit "don't guess an ambiguous number" rule), staging,
+review/edit, project/client matching, and confirm/reject. Test fixtures
+are small synthetic files generated at test time (see
+`IMPORT_ARCHITECTURE.md` for why `.xlsb` is tested via a mocked reader
+rather than a real binary fixture) — no real company documents are ever
+committed. The UI layer itself (`app/ui/`) doesn't have automated widget
+tests yet — see `UI_ARCHITECTURE.md` §11 — but was verified by scripted
+end-to-end runs driving the real dialogs and pages during development.
 
 ## Creating a local database
 
@@ -73,16 +86,39 @@ alembic upgrade head
 python -m app.ui.main
 ```
 
-This launches the full Phase 3 application: a persistent sidebar
-(Dashboard, Projects, Quotations, Costs, Analytics, Settings), project
+This launches the full application: a persistent sidebar (Dashboard,
+Projects, Quotations, Costs, Imports, Analytics, Settings), project
 creation and detail (Overview / Quotations / Estimated Costs / Actual
-Costs / Profitability / Documents tabs), and client management (via
-Settings → Manage Clients). On first run it automatically seeds the
-default cost-category reference data (Materials, Labour, Subcontractors,
-...) — see `UI_ARCHITECTURE.md` §10 for why that's safe to do
-automatically while fabricated *sample projects* are not.
+Costs / Profitability / Documents tabs), client management (via
+Settings → Manage Clients), and the Phase 4 Import Center. On first run it
+automatically seeds the default cost-category reference data (Materials,
+Labour, Subcontractors, ...) — see `UI_ARCHITECTURE.md` §10 for why that's
+safe to do automatically while fabricated *sample projects* are not.
 
 Application logs are written to `logs/app.log` (git-ignored, rotating).
+
+### Importing local documents
+
+From the **Imports** tab, click **Import Documents** to pick one or more
+local files (PDF, `.xlsx`/`.xlsm`/`.xlsb`/`.xls`, `.docx`, `.csv`/`.txt`,
+or an image). Each file is:
+
+1. Staged as-is — the original file is never moved, copied, or modified.
+2. Hashed (SHA-256); if the exact same file was already imported, you're
+   asked whether to import it again rather than silently duplicating or
+   silently blocking it.
+3. Run through a deterministic parser for its format (never AI, never a
+   network call) to produce candidate quotation/BOQ data.
+
+Click **Review** on any staged document to see what was extracted, edit
+any field, see suggested existing clients/projects, and either **Confirm
+Import** (after a final summary step) or **Reject** it. Nothing reaches
+`Client`/`Project`/`Quotation`/`BOQ` until you explicitly confirm — and
+confirming a quotation import never marks a project as awarded or records
+actual cost; those remain separate, explicit steps on the Quotations/Costs
+screens, exactly as if the data had been typed in by hand. See
+`IMPORT_ARCHITECTURE.md` for the full pipeline and every extraction/
+normalization rule.
 
 ### Optional: development sample data
 
@@ -104,19 +140,26 @@ See `ARCHITECTURE.md` for the full explanation. Short version:
 
 ```
 app/
-    core/          money/currency types, the financial calculation engine
+    core/          money/currency types, the financial calculation engine,
+                   import_normalization.py + import_extraction.py (pure,
+                   deterministic candidate-data extraction, see
+                   IMPORT_ARCHITECTURE.md)
     database/      SQLAlchemy engine, session, Base, init_db, seed data,
                    dev_seed_data.py (optional, dev-only sample projects)
-    models/        SQLAlchemy ORM entities
+    models/        SQLAlchemy ORM entities, incl. import_staging.py
+                   (ImportedDocument + candidate/audit-log staging tables)
     services/      business logic — project/client/quotation/cost_service
                    for CRUD + validation; financial_service.py and
-                   dashboard_service.py build read-only financial views
+                   dashboard_service.py build read-only financial views;
+                   import_service.py + import_matching.py drive the local
+                   document import pipeline
     integrations/  external systems behind interfaces (Google Drive today)
-    analytics/     profitability analysis (Phase 4+)
-    importers/     historical document import interfaces (Phase 4+)
+    analytics/     profitability analysis (future phase)
+    importers/     PDF/Excel/XLSB/Word/CSV/text/image document importers
+                   — see IMPORT_ARCHITECTURE.md for the full list
     ui/            PySide6 desktop application — see UI_ARCHITECTURE.md
                    for the full screen map and UI/service boundary
-    reports/       report generation (Phase 4+)
+    reports/       report generation (future phase)
     tests/         pytest suite
 migrations/        Alembic migration scripts
 ```
@@ -137,15 +180,19 @@ migrations/        Alembic migration scripts
 
 ## Roadmap (not yet built)
 
-- Phase 4: Google Drive OAuth + live sync, document importers (PDF/Excel/
-  Word), report generation, quotation document generation, cross-project
-  analytics/dashboards beyond the current portfolio summary.
-- Phase 5: AI-assisted analysis over historical estimating/profitability
-  data (read-only with respect to financial figures).
-- Production packaging (`.app` bundle / DMG) once the application
-  stabilizes further.
+- Phase 5: Google Drive OAuth + live sync (using `ImportedDocument`'s
+  already-present `source_type`/`GOOGLE_DRIVE` distinction), AI-assisted
+  extraction as a reviewed aid on top of the Phase 4 deterministic
+  pipeline, report generation, quotation document generation,
+  cross-project analytics/dashboards beyond the current portfolio
+  summary.
+- AI-assisted analysis over historical estimating/profitability data
+  (read-only with respect to financial figures) — a later phase, after
+  Drive integration.
+- Production packaging (`.app` bundle / DMG / `.exe` installer) once the
+  application stabilizes further.
 
-## Open decisions before Phase 4
+## Open decisions before the next phase
 
 - Multi-currency FX conversion: still explicitly out of scope. All figures
   rolled into one project's snapshot — and the dashboard's portfolio
@@ -158,4 +205,10 @@ migrations/        Alembic migration scripts
   browser already on the Estimated Costs tab (see `UI_ARCHITECTURE.md`
   §11 and `FINANCIAL_MODEL.md` §7).
 - Automated GUI testing (e.g. `pytest-qt`) for the widget layer, once the
-  Phase 3 screens stabilize — see `UI_ARCHITECTURE.md` §11.
+  screens stabilize — see `UI_ARCHITECTURE.md` §11.
+- Moving `run_extraction` onto a background worker if/when document
+  volumes make synchronous extraction noticeably block the UI — see
+  `IMPORT_ARCHITECTURE.md` §16.
+- Whether BOQ category/trade text should get smarter (fuzzy) matching to
+  existing `Trade` records, beyond today's exact-name match — see
+  `IMPORT_ARCHITECTURE.md` §16.
