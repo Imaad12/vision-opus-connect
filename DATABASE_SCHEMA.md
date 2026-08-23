@@ -149,6 +149,7 @@ The central entity.
 | client_id | FK → Client.id, required | |
 | name | str, required | |
 | project_code | str, nullable, unique | internal reference number |
+| description | text, nullable | short description shown on the project overview; distinct from `notes` (free-form internal notes) |
 | primary_trade_id | FK → Trade.id, nullable | |
 | status | ProjectStatus enum, required, default `LEAD` | current status (see §4) |
 | tender_submission_date | date, nullable | |

@@ -715,3 +715,51 @@ def test_estimate_revision_is_independent_of_quotation_version(db_session: Sessi
     db_session.commit()
 
     assert sum_estimate_revision_cost(db_session, post_award_revision) == Decimal("900000")
+
+
+def test_snapshot_estimated_cost_uses_only_latest_revision_not_all_of_them(db_session: Session) -> None:
+    """Regression test: a project with multiple estimate revisions (e.g.
+    revision 2 copy-forwarded from revision 1, per
+    app.services.cost_service.start_new_estimate_revision) must count only
+    the latest revision's lines toward the live snapshot's estimated_cost —
+    counting every revision's lines would double (or triple) count
+    copied-forward lines."""
+    project = _make_project(db_session)
+    category = _make_category(db_session, "Materials")
+
+    revision_1 = create_estimate_revision(db_session, project)
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=revision_1.id,
+            cost_category_id=category.id,
+            amount=Decimal("780000"),
+        )
+    )
+    db_session.commit()
+
+    # Revision 2 "copies forward" the same line (a new row, same amount)
+    # plus one additional line, as the real UI flow does.
+    revision_2 = create_estimate_revision(db_session, project)
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=revision_2.id,
+            cost_category_id=category.id,
+            amount=Decimal("780000"),
+        )
+    )
+    db_session.add(
+        EstimatedCost(
+            project_id=project.id,
+            estimate_revision_id=revision_2.id,
+            cost_category_id=category.id,
+            amount=Decimal("40000"),
+        )
+    )
+    db_session.commit()
+
+    snapshot = build_project_financial_snapshot(db_session, project)
+
+    # Only revision 2's total (820,000), never revision_1 + revision_2 (1,600,000).
+    assert snapshot.estimated_cost == Decimal("820000")

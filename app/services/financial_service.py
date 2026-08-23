@@ -74,17 +74,34 @@ def _get_relevant_quotation_version(session: Session, project: Project) -> Quota
     return session.execute(stmt).scalars().first()
 
 
-def _estimated_cost_condition(quotation_version: QuotationVersion | None):
-    """EstimatedCost rows that belong to the relevant quotation version, plus
-    project-level rows not tied to any specific version. Rows tied to a
-    *different* (superseded) quotation version are excluded so an old,
-    lost revision's estimate is never double-counted against the current
-    one."""
+def _estimated_cost_condition(
+    quotation_version: QuotationVersion | None, latest_revision: EstimateRevision | None
+):
+    """Which EstimatedCost rows count toward the project's current
+    estimated cost.
+
+    If the project has any `EstimateRevision` history (created via
+    `app.services.cost_service`), the current estimate is unambiguous:
+    exactly the latest revision's lines — never anything from an older
+    revision, since `start_new_estimate_revision` copies lines forward, so
+    counting both the old and new revision would double-count every copied
+    line.
+
+    Otherwise (no revision history exists for this project — e.g. legacy
+    data, or a project whose only cost lines were entered directly against
+    a quotation version), fall back to the original Phase 2 scoping: rows
+    tied to the relevant quotation version, plus version-independent rows
+    not tied to any revision either.
+    """
+    if latest_revision is not None:
+        return EstimatedCost.estimate_revision_id == latest_revision.id
+
+    no_revision = EstimatedCost.estimate_revision_id.is_(None)
     if quotation_version is not None:
         return (EstimatedCost.quotation_version_id == quotation_version.id) | (
-            EstimatedCost.quotation_version_id.is_(None)
+            EstimatedCost.quotation_version_id.is_(None) & no_revision
         )
-    return EstimatedCost.quotation_version_id.is_(None)
+    return EstimatedCost.quotation_version_id.is_(None) & no_revision
 
 
 def _sum_actual_cost(session: Session, project: Project) -> Decimal | None:
@@ -113,13 +130,14 @@ def build_project_financial_snapshot(session: Session, project: Project) -> Proj
     """
     quotation_version = _get_relevant_quotation_version(session, project)
     quoted_value = quotation_version.quoted_value if quotation_version else None
+    latest_revision = get_latest_estimate_revision(session, project)
 
     estimated_cost_rows = (
         session.execute(
             select(EstimatedCost.amount).where(
                 EstimatedCost.project_id == project.id,
                 EstimatedCost.is_deleted.is_(False),
-                _estimated_cost_condition(quotation_version),
+                _estimated_cost_condition(quotation_version, latest_revision),
             )
         )
         .scalars()
@@ -209,7 +227,7 @@ def build_project_financial_snapshot(session: Session, project: Project) -> Proj
 # --- Estimate revision history (for multi-year estimating-accuracy analysis) ---
 
 
-def _get_estimate_revisions(session: Session, project: Project) -> list[EstimateRevision]:
+def list_estimate_revisions(session: Session, project: Project) -> list[EstimateRevision]:
     """All of a project's estimate revisions, oldest first, never including
     soft-deleted ones."""
     stmt = (
@@ -236,7 +254,7 @@ def create_estimate_revision(
     rows are never touched, so estimating history is preserved by
     construction rather than by convention.
     """
-    existing = _get_estimate_revisions(session, project)
+    existing = list_estimate_revisions(session, project)
     next_revision_number = existing[-1].revision_number + 1 if existing else 1
 
     revision = EstimateRevision(
@@ -255,13 +273,13 @@ def create_estimate_revision(
 
 def get_original_estimate_revision(session: Session, project: Project) -> EstimateRevision | None:
     """The first estimate ever recorded for this project (lowest revision_number)."""
-    revisions = _get_estimate_revisions(session, project)
+    revisions = list_estimate_revisions(session, project)
     return revisions[0] if revisions else None
 
 
 def get_latest_estimate_revision(session: Session, project: Project) -> EstimateRevision | None:
     """The most recently created estimate revision, regardless of project status."""
-    revisions = _get_estimate_revisions(session, project)
+    revisions = list_estimate_revisions(session, project)
     return revisions[-1] if revisions else None
 
 
@@ -280,7 +298,7 @@ def get_final_estimate_revision(session: Session, project: Project) -> EstimateR
        latest revision overall — the "latest" and "final" figures are the
        same thing until the project actually finishes.
     """
-    revisions = _get_estimate_revisions(session, project)
+    revisions = list_estimate_revisions(session, project)
     if not revisions:
         return None
 

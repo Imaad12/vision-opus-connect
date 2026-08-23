@@ -3,13 +3,19 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Boolean, CheckConstraint, Date, Index, UniqueConstraint, text, true
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import DEFAULT_CURRENCY, CostPaymentStatus, Currency
 from app.database.base import Base, SoftDeleteMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.lookups import CostCategory
+    from app.models.vendor import Vendor
 
 
 class EstimateRevision(Base, TimestampMixin, SoftDeleteMixin):
@@ -111,6 +117,8 @@ class EstimatedCost(Base, TimestampMixin, SoftDeleteMixin):
     )
     notes: Mapped[str | None] = mapped_column(Text)
 
+    cost_category: Mapped["CostCategory"] = relationship("CostCategory", foreign_keys=[cost_category_id])
+
     def __repr__(self) -> str:
         return f"EstimatedCost(id={self.id!r}, project_id={self.project_id!r}, amount={self.amount!r})"
 
@@ -166,6 +174,9 @@ class ActualCost(Base, TimestampMixin, SoftDeleteMixin):
     )
     incurred_date: Mapped[date | None] = mapped_column(Date)
     notes: Mapped[str | None] = mapped_column(Text)
+
+    cost_category: Mapped["CostCategory"] = relationship("CostCategory", foreign_keys=[cost_category_id])
+    vendor: Mapped["Vendor | None"] = relationship("Vendor", foreign_keys=[vendor_id])
 
     def __repr__(self) -> str:
         return f"ActualCost(id={self.id!r}, project_id={self.project_id!r}, amount={self.amount!r})"

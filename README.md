@@ -5,14 +5,14 @@ construction projects, quotations and BOQs, and to track estimated vs.
 actual costs and profitability across projects, clients, trades and cost
 categories.
 
-This repository has completed **Phase 2: the financial/project accounting
-engine** — a deterministic service that aggregates a project's quotations,
-variations, costs, invoices, and payments into a complete profitability
-snapshot (see `FINANCIAL_MODEL.md`), built on the Phase 1 foundation
-(database schema, module structure). There is still no full UI, no AI
-integration, no Google OAuth, no document importing, and no quotation
-generation. See `ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, and
-`FINANCIAL_MODEL.md` for the design, and "Roadmap" below for what comes
+This repository has completed **Phase 3: the first usable native desktop
+application** — a PySide6 UI (Dashboard, Projects, Quotations, Costs,
+Profitability) built on the Phase 2 financial engine (see
+`FINANCIAL_MODEL.md`) and the Phase 1 foundation (database schema, module
+structure). There is still no Google Drive/OAuth integration, no AI, no
+document importing, and no production packaging (`.app`/DMG). See
+`ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, `FINANCIAL_MODEL.md`, and
+`UI_ARCHITECTURE.md` for the design, and "Roadmap" below for what comes
 next.
 
 ## Requirements
@@ -35,10 +35,16 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite focuses on the financial calculation engine
-(`app/core/financial_engine.py`) and the database-backed aggregation
-service (`app/services/financial_service.py`), which are the parts of the
-system that must be provably correct.
+The test suite covers the financial calculation engine
+(`app/core/financial_engine.py`), the database-backed aggregation service
+(`app/services/financial_service.py`), and the Phase 3 service layer
+(`client_service`, `project_service`, `quotation_service`, `cost_service`,
+`dashboard_service`) — validation rules, business rules (e.g. a lost
+quotation never sets a contract value, an estimate revision's history is
+never mutated), and aggregation. The UI layer itself (`app/ui/`) doesn't
+have automated widget tests yet — see `UI_ARCHITECTURE.md` §11 — but was
+verified by scripted end-to-end runs driving the real dialogs and pages
+during development.
 
 ## Creating a local database
 
@@ -61,15 +67,36 @@ alembic revision --autogenerate -m "describe the change"
 alembic upgrade head
 ```
 
-## Launching the (placeholder) desktop shell
+## Launching the desktop application
 
 ```bash
 python -m app.ui.main
 ```
 
-This opens a minimal PySide6 window that connects to the database and
-displays a project count, purely to prove the UI → services → database
-seam works. It is not the product UI.
+This launches the full Phase 3 application: a persistent sidebar
+(Dashboard, Projects, Quotations, Costs, Analytics, Settings), project
+creation and detail (Overview / Quotations / Estimated Costs / Actual
+Costs / Profitability / Documents tabs), and client management (via
+Settings → Manage Clients). On first run it automatically seeds the
+default cost-category reference data (Materials, Labour, Subcontractors,
+...) — see `UI_ARCHITECTURE.md` §10 for why that's safe to do
+automatically while fabricated *sample projects* are not.
+
+Application logs are written to `logs/app.log` (git-ignored, rotating).
+
+### Optional: development sample data
+
+To manually exercise the UI with a few realistic projects (one under
+budget, one over budget, one lost quotation), run:
+
+```bash
+python -m app.database.dev_seed_data
+```
+
+This is a development-only tool — it is never imported by `app.ui.main`
+and never runs automatically. All rows it creates are clearly named
+(`[DEV] ...` project names, a `(DEV DATA)`-tagged client) so they're easy
+to distinguish from real business data and safe to delete.
 
 ## Project layout
 
@@ -78,15 +105,18 @@ See `ARCHITECTURE.md` for the full explanation. Short version:
 ```
 app/
     core/          money/currency types, the financial calculation engine
-    database/      SQLAlchemy engine, session, Base, init_db, seed data
+    database/      SQLAlchemy engine, session, Base, init_db, seed data,
+                   dev_seed_data.py (optional, dev-only sample projects)
     models/        SQLAlchemy ORM entities
-    services/      business logic — financial_service.py builds a
-                   ProjectFinancialSnapshot from the database
+    services/      business logic — project/client/quotation/cost_service
+                   for CRUD + validation; financial_service.py and
+                   dashboard_service.py build read-only financial views
     integrations/  external systems behind interfaces (Google Drive today)
-    analytics/     profitability analysis (Phase 3+)
-    importers/     historical document import interfaces (Phase 3+)
-    ui/            PySide6 desktop app (placeholder shell today)
-    reports/       report generation (Phase 3+)
+    analytics/     profitability analysis (Phase 4+)
+    importers/     historical document import interfaces (Phase 4+)
+    ui/            PySide6 desktop application — see UI_ARCHITECTURE.md
+                   for the full screen map and UI/service boundary
+    reports/       report generation (Phase 4+)
     tests/         pytest suite
 migrations/        Alembic migration scripts
 ```
@@ -107,20 +137,25 @@ migrations/        Alembic migration scripts
 
 ## Roadmap (not yet built)
 
-- Phase 3: profitability analytics/dashboards, document importers
-  (PDF/Excel/Word), full PySide6 UI, report generation.
-- Phase 4: Google Drive OAuth + live sync.
+- Phase 4: Google Drive OAuth + live sync, document importers (PDF/Excel/
+  Word), report generation, quotation document generation, cross-project
+  analytics/dashboards beyond the current portfolio summary.
 - Phase 5: AI-assisted analysis over historical estimating/profitability
   data (read-only with respect to financial figures).
+- Production packaging (`.app` bundle / DMG) once the application
+  stabilizes further.
 
-## Open decisions before Phase 3
+## Open decisions before Phase 4
 
 - Multi-currency FX conversion: still explicitly out of scope. All figures
-  rolled into one project's snapshot must share a currency (see
-  `FINANCIAL_MODEL.md` / `DATABASE_SCHEMA.md` §4.3).
+  rolled into one project's snapshot — and the dashboard's portfolio
+  totals — assume a single currency (see `FINANCIAL_MODEL.md` /
+  `DATABASE_SCHEMA.md` §4.3, `UI_ARCHITECTURE.md` §11).
 - Trade taxonomy and supplier vs. subcontractor fields: unchanged open
   question from Phase 1.
-- Whether the UI needs a "freeze the quote-time cost estimate" view, given
-  `ProjectFinancialSnapshot.estimated_cost` always reflects the *current*
-  best estimate rather than a historical snapshot per revision (see
-  `FINANCIAL_MODEL.md` §7).
+- Whether the Overview/Profitability views should ever surface a
+  historical revision's estimate for comparison, beyond the read-only
+  browser already on the Estimated Costs tab (see `UI_ARCHITECTURE.md`
+  §11 and `FINANCIAL_MODEL.md` §7).
+- Automated GUI testing (e.g. `pytest-qt`) for the widget layer, once the
+  Phase 3 screens stabilize — see `UI_ARCHITECTURE.md` §11.
