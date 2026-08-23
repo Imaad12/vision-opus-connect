@@ -5,11 +5,14 @@ construction projects, quotations and BOQs, and to track estimated vs.
 actual costs and profitability across projects, clients, trades and cost
 categories.
 
-This repository is currently in **Phase 1: foundation** — the database
-schema, financial calculation engine, and module structure that everything
-else will be built on. There is no full UI, no AI integration, no Google
-OAuth, and no document importing yet. See `ARCHITECTURE.md` and
-`DATABASE_SCHEMA.md` for the design, and "Roadmap" below for what comes
+This repository has completed **Phase 2: the financial/project accounting
+engine** — a deterministic service that aggregates a project's quotations,
+variations, costs, invoices, and payments into a complete profitability
+snapshot (see `FINANCIAL_MODEL.md`), built on the Phase 1 foundation
+(database schema, module structure). There is still no full UI, no AI
+integration, no Google OAuth, no document importing, and no quotation
+generation. See `ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, and
+`FINANCIAL_MODEL.md` for the design, and "Roadmap" below for what comes
 next.
 
 ## Requirements
@@ -32,9 +35,10 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite currently focuses on the financial calculation engine
-(`app/core/financial_engine.py`), which is the part of the system that must
-be provably correct.
+The test suite focuses on the financial calculation engine
+(`app/core/financial_engine.py`) and the database-backed aggregation
+service (`app/services/financial_service.py`), which are the parts of the
+system that must be provably correct.
 
 ## Creating a local database
 
@@ -74,12 +78,13 @@ See `ARCHITECTURE.md` for the full explanation. Short version:
 ```
 app/
     core/          money/currency types, the financial calculation engine
-    database/      SQLAlchemy engine, session, Base, init_db
+    database/      SQLAlchemy engine, session, Base, init_db, seed data
     models/        SQLAlchemy ORM entities
-    services/      business logic (grows in later phases)
+    services/      business logic — financial_service.py builds a
+                   ProjectFinancialSnapshot from the database
     integrations/  external systems behind interfaces (Google Drive today)
-    analytics/     profitability analysis (Phase 2+)
-    importers/     historical document import interfaces (Phase 2+)
+    analytics/     profitability analysis (Phase 3+)
+    importers/     historical document import interfaces (Phase 3+)
     ui/            PySide6 desktop app (placeholder shell today)
     reports/       report generation (Phase 3+)
     tests/         pytest suite
@@ -102,15 +107,20 @@ migrations/        Alembic migration scripts
 
 ## Roadmap (not yet built)
 
-- Phase 2: services layer (CRUD + business rules), profitability analytics,
-  document importers (PDF/Excel/Word), full PySide6 UI.
-- Phase 3: Google Drive OAuth + live sync, report generation.
-- Phase 4: AI-assisted analysis over historical estimating/profitability
+- Phase 3: profitability analytics/dashboards, document importers
+  (PDF/Excel/Word), full PySide6 UI, report generation.
+- Phase 4: Google Drive OAuth + live sync.
+- Phase 5: AI-assisted analysis over historical estimating/profitability
   data (read-only with respect to financial figures).
 
-## Open decisions before Phase 2
+## Open decisions before Phase 3
 
-See the end of the Phase 1 delivery summary for a list of business
-questions (e.g. how "actual revenue" should be derived, the trade
-taxonomy, supplier vs. subcontractor fields) worth confirming before
-deeper implementation.
+- Multi-currency FX conversion: still explicitly out of scope. All figures
+  rolled into one project's snapshot must share a currency (see
+  `FINANCIAL_MODEL.md` / `DATABASE_SCHEMA.md` §4.3).
+- Trade taxonomy and supplier vs. subcontractor fields: unchanged open
+  question from Phase 1.
+- Whether the UI needs a "freeze the quote-time cost estimate" view, given
+  `ProjectFinancialSnapshot.estimated_cost` always reflects the *current*
+  best estimate rather than a historical snapshot per revision (see
+  `FINANCIAL_MODEL.md` §7).

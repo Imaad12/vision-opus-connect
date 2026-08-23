@@ -2,20 +2,24 @@
 the estimate/actual separation, exercised against a real (in-memory)
 SQLite database rather than mocked."""
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.enums import InvoiceDirection, QuotationStatus, VendorType
+from app.core.enums import CostPaymentStatus, InvoiceDirection, QuotationStatus, VendorType
 from app.models import (
+    ActualCost,
     Client,
     Company,
     CostCategory,
     EstimatedCost,
     Invoice,
+    Payment,
     Project,
+    ProjectVariation,
     Quotation,
     QuotationVersion,
     Vendor,
@@ -171,6 +175,128 @@ def test_estimated_and_actual_costs_are_independent(db_session: Session) -> None
     assert estimated.amount == Decimal("70000")
     # Nothing about recording an EstimatedCost touches actual_costs at all;
     # the tables are entirely separate.
-    from app.models import ActualCost
-
     assert db_session.query(ActualCost).count() == 0
+
+
+def _make_cost_category(session: Session, name: str = "Materials") -> CostCategory:
+    category = CostCategory(name=name)
+    session.add(category)
+    session.flush()
+    return category
+
+
+def test_estimated_cost_quantity_unit_rate_fields(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session)
+    estimated = EstimatedCost(
+        project_id=project.id,
+        cost_category_id=category.id,
+        description="Cement bags",
+        quantity=Decimal("100"),
+        unit="bag",
+        unit_rate=Decimal("25.50"),
+        amount=Decimal("2550.00"),
+        notes="Bulk order",
+    )
+    db_session.add(estimated)
+    db_session.commit()
+
+    assert estimated.quantity == Decimal("100")
+    assert estimated.unit == "bag"
+    assert estimated.unit_rate == Decimal("25.50")
+    assert estimated.notes == "Bulk order"
+
+
+def test_actual_cost_defaults(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session, "Labour")
+    actual = ActualCost(
+        project_id=project.id,
+        cost_category_id=category.id,
+        amount=Decimal("10000"),
+    )
+    db_session.add(actual)
+    db_session.commit()
+
+    assert actual.is_tax_recoverable is True
+    assert actual.payment_status == CostPaymentStatus.UNPAID
+    assert actual.tax_amount is None
+
+
+def test_actual_cost_tax_amount_exceeding_amount_is_rejected(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session, "Equipment")
+    actual = ActualCost(
+        project_id=project.id,
+        cost_category_id=category.id,
+        amount=Decimal("1000"),
+        tax_amount=Decimal("2000"),
+    )
+    db_session.add(actual)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_actual_cost_non_recoverable_tax_flag(db_session: Session) -> None:
+    project = _make_project(db_session)
+    category = _make_cost_category(db_session, "Subcontractors")
+    actual = ActualCost(
+        project_id=project.id,
+        cost_category_id=category.id,
+        amount=Decimal("10500"),
+        tax_amount=Decimal("500"),
+        is_tax_recoverable=False,
+        reference_number="INV-2024-001",
+        payment_status=CostPaymentStatus.PAID,
+    )
+    db_session.add(actual)
+    db_session.commit()
+
+    assert actual.is_tax_recoverable is False
+    assert actual.reference_number == "INV-2024-001"
+    assert actual.payment_status == CostPaymentStatus.PAID
+
+
+def test_payment_retention_release_flag_defaults_false(db_session: Session) -> None:
+    project = _make_project(db_session)
+    invoice = _make_client_invoice(db_session, project, amount=Decimal("100000"))
+    db_session.flush()
+    payment = Payment(invoice_id=invoice.id, amount=Decimal("50000"), paid_date=date(2026, 1, 1))
+    db_session.add(payment)
+    db_session.commit()
+
+    assert payment.is_retention_release is False
+
+
+def test_payment_retention_release_flag_can_be_set(db_session: Session) -> None:
+    project = _make_project(db_session)
+    invoice = _make_client_invoice(
+        db_session, project, amount=Decimal("100000"), retention_amount=Decimal("5000")
+    )
+    db_session.flush()
+    release = Payment(
+        invoice_id=invoice.id,
+        amount=Decimal("5000"),
+        paid_date=date(2026, 6, 1),
+        is_retention_release=True,
+    )
+    db_session.add(release)
+    db_session.commit()
+
+    assert release.is_retention_release is True
+
+
+def test_project_variation_negative_approved_value_is_allowed(db_session: Session) -> None:
+    from app.core.enums import VariationStatus
+
+    project = _make_project(db_session)
+    variation = ProjectVariation(
+        project_id=project.id,
+        approved_value_change=Decimal("-25000"),
+        status=VariationStatus.APPROVED,
+    )
+    db_session.add(variation)
+    db_session.commit()
+
+    assert variation.approved_value_change == Decimal("-25000")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date
+from sqlalchemy import Boolean, CheckConstraint, Date, false
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -78,7 +78,14 @@ class Invoice(Base, TimestampMixin, SoftDeleteMixin):
 
 
 class Payment(Base, TimestampMixin, SoftDeleteMixin):
-    """A payment recorded against an invoice."""
+    """A payment recorded against an invoice.
+
+    `is_retention_release` marks a payment that releases previously
+    withheld retention (see `Invoice.retention_amount`), as opposed to an
+    ordinary progress payment — this is what lets "retention outstanding"
+    be computed as withheld-to-date minus released-to-date rather than
+    only ever growing. It defaults to False (an ordinary payment).
+    """
 
     __tablename__ = "payments"
 
@@ -91,6 +98,9 @@ class Payment(Base, TimestampMixin, SoftDeleteMixin):
     paid_date: Mapped[date] = mapped_column(Date, nullable=False)
     method: Mapped[PaymentMethod | None] = mapped_column(SAEnum(PaymentMethod, native_enum=False))
     reference: Mapped[str | None] = mapped_column(String(100))
+    is_retention_release: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     notes: Mapped[str | None] = mapped_column(Text)
 
     def __repr__(self) -> str:

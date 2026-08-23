@@ -40,30 +40,35 @@ Company ──< Project >── Client
 
 ## 2. The financial model, at the schema level
 
-The nine figures from the brief map onto stored data plus the deterministic
-engine in `app/core/financial_engine.py` like this:
+Three stages of profit — quoted (pre-award), estimated (post-award), and
+actual (during/after execution) — map onto stored data plus the
+deterministic engine in `app/core/financial_engine.py` like this:
 
 | Figure | Source |
 |---|---|
-| Quoted revenue | `QuotationVersion.quoted_value` (denormalized total of its `BOQLineItem`s, kept in sync by the service layer) |
-| Estimated cost | `SUM(EstimatedCost.amount)` for the project's current estimate |
-| Estimated profit | **Computed**, never stored: `quoted_value - estimated_cost` |
-| Contract / awarded value | `Project.contract_value` (+ currency), set when a `QuotationVersion` is marked `WON` |
-| Actual cost | `SUM(ActualCost.amount)` for the project |
-| Actual revenue | **Computed**: `Project.contract_value + SUM(ProjectVariation.approved_value_change WHERE status=APPROVED)` |
+| Quoted value | `QuotationVersion.quoted_value` (denormalized total of its `BOQLineItem`s, kept in sync by the service layer) |
+| Estimated cost | `SUM(EstimatedCost.amount)` scoped to the relevant `quotation_version_id` |
+| Quoted profit | **Computed**, never stored: `quoted_value - estimated_cost` |
+| Awarded contract value | `Project.contract_value` (+ currency), set when a `QuotationVersion` is marked `WON`; the ORIGINAL value, never mutated afterward |
+| Estimated profit | **Computed**: `awarded_contract_value - estimated_cost` (uses the AWARDED value, not the quoted value — see §4) |
+| Actual cost | **Computed**: sum of each `ActualCost`'s recognized (tax-adjusted) amount for the project |
+| Revised contract value / actual revenue | **Computed**: `Project.contract_value + SUM(ProjectVariation.approved_value_change WHERE status=APPROVED)` |
 | Actual profit | **Computed**: `actual_revenue - actual_cost` |
-| Estimated margin | **Computed**: `estimated_profit / quoted_value * 100` |
-| Actual margin | **Computed**: `actual_profit / actual_revenue * 100` |
+| Quoted/estimated/actual margin | **Computed**: the respective profit divided by its own revenue basis `* 100` |
+| Cost/revenue/profit/margin variance | **Computed**: actual minus its estimated/awarded baseline |
 
 Nothing computed is stored as a column. Storing derived financial figures
-invites drift between the stored value and its inputs; the engine
-recomputes them on demand from the rows above.
+invites drift between the stored value and its inputs; a
+`ProjectFinancialSnapshot` (`app/core/financial_engine.py`) is instead
+built fresh on demand from the rows above by
+`app.services.financial_service.build_project_financial_snapshot`.
 
 "Actual revenue" here is the **accrual** figure (contract value + approved
 variations) — the amount the company is entitled to, not necessarily what
 has been billed or collected yet. See §4 for the full lifecycle and the
 precise distinctions between quoted / awarded / invoiced revenue and cash
-received, and for how VAT and retention are kept out of these figures.
+received, and `FINANCIAL_MODEL.md` for the complete narrative including
+worked examples, VAT/retention treatment, and rounding rules.
 
 ## 3. Entities
 
@@ -121,6 +126,14 @@ Subcontract, Overhead, ...). Self-referencing `parent_id` allows grouping
 | name | str, required | |
 | code | str, nullable, unique | |
 | parent_id | FK → CostCategory.id, nullable | |
+
+`app/database/seed.py` optionally seeds an initial set (Materials, Labour,
+Subcontractors, Equipment, Transport, Plant, Permits, Professional Fees,
+Other) via `seed_default_cost_categories()`, which is idempotent by name.
+This is plain data, not business logic — nothing in
+`app/core/financial_engine.py` or `app/services/financial_service.py`
+hard-codes a category name or branches on one, so categories can be
+renamed, added, or removed at any time without a code change.
 
 ### 3.5 Project
 
@@ -266,12 +279,18 @@ if a new version is created.
 | cost_category_id | FK → CostCategory.id, required | |
 | trade_id | FK → Trade.id, nullable | |
 | description | str, nullable | |
-| amount | Numeric(14,2), required | |
+| quantity | Numeric(14,3), nullable | optional — a cost may instead be entered directly as a lump sum |
+| unit | str, nullable | e.g. `m2`, `no`, `LS` |
+| unit_rate | Numeric(14,2), nullable | |
+| amount | Numeric(14,2), required | the line's total; equals `quantity * unit_rate` when both are given (kept in sync by the service layer via `calculate_line_total`, not a DB trigger — same convention as `BOQLineItem.total`) |
 | currency | Currency, default `AED` | |
+| notes | text, nullable | |
 
 ### 3.11 ActualCost
 
-Costs actually incurred during execution.
+Costs actually incurred during execution, recognized on an accrual basis —
+independent of whether a linked vendor invoice has itself been paid (see
+FINANCIAL_MODEL.md §7).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -281,10 +300,19 @@ Costs actually incurred during execution.
 | trade_id | FK → Trade.id, nullable | |
 | vendor_id | FK → Vendor.id, nullable | who was paid |
 | invoice_id | FK → Invoice.id, nullable, `SET NULL` | the vendor invoice this cost came from, if any |
+| reference_number | str, nullable | a free-text invoice/receipt reference, usable even before a formal `Invoice` row exists |
 | description | str, nullable | |
-| amount | Numeric(14,2), required | |
+| amount | Numeric(14,2), required | GROSS amount incurred, inclusive of tax (consistent with `Invoice.amount`) |
+| tax_amount | Numeric(14,2), nullable | the VAT/tax component *within* `amount`; `None` means untracked/zero |
+| is_tax_recoverable | bool, required, default `True` | when `True`, VAT is excluded from recognized project cost (reclaimable, not a real cost); when `False`, the full gross amount is recognized as cost — see FINANCIAL_MODEL.md §5 |
 | currency | Currency, default `AED` | |
+| payment_status | CostPaymentStatus enum, required, default `UNPAID` | tracked independently of `invoice_id`/`Payment`, for costs recorded before a formal vendor invoice exists |
 | incurred_date | date, nullable | |
+| notes | text, nullable | |
+
+A `CHECK` constraint (`ck_actual_costs_tax_amount_range`) keeps `tax_amount`
+sign-consistent with, and no larger in magnitude than, `amount` — the same
+pattern as `Invoice.tax_amount` (§3.12).
 
 ### 3.12 Invoice
 
@@ -330,6 +358,7 @@ paid to a vendor — direction is inherited from the parent invoice).
 | paid_date | date, required | |
 | method | PaymentMethod enum, nullable | |
 | reference | str, nullable | cheque number / transfer reference |
+| is_retention_release | bool, required, default `False` | marks a payment that releases previously withheld retention rather than an ordinary progress payment — lets "retention outstanding" shrink correctly as retention is released, instead of only ever growing (see FINANCIAL_MODEL.md §6) |
 | notes | text, nullable | |
 
 ### 3.14 ProjectVariation
@@ -373,26 +402,30 @@ never a source of financial figures on its own.
 
 This section walks the full quote-to-cash lifecycle end to end — Quotation
 → revisions → award → variations → invoices → payments → final profit —
-and defines, precisely, the ten terms the business uses loosely in
+and defines, precisely, the terms the business uses loosely in
 conversation but which must never be confused in the data model. Getting
 any of these conflated is the single most common way a "profit" number
-ends up wrong.
+ends up wrong. **See `FINANCIAL_MODEL.md` for the full, authoritative
+narrative** (all definitions, worked AED examples, and rounding rules);
+this section is the schema-level summary and points at the underlying
+tables.
 
 ### 4.1 Terminology
 
 | Term | What it is | Where it lives |
 |---|---|---|
-| **Quoted revenue** | The value submitted to the client in a specific quotation revision, before award. Exclusive of VAT by convention. | `QuotationVersion.quoted_value` |
-| **Awarded / contract revenue (original)** | The value actually agreed at award — may differ from the quoted value after negotiation. Fixed once set; never mutated by variations. Exclusive of VAT by convention. | `Project.contract_value` |
-| **Awarded / contract revenue (revised/current)** | The original contract value plus all *approved* variations to date. This is the accrual "entitled to bill" figure the brief calls **actual revenue**. | Computed: `calculate_actual_revenue()` — never stored |
-| **Invoiced revenue** | The sum of CLIENT-direction invoice face values actually raised so far. On an in-progress project this normally lags the revised contract value (work done but not yet certified/billed); at project completion the two should converge. | `SUM(Invoice.amount WHERE direction=CLIENT)`, net of tax via `calculate_net_of_tax()` |
-| **Cash received** | The sum of payments actually collected against client invoices — lags invoiced revenue by whatever is unpaid or held as retention. | `SUM(Payment.amount)` for those invoices |
-| **Estimated cost** | The cost planned at tender stage for a given quotation version. | `SUM(EstimatedCost.amount)` for the relevant `quotation_version_id` |
-| **Actual cost** | Cost actually incurred/accrued during execution, recognized independently of whether the vendor has been paid yet (accrual, not cash, basis). | `SUM(ActualCost.amount)` for the project |
-| **Estimated profit** | `quoted_value - estimated_cost` | Computed |
-| **Actual profit** | `actual_revenue - actual_cost`, i.e. revised contract value minus actual cost | Computed |
-| **VAT / tax** | A pass-through liability collected on the government's behalf. Never revenue, never profit. Held as a component *within* `Invoice.amount`, removed via `calculate_net_of_tax()` before any figure is treated as revenue or cost. | `Invoice.tax_amount` |
-| **Retention** | A portion of a certified invoice withheld by the counterparty (in either direction — a client withholds from us, and we may withhold from a subcontractor) until a later release point (typically the defects liability period). Retained revenue is still *invoiced* revenue; it is simply not yet *collectible* cash. | `Invoice.retention_amount`, removed via `calculate_amount_due_after_retention()` |
+| **Quoted value** | The value submitted to the client in a specific quotation revision, before award. Exclusive of VAT by convention. | `QuotationVersion.quoted_value` |
+| **Awarded contract value** | The value actually agreed at award — may differ from the quoted value after negotiation. Fixed once set; never mutated by variations. Exclusive of VAT by convention. | `Project.contract_value` |
+| **Revised contract value** (= **actual revenue**) | `awarded_contract_value + approved_variation_value`. The accrual "entitled to bill" figure. | Computed: `calculate_revised_contract_value()` / `calculate_actual_revenue()` — never stored |
+| **Invoiced revenue** | The sum of CLIENT-direction invoice face values actually raised so far, **net of VAT**. On an in-progress project this normally lags the revised contract value (work done but not yet certified/billed); at project completion the two should converge. | `SUM(Invoice.amount WHERE direction=CLIENT)`, net of tax via `calculate_net_of_tax()` |
+| **Cash received** | The sum of payments actually collected against client invoices — lags invoiced revenue by whatever is unpaid or held as retention. Never treated as revenue. | `SUM(Payment.amount)` for those invoices |
+| **Estimated cost** | The cost planned for a project, at the relevant quotation stage. | `SUM(EstimatedCost.amount)` scoped to the relevant `quotation_version_id` |
+| **Actual cost** | Cost actually incurred/accrued during execution, recognized independently of whether the vendor has been paid yet (accrual, not cash, basis), and net of recoverable VAT. | `SUM` of each `ActualCost`'s recognized amount via `calculate_recognized_cost()` |
+| **Quoted profit/margin** | Pre-award: `quoted_value - estimated_cost`, and that profit over `quoted_value`. A bid/no-bid figure. | Computed |
+| **Estimated profit/margin** | Post-award: `awarded_contract_value - estimated_cost`, and that profit over `awarded_contract_value`. Uses the AWARDED value, never the quoted value. | Computed |
+| **Actual profit/margin** | `actual_revenue - actual_cost`, and that profit over `actual_revenue` | Computed |
+| **VAT / tax** | A pass-through liability collected on the government's behalf. Never revenue, never profit. Held as a component *within* `Invoice.amount`/`ActualCost.amount`, removed via `calculate_net_of_tax()` before any figure is treated as revenue or cost — unless `ActualCost.is_tax_recoverable=False`, in which case it genuinely is a cost. | `Invoice.tax_amount`, `ActualCost.tax_amount` |
+| **Retention** | A portion of a certified invoice withheld by the counterparty (in either direction — a client withholds from us, and we may withhold from a subcontractor) until a later release point (typically the defects liability period). Retained revenue is still *invoiced* revenue; it is simply not yet *collectible* cash, and it is never a project cost. | `Invoice.retention_amount`, removed via `calculate_amount_due_after_retention()`; released via a `Payment` with `is_retention_release=True` |
 
 **The one invariant that matters most:** `quoted_value`, `contract_value`,
 and `ProjectVariation` amounts are always exclusive of VAT/tax. VAT only
@@ -492,15 +525,21 @@ imports them for column definitions.
 | `PaymentMethod` | `BANK_TRANSFER`, `CHEQUE`, `CASH`, `CARD`, `OTHER` |
 | `VariationStatus` | `PROPOSED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `CANCELLED` |
 | `DocumentType` | `QUOTATION`, `BOQ`, `CONTRACT`, `INVOICE`, `DRAWING`, `PHOTO`, `CORRESPONDENCE`, `OTHER` |
+| `CostPaymentStatus` | `UNPAID`, `PARTIALLY_PAID`, `PAID` |
 
 ## 6. Data integrity summary
 
 - **Constraints**: required foreign keys are `NOT NULL`; `Invoice` has
   `CHECK` constraints tying `direction` to which party FK is populated, and
   keeping `tax_amount`/`retention_amount` sign-consistent with and no
-  larger in magnitude than `amount`; unique constraints on
+  larger in magnitude than `amount`; `ActualCost` has an equivalent `CHECK`
+  for `tax_amount` against `amount`; unique constraints on
   `(quotation_id, version_number)`, `BOQ.quotation_version_id`,
-  `Project.project_code`, `GoogleDriveDocument.drive_file_id`.
+  `Project.project_code`, `GoogleDriveDocument.drive_file_id`. New NOT NULL
+  columns added after a table already exists (e.g. `ActualCost.is_tax_recoverable`,
+  `ActualCost.payment_status`, `Payment.is_retention_release`) always carry
+  an explicit `server_default`, so the Alembic migration that adds them can
+  backfill existing rows instead of failing on non-empty tables.
 - **Validation**: Pydantic schemas at the service boundary validate input
   before it reaches the ORM (e.g. amounts ≥ 0, dates in sensible order).
 - **Audit**: `created_at`/`updated_at` on every table; `ProjectStatusHistory`

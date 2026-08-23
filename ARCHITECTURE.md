@@ -51,13 +51,14 @@ and safe to reuse from the UI, a script, a report, or (later) an API.
 app/
     core/            money/currency types, financial calculation engine,
                      shared enums, exceptions, settings
-    database/        engine, session factory, declarative Base, init_db
+    database/        engine, session factory, declarative Base, init_db, seed data
     models/          SQLAlchemy models, one module per domain area
-    services/        business logic (project service, quotation service, ...)
+    services/        business logic — financial_service.py aggregates DB
+                     rows into a ProjectFinancialSnapshot; project_service.py, etc.
     integrations/    GoogleDriveService interface + stub implementation
-    analytics/       profitability analysis built on pandas (Phase 2+)
+    analytics/       profitability analysis built on pandas (Phase 3+)
     importers/       BaseImporter interface + format-specific stubs
-    ui/              PySide6 application shell (Phase 2+ for full UI)
+    ui/              PySide6 application shell (Phase 3+ for full UI)
     reports/         report generation (Phase 3+)
     tests/           pytest suite
 migrations/          Alembic migration scripts
@@ -107,19 +108,21 @@ phase, it will consume the *outputs* of this engine (read-only) to generate
 commentary — it will never write to cost/revenue tables or replace this
 engine's arithmetic.
 
-The engine distinguishes nine figures, exactly as specified in the brief:
+The engine recognizes three stages of profit, each with its own revenue
+basis — see `FINANCIAL_MODEL.md` for the complete, authoritative
+definitions and worked examples:
 
 | Figure | Definition |
 |---|---|
-| Quoted revenue | Total value of the submitted quotation (BOQ total) |
+| Quoted value | Total value of the submitted quotation (BOQ total) |
 | Estimated cost | Sum of estimated cost line items for the project |
-| Estimated profit | `quoted_value - estimated_cost` |
-| Contract / awarded value | The value actually agreed once a quotation is won (may differ from quoted value after negotiation) |
-| Actual cost | Sum of actual cost line items recorded during execution |
-| Actual revenue | Contract value plus net approved variations (what the company is actually entitled to bill for) |
-| Actual profit | `actual_revenue - actual_cost` |
-| Estimated margin | `estimated_profit / quoted_value * 100` |
-| Actual margin | `actual_profit / actual_revenue * 100` |
+| Quoted profit/margin | `quoted_value - estimated_cost`, and that profit over `quoted_value` — a pre-award bid/no-bid figure |
+| Awarded contract value | The value actually agreed once a quotation is won (may differ from quoted value after negotiation); fixed once set, never mutated by variations |
+| Estimated profit/margin | `awarded_contract_value - estimated_cost`, and that profit over `awarded_contract_value` — uses the AWARDED value, never the quoted value |
+| Revised contract value / actual revenue | Awarded contract value plus approved variations only (never pending/rejected ones) |
+| Actual cost | Sum of each actual cost's recognized (tax-adjusted) amount, recorded during execution |
+| Actual profit/margin | `actual_revenue - actual_cost`, and that profit over `actual_revenue` |
+| Cost/revenue/profit/margin variance | Actual minus its estimated/awarded baseline |
 
 All monetary values use `decimal.Decimal`, never `float` — see `app/core/money.py`.
 Division guards against `None` and `0` denominators and returns `None`
