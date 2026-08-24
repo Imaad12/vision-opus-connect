@@ -38,9 +38,12 @@ from app.core.enums import (
     ExtractionStatus,
     ImportAuditEventType,
     ImportReviewStatus,
+    OcrConfidenceStatus,
 )
 from app.core.financial_engine import calculate_line_total
 from app.core.import_extraction import extract_candidates
+from app.core.ocr_confidence import compute_ocr_confidence_status
+from app.core.ocr_extraction import extract_via_ocr
 from app.importers.base import RawExtraction, build_default_registry
 from app.models import (
     BOQ,
@@ -199,6 +202,7 @@ def _serialize_raw_extraction(raw: RawExtraction) -> str:
             "text": raw.text,
             "tables": [dataclasses.asdict(table) for table in raw.tables],
             "warnings": raw.warnings,
+            "ocr_pages": raw.ocr_pages,
         }
     )
 
@@ -246,10 +250,29 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
         return
 
     if raw.requires_ocr:
-        document.extraction_status = ExtractionStatus.OCR_REQUIRED
-        document.extraction_error = None
-        session.flush()
-        return
+        try:
+            ocr_raw = extract_via_ocr(path)
+        except Exception as exc:  # noqa: BLE001 - matches the guarantee this function already
+            # makes for the deterministic importer above: never raise out of run_extraction.
+            logger.exception("OCR extraction failed for imported document %s (%s)", document.id, document.filename)
+            document.extraction_status = ExtractionStatus.FAILED
+            document.extraction_error = f"OCR extraction failed: {exc}"
+            session.flush()
+            return
+        if ocr_raw.requires_ocr or ocr_raw.unsupported:
+            # OCR engine unavailable, or the file couldn't even be opened
+            # for OCR -- same terminal/re-attemptable states Phase 4
+            # already has, never a fabricated candidate.
+            document.extraction_status = (
+                ExtractionStatus.UNSUPPORTED if ocr_raw.unsupported else ExtractionStatus.OCR_REQUIRED
+            )
+            document.extraction_error = ocr_raw.unsupported_reason
+            document.raw_extracted_data = _serialize_raw_extraction(ocr_raw)
+            session.flush()
+            return
+        raw = ocr_raw
+        document.raw_extracted_data = _serialize_raw_extraction(raw)
+        document.extraction_engine = "ocr"
 
     result = extract_candidates(raw)
     document.document_kind = result.document_kind
@@ -521,6 +544,19 @@ def confirm_import(
     candidate = document.quotation_candidate
     if candidate is None:
         raise ValidationError("Nothing to confirm — extraction did not produce any quotation data.")
+
+    if document.extraction_engine == "ocr":
+        # Defensive, service-layer gate (never trust the UI alone): an
+        # OCR-derived candidate can never be confirmed while a mandatory
+        # financial field is still missing/unresolved. This does not apply
+        # to deterministically-parsed documents, which keep Phase 4's
+        # original, unchanged behavior.
+        status = compute_ocr_confidence_status(candidate, list(document.boq_line_candidates))
+        if status == OcrConfidenceStatus.BLOCKED:
+            raise ValidationError(
+                "This document was extracted via OCR and is missing the quotation date and/or "
+                "net quoted value, so it cannot be confirmed yet. Enter both before confirming."
+            )
 
     if client_id is not None:
         client = client_service.get_client(session, client_id)

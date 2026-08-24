@@ -85,18 +85,59 @@ result or crashing, `WordImporter` immediately reports
 `unsupported=True` with a message asking the user to save the file as
 `.docx` and re-import. No converter is bundled in Phase 4.
 
-## 5. Scanned PDFs and images: OCR is out of scope, on purpose
+## 5. Scanned PDFs and images: local OCR (OCR Phase 1)
 
 `PDFImporter` extracts text page-by-page; if the average extractable text
-per page falls below a small threshold, the document is staged as
-`ExtractionStatus.OCR_REQUIRED` instead of returning near-empty candidate
-data. `ImageImporter` (`.png`/`.jpg`/`.tif`/...) *always* reports
-`requires_ocr` — there is no text layer to read at all. Per the Phase 4
-brief, no OCR is attempted and no external/cloud OCR service is called; an
-`OCR_REQUIRED` document is simply staged for manual review/entry. This is
-a deliberate application of the same principle as password-protected PDFs
-and corrupt files: **never fabricate structured data from a source the
-deterministic pipeline cannot actually read.**
+per page falls below a small threshold, the document is flagged
+`requires_ocr` instead of returning near-empty candidate data.
+`ImageImporter` (`.png`/`.jpg`/`.tif`/...) *always* reports `requires_ocr`
+— there is no text layer to read at all. Phase 4 stopped there
+(`ExtractionStatus.OCR_REQUIRED`, manual entry only); **OCR Phase 1** adds
+one thing on top: `app.services.import_service.run_extraction` now
+attempts local, offline OCR (`app.core.ocr_extraction.extract_via_ocr`)
+before giving up, still ending in `OCR_REQUIRED` if the OCR engine itself
+is unavailable/fails, or `UNSUPPORTED` if the file can't even be opened.
+No external/cloud OCR service is ever called — see §13.
+
+The design is deliberately "OCR produces the exact same `RawExtraction`
+every other importer already produces, then everything downstream is
+unchanged":
+
+- **`app.core.ocr_engine`** wraps Tesseract (`pytesseract`, optional
+  dependency — see `pyproject.toml`'s `ocr` extra) behind an `OcrEngine`
+  interface. `is_available()` is checked before anything is attempted; an
+  engine that isn't installed degrades to `OCR_REQUIRED`, never a crash.
+- **`app.core.ocr_extraction.extract_via_ocr`** rasterizes each page (via
+  `pymupdf`, the same library `PDFImporter` already uses) and calls the
+  engine once per page. A single bad page (render failure, engine
+  exception, empty result) is caught and recorded per-page — it never
+  aborts the rest of the document.
+- **`app.core.ocr_table_reconstruction`** turns one page's OCR word
+  positions into a grid (`ExtractedTable`, the same dataclass
+  `pymupdf.find_tables()` already produces) using a conservative
+  gap-based column heuristic. If the layout isn't confidently table-shaped
+  it returns nothing rather than guessing — the page is instead flagged
+  with a warning so BOQ lines can be added/corrected manually.
+- **`app.core.import_extraction.extract_candidates`** (unchanged) then
+  runs over OCR'd text/tables exactly as it runs over a clean text layer
+  — the same label matching, the same `reconcile_net_tax_gross` VAT
+  handling, the same BOQ header/column detection. OCR never gets its own
+  parsing logic.
+- **`app.core.ocr_confidence.compute_ocr_confidence_status`** is a small,
+  three-state gate (`OcrConfidenceStatus`: `HIGH_CONFIDENCE` /
+  `REVIEW_REQUIRED` / `BLOCKED`) computed on demand from the candidate's
+  *current* values. `BLOCKED` — the quotation date and/or net value is
+  still missing — is the one state that actually disables Confirm, both
+  in `ImportReviewDialog` and defensively inside `confirm_import` itself
+  (`ImportedDocument.extraction_engine == "ocr"` gates this; a
+  deterministically-parsed document is unaffected). The other two states
+  are informational badges only — human review remains the unconditional
+  gate for every document regardless of confidence, exactly as in Phase 4.
+
+This is still the same principle as password-protected PDFs and corrupt
+files: **never fabricate structured data from a source that can't
+actually be read** — OCR just moves the boundary of what "can be read"
+covers, without changing what happens on either side of it.
 
 ## 6. Raw extraction vs. normalized candidate data
 
@@ -361,3 +402,24 @@ file, confirming without selecting a client/project).
   unset rather than guessing.
 - **No date-format ambiguity flag** (unlike amounts): day-first parsing is
   applied as a fixed business assumption rather than flagged per-value.
+- **OCR (Phase 1) has not been run against real Tesseract in this
+  environment**: `pytesseract`/Tesseract are not installed in the
+  development sandbox this was built in, so OCR's own tests inject a fake
+  `OcrEngine` at that one boundary — the page rasterization and result
+  aggregation around it are real. Running against the real archive scans
+  with real Tesseract installed is a pre-merge action item, not something
+  this phase could verify directly.
+- **BOQ table reconstruction from OCR is a best-effort heuristic**
+  (gap-based column splitting on word positions), not true table
+  structure detection — it declines (rather than guesses) when a page's
+  layout is inconsistent, but a scan with unusual column spacing may
+  still be flagged "uncertain" more often than a human would consider
+  necessary. Manual BOQ entry remains available in every case.
+- **No conflict detection for multiple distinct totals on one page**: if
+  a document prints more than one "total"-shaped label with different
+  values, the existing first-match-wins label matching (unchanged from
+  Phase 4) picks one; there is no explicit multi-value warning yet. Human
+  review remains the safety net regardless of which value was picked up.
+- **No Arabic-language verification**: Tesseract supports Arabic language
+  packs, but this was not exercised against real archive documents in
+  this environment (see the OCR design review's open questions).
