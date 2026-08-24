@@ -22,16 +22,23 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.orm import Session
 
-from app.core.enums import ExtractionStatus, ImportReviewStatus
+from app.core.enums import ConfidenceLevel, ExtractionStatus, ImportReviewStatus, SegmentReviewStatus
 from app.importers.base import ExtractedTable, RawExtraction
 from app.services import client_service, project_service, quotation_service
 from app.services.errors import RevisionConflictError, ValidationError
 from app.services.import_service import (
+    accept_segment,
     check_for_duplicate,
     compute_file_hash,
     confirm_import,
+    exclude_segment,
     get_imported_document,
+    list_segments,
+    lock_segments,
+    merge_segments,
+    move_segment_boundary,
     reject_import,
+    split_segment,
     stage_document,
 )
 
@@ -430,10 +437,15 @@ def test_original_source_file_is_byte_identical_after_the_full_pipeline(db_sessi
 # with a total from a completely different one.
 
 
-def test_multi_quotation_file_creates_no_candidate(db_session: Session, tmp_path: Path) -> None:
+def test_multi_quotation_file_is_split_into_independent_segments(db_session: Session, tmp_path: Path) -> None:
     """Direct reproduction of the real scenario: page 1's quotation A
     (444 REV/18) followed later in the same file by page 8's quotation B
-    (VN/QU/412/18) -- must never merge into a single candidate."""
+    (VN/QU/412/18). Superseded behavior (pre-segmentation): the whole file
+    was flatly refused. Current behavior: sequential segmentation (see
+    `app.core.import_segmentation`) proposes two independent segments, and
+    -- the core safety invariant -- once locked, each segment's candidate
+    can only ever contain its OWN page's data. Neither reference/date ever
+    merges with the other's fields, and B's total never reaches A."""
     path = _placeholder_scan(tmp_path)
     text = (
         "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
@@ -443,11 +455,29 @@ def test_multi_quotation_file_creates_no_candidate(db_session: Session, tmp_path
     with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
         document = stage_document(db_session, path)
 
-    assert document.extraction_status == ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
-    assert document.quotation_candidate is None
-    assert list(document.boq_line_candidates) == []
-    assert "444 REV / 18" in document.extraction_error
-    assert "VN/QU/412/18" in document.extraction_error
+    assert document.extraction_status == ExtractionStatus.SEGMENTS_PROPOSED
+    assert document.quotation_candidate is None  # no unsegmented candidate -- only per-segment ones
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    assert segments[0].detected_quotation_number == "444 REV / 18"
+    assert segments[1].detected_quotation_number == "VN/QU/412/18"
+
+    # No boundary -- including this HIGH-confidence one -- is final until
+    # explicitly accepted; nothing can be locked/extracted yet.
+    assert all(s.review_status == SegmentReviewStatus.PROPOSED for s in segments)
+    with pytest.raises(ValidationError, match="must be accepted or excluded"):
+        lock_segments(db_session, document)
+
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.quotation_candidate.quotation_number == "444 REV / 18"
+    assert seg_a.quotation_candidate.net_value is None  # never sees B's total
+    assert seg_b.quotation_candidate.quotation_number == "VN/QU/412/18"
+    assert seg_b.quotation_candidate.net_value == Decimal("151955.00")
     # The raw OCR text is still preserved for manual review, never discarded.
     assert document.raw_extracted_data is not None
     import json
@@ -499,13 +529,15 @@ def test_single_quotation_file_is_unaffected_by_the_multi_quotation_check(
 def test_lost_reference_on_one_document_cannot_splice_its_neighbors_total(
     db_session: Session, tmp_path: Path
 ) -> None:
-    """Adversarial-review finding, reproduced end-to-end: document A's
-    reference/date are clean; document B's reference line was entirely
-    lost to OCR (a real, observed failure mode), but its different date
-    and net value survived. Reference-counting alone found only one
-    reference (A's) and would have built a single candidate combining A's
-    reference/date with B's unrelated total -- every field individually
-    HIGH confidence, fully confirmable, and wrong. Must now be caught."""
+    """Adversarial-review finding, reproduced end-to-end through
+    segmentation: document A's reference/date are clean; document B's
+    reference line was entirely lost to OCR (a real, observed failure
+    mode), but its different date and net value survived. This is the
+    genuinely ambiguous case (no reference on B's page to prove it's a
+    different document) -- segmentation surfaces it as a LOW-confidence
+    boundary rather than silently merging it into A's segment, per the
+    "uncertain boundary -> manual review, never a silent guess" rule.
+    Either way, the two pieces are never spliced into one candidate."""
     path = _placeholder_scan(tmp_path)
     text = (
         "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
@@ -515,18 +547,38 @@ def test_lost_reference_on_one_document_cannot_splice_its_neighbors_total(
     with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
         document = stage_document(db_session, path)
 
-    assert document.extraction_status == ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+    assert document.extraction_status == ExtractionStatus.SEGMENTS_PROPOSED
     assert document.quotation_candidate is None
-    assert "distinct dates" in document.extraction_error
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    assert segments[1].boundary_confidence == ConfidenceLevel.LOW.value
+    assert "no reference on this page" in segments[1].boundary_signals
 
+    # Still nothing to confirm -- the boundary hasn't even been accepted,
+    # let alone locked into a candidate.
     client = client_service.create_client(db_session, name="Some Client")
     project = project_service.create_project(db_session, name="Some Project", client_id=client.id)
-    with pytest.raises(ValidationError, match="Nothing to confirm"):
-        confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+    with pytest.raises(ValidationError, match="This segment must have its boundary accepted"):
+        confirm_import(
+            db_session, document, segment=segments[0], client_id=client.id, project_id=project.id
+        )
 
     from app.models import Quotation
 
     assert db_session.query(Quotation).count() == 0
+
+    # A reviewer who accepts and locks both pieces still gets two
+    # correctly isolated candidates -- A's is missing the total (never
+    # saw page 8), and B's has no reference at all (never saw page 1).
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.quotation_candidate.quotation_number == "444 REV / 18"
+    assert seg_a.quotation_candidate.net_value is None
+    assert seg_b.quotation_candidate.quotation_number is None
+    assert seg_b.quotation_candidate.net_value == Decimal("151955.00")
 
 
 # --- Issue 5: uncertain BOQ structure must never fabricate financial rows -----
@@ -554,3 +606,377 @@ def test_real_archive_shaped_garbled_boq_header_creates_no_rows(db_session: Sess
     assert list(document.boq_line_candidates) == []
     # The quotation-level fields are unaffected by the BOQ table failure.
     assert document.quotation_candidate.net_value == Decimal("151955.00")
+
+
+# --- Sequential segmentation: cases 13-16 from the segmentation brief ----------
+
+
+def test_confirmed_candidate_cannot_access_financial_data_outside_its_segment(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Case 13. The core safety invariant, proven directly against a
+    confirmed (not just locked) business record: segment A's confirmed
+    `QuotationVersion` must carry only A's own total, never B's, even
+    though B's total sits later in the very same source file."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: A-100\nDate: 01/01/2024\nNet Amount: 1,000.00\n"
+        "--- Page 2 ---\n"
+        "Reference: A-200\nDate: 02/01/2024\nNet Amount: 9,999.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    client = client_service.create_client(db_session, name="Client A")
+    project = project_service.create_project(db_session, name="Project A", client_id=client.id)
+    version_a = confirm_import(db_session, document, segment=seg_a, client_id=client.id, project_id=project.id)
+
+    assert version_a.quoted_value == Decimal("1000.00")
+    assert version_a.quoted_value != Decimal("9999.00")
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.review_status == SegmentReviewStatus.CONFIRMED
+    assert seg_b.review_status == SegmentReviewStatus.LOCKED  # untouched by A's confirmation
+    assert seg_b.quotation_candidate.net_value == Decimal("9999.00")
+
+
+def test_moving_a_boundary_invalidates_and_re_extracts_affected_candidates(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Case 14. A reviewer discovers segmentation drew the line one page
+    too early -- moving the boundary must discard both segments' existing
+    candidates (never patch them) and produce fresh, correctly-scoped
+    ones on the next lock."""
+    path = _placeholder_scan(tmp_path)
+    # Page 2 carries only a total, with no reference/date of its own --
+    # segmentation initially attaches it to A (no new identity signal on
+    # page 2). Page 3 has no amount at all, keeping which page's total
+    # ends up where unambiguous throughout this test.
+    text = (
+        "Reference: A-100\nDate: 01/01/2024\n"
+        "--- Page 2 ---\n"
+        "Net Amount: 1,000.00\n"
+        "--- Page 3 ---\n"
+        "Reference: A-200\nDate: 02/01/2024\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    assert (segments[0].start_page, segments[0].end_page) == (1, 2)
+    assert (segments[1].start_page, segments[1].end_page) == (3, 3)
+
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.quotation_candidate.net_value == Decimal("1000.00")
+    assert seg_b.quotation_candidate.net_value is None
+    first_candidate_id = seg_a.quotation_candidate.id
+
+    # Reviewer decides page 2's total actually belongs to quotation B, not
+    # A -- moving the boundary must discard both existing candidates
+    # (never patch them) rather than leave A's stale total in place.
+    move_segment_boundary(db_session, document, seg_a, new_end_page=1)
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.quotation_candidate is None
+    assert seg_b.quotation_candidate is None
+    assert seg_a.review_status == SegmentReviewStatus.PROPOSED
+    assert seg_b.review_status == SegmentReviewStatus.PROPOSED
+    assert seg_a.reviewer_adjusted is True
+
+    from app.models import ImportedQuotationCandidate
+
+    assert db_session.get(ImportedQuotationCandidate, first_candidate_id) is None
+
+    accept_segment(db_session, document, seg_a)
+    accept_segment(db_session, document, seg_b)
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.start_page == 1 and seg_a.end_page == 1
+    assert seg_b.start_page == 2 and seg_b.end_page == 3
+    # Page 2's total now correctly belongs to segment B, not A.
+    assert seg_a.quotation_candidate.net_value is None
+    assert seg_b.quotation_candidate.net_value == Decimal("1000.00")
+
+
+def test_merging_and_splitting_segments_leaves_no_stale_candidates(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Case 15. Merge (segmentation over-split one quotation) and split
+    (segmentation under-split two) must each leave the database with
+    exactly the candidates the *current* boundary layout implies -- no
+    orphaned rows from a prior layout."""
+    path = _placeholder_scan(tmp_path)
+    # Page 1 has no identifying fields at all (a cover page OCR read
+    # poorly); page 2 is where this one quotation's own reference first
+    # appears. Per the documented, safety-motivated bias (a late-revealed
+    # reference over-splits rather than risking a silent merge), this
+    # proposes two segments for what is really one quotation -- exactly
+    # the case `merge_segments` exists to correct.
+    text = "Some cover text with no reference or date recognized here.\n--- Page 2 ---\nReference: A-100\nDate: 01/01/2024\nNet Amount: 2,000.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    from app.models import ImportedQuotationCandidate
+
+    document = get_imported_document(db_session, document.id)
+    assert db_session.query(ImportedQuotationCandidate).count() == 2
+
+    seg_a, seg_b = list_segments(db_session, document)
+    merged = merge_segments(db_session, document, seg_a, seg_b)
+    document = get_imported_document(db_session, document.id)
+    remaining = list_segments(db_session, document)
+    assert len(remaining) == 1
+    assert remaining[0].id == merged.id
+    assert (remaining[0].start_page, remaining[0].end_page) == (1, 2)
+    assert remaining[0].review_status == SegmentReviewStatus.PROPOSED
+    # Both prior candidates gone -- neither patched, neither orphaned.
+    assert db_session.query(ImportedQuotationCandidate).count() == 0
+
+    accept_segment(db_session, document, remaining[0])
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    (merged_segment,) = list_segments(db_session, document)
+    assert merged_segment.quotation_candidate.quotation_number == "A-100"
+    assert merged_segment.quotation_candidate.net_value == Decimal("2000.00")
+    assert db_session.query(ImportedQuotationCandidate).count() == 1
+
+    # Now split it back into two (a reviewer might do this for an
+    # unrelated reason, e.g. realizing page 1 is actually a separate
+    # attachment) -- the merged candidate must not survive the split.
+    piece_a, piece_b = split_segment(db_session, document, merged_segment, split_after_page=1)
+    document = get_imported_document(db_session, document.id)
+    pieces = list_segments(db_session, document)
+    assert len(pieces) == 2
+    assert (pieces[0].start_page, pieces[0].end_page) == (1, 1)
+    assert (pieces[1].start_page, pieces[1].end_page) == (2, 2)
+    # The pre-split candidate is gone; nothing stale survives the split.
+    assert db_session.query(ImportedQuotationCandidate).count() == 0
+
+    for piece in pieces:
+        accept_segment(db_session, document, piece)
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    piece_a, piece_b = list_segments(db_session, document)
+    assert piece_a.quotation_candidate.quotation_number is None  # page 1 alone has nothing
+    assert piece_b.quotation_candidate.quotation_number == "A-100"
+    assert piece_b.quotation_candidate.net_value == Decimal("2000.00")
+    assert db_session.query(ImportedQuotationCandidate).count() == 2
+
+
+def test_excluded_pages_never_enter_a_quotation_candidate(db_session: Session, tmp_path: Path) -> None:
+    """Case 16. A page range marked EXCLUDED_NOT_A_QUOTATION (an
+    attachment/drawing run between two real quotations) must never
+    produce a candidate itself, and its content must never leak into
+    either neighboring segment's candidate."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: A-100\nDate: 01/01/2024\nNet Amount: 1,000.00\n"
+        "--- Page 2 ---\n"
+        "Reference: DRAWING-REV-3\nDate: 15/06/2020\nNet Amount: 999,999.00\n"
+        "--- Page 3 ---\n"
+        "Reference: A-200\nDate: 02/01/2024\nNet Amount: 2,000.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 3
+    middle = segments[1]
+    exclude_segment(db_session, document, middle)
+
+    document = get_imported_document(db_session, document.id)
+    segments = list_segments(db_session, document)
+    middle = segments[1]
+    assert middle.review_status == SegmentReviewStatus.EXCLUDED_NOT_A_QUOTATION
+
+    accept_segment(db_session, document, segments[0])
+    accept_segment(db_session, document, segments[2])
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, excluded, seg_b = list_segments(db_session, document)
+    assert excluded.quotation_candidate is None
+    assert seg_a.quotation_candidate.quotation_number == "A-100"
+    assert seg_a.quotation_candidate.net_value == Decimal("1000.00")
+    assert seg_b.quotation_candidate.quotation_number == "A-200"
+    assert seg_b.quotation_candidate.net_value == Decimal("2000.00")
+
+    from app.models import ImportedQuotationCandidate
+
+    numbers = {c.quotation_number for c in db_session.query(ImportedQuotationCandidate).all()}
+    assert "DRAWING-REV-3" not in numbers
+    values = {c.net_value for c in db_session.query(ImportedQuotationCandidate).all()}
+    assert Decimal("999999.00") not in values
+
+
+def test_rejected_segment_leaves_no_business_records(db_session: Session, tmp_path: Path) -> None:
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: A-100\nDate: 01/01/2024\nNet Amount: 1,000.00\n--- Page 2 ---\nReference: A-200\nDate: 02/01/2024\nNet Amount: 2,000.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+    segments = list_segments(db_session, document)
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    reject_import(db_session, document, segment=seg_a, reason="Duplicate of an existing paper quotation.")
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    assert seg_a.review_status == SegmentReviewStatus.REJECTED
+    assert seg_a.resulting_quotation_id is None
+
+    from app.models import Quotation
+
+    assert db_session.query(Quotation).count() == 0
+
+    with pytest.raises(ValidationError, match="rejected"):
+        confirm_import(db_session, document, segment=seg_a, client_id=1, project_id=1)
+
+
+def test_segment_still_ambiguous_after_locking_produces_no_candidate(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A pathological case: a reviewer accepts a boundary that, once
+    sliced, still itself contains two distinct references (e.g. they
+    merged two genuinely different quotations together by mistake). The
+    within-slice multi-signal check (unchanged from the original Phase 4
+    gate) still catches it -- the segment locks with no candidate rather
+    than silently picking one reference over the other."""
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: A-100\nDate: 01/01/2024\nReference: A-200\nDate: 02/01/2024\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    # No page markers at all here -- falls back to the original
+    # single-candidate path, which itself detects the multi-signal.
+    assert document.extraction_status == ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+    assert document.quotation_candidate is None
+
+
+def test_segment_confirmation_participates_in_pr5_revision_conflict_protection(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A segment's confirmation reuses `quotation_service`'s revision
+    machinery exactly like the unsegmented path -- confirming a second
+    segment as a revision of the quotation the first segment just created
+    still runs PR #5's conflict check."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: VN/QU/412/18\nDate: 27/11/2018\nNet Amount: 151,955.00\n"
+        "--- Page 2 ---\n"
+        "Reference: VN/QU/412/18\nDate: 21/11/2018\nNet Amount: 168,495.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    client = client_service.create_client(db_session, name="Vinco Client")
+    project = project_service.create_project(db_session, name="Vinco Project", client_id=client.id)
+    version_a = confirm_import(db_session, document, segment=seg_a, client_id=client.id, project_id=project.id)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    # Segment B is dated *earlier* than the quotation segment A just
+    # created -- PR #5's conflict check must still block it.
+    with pytest.raises(RevisionConflictError):
+        confirm_import(
+            db_session,
+            document,
+            segment=seg_b,
+            client_id=client.id,
+            project_id=project.id,
+            quotation_id=version_a.quotation_id,
+        )
+
+    confirm_import(
+        db_session,
+        document,
+        segment=seg_b,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=version_a.quotation_id,
+        acknowledge_revision_conflict=True,
+    )
+
+    from app.models import QuotationVersion
+
+    versions = db_session.query(QuotationVersion).filter_by(quotation_id=version_a.quotation_id).all()
+    assert len(versions) == 2
+
+
+def test_original_source_file_remains_byte_identical_through_segmentation(
+    db_session: Session, tmp_path: Path
+) -> None:
+    path = _placeholder_scan(tmp_path)
+    original_bytes = path.read_bytes()
+    original_hash = compute_file_hash(path)
+    text = "Reference: A-100\nDate: 01/01/2024\nNet Amount: 1,000.00\n--- Page 2 ---\nReference: A-200\nDate: 02/01/2024\nNet Amount: 2,000.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+    segments = list_segments(db_session, document)
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    client = client_service.create_client(db_session, name="Client")
+    project = project_service.create_project(db_session, name="Project", client_id=client.id)
+    confirm_import(db_session, document, segment=seg_a, client_id=client.id, project_id=project.id)
+
+    assert path.read_bytes() == original_bytes
+    assert compute_file_hash(path) == original_hash
+
+
+def test_confirmed_segment_boundary_cannot_be_changed(db_session: Session, tmp_path: Path) -> None:
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: A-100\nDate: 01/01/2024\nNet Amount: 1,000.00\n--- Page 2 ---\nReference: A-200\nDate: 02/01/2024\nNet Amount: 2,000.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+    segments = list_segments(db_session, document)
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    client = client_service.create_client(db_session, name="Client")
+    project = project_service.create_project(db_session, name="Project", client_id=client.id)
+    confirm_import(db_session, document, segment=seg_a, client_id=client.id, project_id=project.id)
+
+    document = get_imported_document(db_session, document.id)
+    seg_a, seg_b = list_segments(db_session, document)
+    with pytest.raises(ValidationError, match="already been confirmed"):
+        move_segment_boundary(db_session, document, seg_a, new_end_page=2)
+    with pytest.raises(ValidationError, match="already been confirmed"):
+        merge_segments(db_session, document, seg_a, seg_b)

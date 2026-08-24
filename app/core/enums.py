@@ -145,6 +145,15 @@ class ExtractionStatus(StrEnum):
     #: any one of them without risking a spliced record. Never reachable
     #: for a document that genuinely contains exactly one quotation.
     MULTIPLE_QUOTATIONS_DETECTED = "MULTIPLE_QUOTATIONS_DETECTED"
+    #: OCR succeeded and page-boundary segmentation proposed one or more
+    #: `ImportedDocumentSegment` rows for this document (see
+    #: `app.core.import_segmentation`). No `ImportedQuotationCandidate` has
+    #: been created for any segment yet — that only happens after every
+    #: segment has been reviewer-resolved (accepted or excluded) and
+    #: `app.services.import_service.lock_segments` has run. Only ever set
+    #: for `extraction_engine == "ocr"` documents; the deterministic Phase
+    #: 4 path never produces segments and never enters this status.
+    SEGMENTS_PROPOSED = "SEGMENTS_PROPOSED"
 
 
 class ImportReviewStatus(StrEnum):
@@ -174,6 +183,35 @@ class ImportAuditEventType(StrEnum):
     EDITED = "EDITED"
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
+    #: A segment boundary was proposed, accepted, moved, split, merged, or
+    #: excluded — see `app.services.import_service`'s segment functions.
+    SEGMENTED = "SEGMENTED"
+
+
+class SegmentReviewStatus(StrEnum):
+    """Lifecycle of one `ImportedDocumentSegment`'s page-range boundary and
+    (once locked) its own confirmation state — a single status axis rather
+    than two, since a segment's boundary and its confirmation are strictly
+    sequential (see IMPORT_ARCHITECTURE.md's sequential segmentation
+    section): a segment can't be confirmed before it's locked, and can't be
+    locked before its boundary is accepted.
+
+    PROPOSED -> ACCEPTED -> LOCKED -> CONFIRMED | REJECTED
+    PROPOSED -> EXCLUDED_NOT_A_QUOTATION (terminal; never produces a
+        candidate, from either PROPOSED or ACCEPTED)
+
+    No boundary — including a HIGH-confidence one — reaches LOCKED without
+    an explicit reviewer action moving it through ACCEPTED first. There is
+    deliberately no automatic PROPOSED -> ACCEPTED transition anywhere in
+    this application, regardless of confidence.
+    """
+
+    PROPOSED = "PROPOSED"
+    ACCEPTED = "ACCEPTED"
+    LOCKED = "LOCKED"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    EXCLUDED_NOT_A_QUOTATION = "EXCLUDED_NOT_A_QUOTATION"
 
 
 class OcrConfidenceStatus(StrEnum):

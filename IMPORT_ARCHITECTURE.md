@@ -498,6 +498,110 @@ file, confirming without selecting a client/project).
     page. Closing it fully needs per-field source-page/line provenance
     tracking, a larger change than either adversarial pass's fixes;
     tracked here as the priority follow-up, not silently accepted.
+  - **Superseded by sequential segmentation (below)**: the whole-document
+    `MULTIPLE_QUOTATIONS_DETECTED` refusal above is now only the fallback
+    for OCR text with no page structure at all. A page-tagged scan (the
+    real archive shape) is segmented and reviewed per quotation instead
+    of being refused outright — see §17.
+
+## 17. Sequential quotation boundary detection (OCR Phase 2)
+
+The real production workflow is batches of consecutive scanned
+quotations in one PDF, in document order — not one file per quotation.
+`app.core.import_segmentation` turns one OCR'd document's page-tagged
+text into an ordered list of proposed page-range segments; each is
+independently reviewed, locked, extracted, and confirmed exactly like a
+Phase 4/OCR-1 document always was, just scoped to its own pages.
+
+**Pipeline**: `stage_document` → OCR (`extract_via_ocr`, unchanged) →
+`propose_segments` (new) → reviewer accepts/moves/splits/merges/excludes
+each segment (`app.services.import_service`) → `lock_segments` slices the
+document's raw OCR text per accepted segment
+(`slice_raw_extraction_to_pages`) and runs the *unmodified*
+`extract_candidates` on each slice → the existing
+`ImportedQuotationCandidate`/review/confirm flow, unchanged, once per
+segment (`confirm_import`/`reject_import` now take an optional `segment`
+argument; omitted, they behave exactly as before).
+
+**The core safety invariant is structural, not a downstream check**: a
+segment's candidate is built only from a `RawExtraction` that
+`slice_raw_extraction_to_pages` has already reduced to that segment's own
+pages — a page outside its range is never present in the text/tables
+handed to `extract_candidates`, so it cannot be extracted from. No
+proposed boundary — including a HIGH-confidence one — is ever accepted
+automatically anywhere in this application; every segment must pass
+through an explicit reviewer action (`accept_segment`/`exclude_segment`)
+before `lock_segments` will build its candidate.
+
+**Boundary detection** (`detect_segments`) is intentionally not a fixed
+page-distance rule (a legitimate quotation may span many pages): a page
+starts a new segment only when its own reference and/or date genuinely
+differ from the currently open segment's — reference differing is HIGH
+confidence, a date-only difference with no corroborating reference on
+that page is LOW (surfaced for review, never silently absorbed either
+way — see `_classify_boundary`'s docstring for the exact reasoning,
+including why a first-seen date with a *confirmed* matching reference is
+safely absorbed as continuation, while a first-seen date with *no*
+reference at all is not). Anything else (no signal, a blank/attachment
+page, a repeated reference) continues the open segment by default — a
+missed header can only ever under-split, never mis-attribute a page.
+
+**Real-archive validation** (the same 24-page, 18-quotation archive used
+throughout OCR Phase 1's adversarial reviews, using the already-captured
+real Tesseract 5.3.4 output): segmentation proposed **11 segments**
+against the archive's known 18 quotation documents (16 distinct
+references, including the real `444/18` → `444 REV/18` and
+`VN/QU/412/18` revision pairs) — correctly splitting the well-labeled
+majority (9 of 11 proposed segments each map to exactly one real
+document), but two segments under-split: pages 5–11 (7 pages) merge
+`VN/QU/417/18`, two drawing pages, `VN/QU/412/18`'s first occurrence,
+`VN/QU/406/18`, and an ambiguous bleed-through page into one segment,
+because none of the intervening documents' own reference lines were
+recognized by OCR at all on this archive; pages 12–13 similarly merge
+`VN/QU/401/18` with an unrelated delivery note. Zero LOW-confidence seams
+were produced in this run (every boundary segmentation *did* find was
+reference-based and unambiguous) — the under-splitting is a case of no
+signal being found at all, not a low-confidence one being wrongly
+trusted, and is exactly the failure mode the design predicted: a missed
+header under-splits rather than mis-attributes.
+
+**Verified**: every field on every one of the 11 segments' extracted
+candidates traces to a page within that segment's own range (checked
+directly against the sliced text, not merely asserted) — the core
+invariant held with no exceptions on this real run. **Also honestly
+found**: within the one 7-page under-split segment (pages 5–11), the
+resulting candidate combined `VN/QU/417/18` (page 5's reference) with a
+date that actually belongs to `VN/QU/406/18` (page 10, per the archive's
+visual ground truth) — the existing within-segment multi-reference safety
+net (unchanged from Phase 4/OCR-1) did not catch it, because only *one*
+reference was ever OCR-recognized across those 7 pages, so
+`find_distinct_quotation_references` saw no conflict to flag. This is not
+a regression — it is exactly the pre-segmentation flat-document risk,
+just now bounded to one merged segment instead of the whole file — and it
+is not confirmable in this specific run only because, consistent with
+every prior finding against this archive, **zero** of the 11 segments'
+candidates captured a financial value at all. A cleaner scan that
+recovers financial values on an under-split segment's pages would not
+automatically trip this particular safety net either. Closing this fully
+needs the same per-field page-provenance tracking already named as OCR
+Phase 1's priority follow-up (§16) — segmentation meaningfully shrinks the
+blast radius (11 candidates instead of 1) but does not, by itself,
+guarantee zero cross-quotation field mixing when its own boundary
+detection misses a transition. The correct mitigation today is reviewer
+diligence: a long or multi-quotation-looking segment should be split
+further with `split_segment` before locking, exactly as the boundary
+review screen is designed to prompt.
+
+No quotation was confirmed from the real archive during this validation
+— segments were proposed, accepted, and locked only, to exercise the
+full persistence path; `confirm_import` was never called against it.
+
+**Not implemented by this change** (explicitly out of scope): Purchase
+Order import, award-status derivation, or any dashboard/analytics
+surfacing of the Quotation → PO → Award chain. `confirm_import` and
+`quotation_service.mark_awarded` are untouched — a confirmed segment
+still only ever produces a *quoted* `QuotationVersion`, never an awarded
+`Project.contract_value`.
 - **BOQ table reconstruction from OCR is a best-effort heuristic**
   (gap-based column splitting on word positions), not true table
   structure detection — it declines (rather than guesses) when a page's

@@ -40,9 +40,11 @@ class ImportConfirmationDialog(QDialog):
         project_id: int | None,
         quotation_id: int | None,
         parent=None,
+        segment_id: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._document_id = document_id
+        self._segment_id = segment_id
         self._client_id = client_id
         self._new_client_name = new_client_name
         self._project_id = project_id
@@ -54,14 +56,15 @@ class ImportConfirmationDialog(QDialog):
 
         with session_scope() as session:
             document = get_imported_document(session, document_id)
-            candidate = document.quotation_candidate
+            segment = next((s for s in document.segments if s.id == segment_id), None) if segment_id is not None else None
+            candidate = segment.quotation_candidate if segment is not None else document.quotation_candidate
             client_name = (
                 document.resulting_client.name
                 if document.resulting_client
                 else self._lookup_client_name(session, client_id, new_client_name)
             )
             project_name = self._lookup_project_name(session, project_id)
-            boq_count = len(document.boq_line_candidates)
+            boq_count = len(segment.boq_line_candidates) if segment is not None else len(document.boq_line_candidates)
             summary = {
                 "client": client_name or "(not selected)",
                 "project": project_name or "(not selected)",
@@ -131,9 +134,15 @@ class ImportConfirmationDialog(QDialog):
         def _do_confirm() -> bool:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
+                segment = (
+                    next((s for s in document.segments if s.id == self._segment_id), None)
+                    if self._segment_id is not None
+                    else None
+                )
                 confirm_import(
                     session,
                     document,
+                    segment=segment,
                     client_id=self._client_id,
                     new_client_name=self._new_client_name,
                     project_id=self._project_id,
@@ -181,7 +190,12 @@ class ImportConfirmationDialog(QDialog):
         def _do_reject() -> bool:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
-                reject_import(session, document)
+                segment = (
+                    next((s for s in document.segments if s.id == self._segment_id), None)
+                    if self._segment_id is not None
+                    else None
+                )
+                reject_import(session, document, segment=segment)
             return True
 
         if run_guarded(self, _do_reject, context="rejecting import"):

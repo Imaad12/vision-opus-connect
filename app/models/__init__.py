@@ -13,6 +13,7 @@ from app.models.import_staging import (
     ImportAuditLogEntry,
     ImportedBoqLineCandidate,
     ImportedDocument,
+    ImportedDocumentSegment,
     ImportedQuotationCandidate,
 )
 from app.models.invoice import Invoice, Payment
@@ -34,6 +35,7 @@ __all__ = [
     "ImportAuditLogEntry",
     "ImportedBoqLineCandidate",
     "ImportedDocument",
+    "ImportedDocumentSegment",
     "ImportedQuotationCandidate",
     "Invoice",
     "Payment",
