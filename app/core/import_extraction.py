@@ -118,7 +118,14 @@ _FIELD_LABELS: dict[str, tuple[str, ...]] = {
         "reference",
     ),
     "quotation_date": ("quotation date", "quote date", "date"),
-    "client_name": ("client name", "client", "customer name", "customer", "bill to", "attn"),
+    # "kind attn" (before bare "attn") is the real Vinco archive's own
+    # wording for every single quotation that uses this label at all
+    # ("Kind Attn. : Mr. Syed Nazir Ali", "Kind Attn. - Mr. Nelson") --
+    # confirmed against the real archive's saved OCR output, where bare
+    # "Attn" never once appears at the start of a line unprefixed. Without
+    # this, `client_name` was never populated from any of these real
+    # documents despite "attn" already being a recognized label.
+    "client_name": ("client name", "kind attn", "client", "customer name", "customer", "bill to", "attn"),
     "project_name": ("project name", "project title", "project"),
     "project_number": ("project no", "project number", "project code"),
     "description": ("scope of work", "description", "scope"),
@@ -139,6 +146,66 @@ _FIELD_ORDER = sorted(
 
 _LINE_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
 
+# VAT wording classification -- used only to decide *why* `tax_value`
+# ended up unset after the normal label scan above, never to change
+# whether/how a field is matched. Both patterns are grounded in real
+# archive wording (see IMPORT_ARCHITECTURE.md for the source quotations):
+#
+#   - "VAT inclusive" style wording ("prices are inclusive of VAT") means
+#     a separate VAT line is not expected at all -- the printed total
+#     already includes it. No real archive document was found using this
+#     wording (none of Vinco's own quotations state it), but the business
+#     rule below must still not conflate this state with "OCR simply
+#     failed to find VAT" if a future document does use it.
+#   - "VAT excluded, no absolute amount" wording ("VAT 5% not included in
+#     our offer", "5% VAT will be charged extra") is common in the real
+#     archive -- these quotations genuinely do not print a SAR VAT figure
+#     anywhere, only a rate/disclaimer, so no amount is determinable
+#     without inventing one from the stated rate (which this module must
+#     never do -- see `_apply_vat_determination_when_undetermined`).
+_VAT_INCLUSIVE_PATTERN = re.compile(
+    r"vat\s+inclusive|inclusive\s+of\s+vat|includ\w*\s+vat|vat\s+includ\w*",
+    re.IGNORECASE,
+)
+_VAT_EXCLUDED_NO_AMOUNT_PATTERN = re.compile(
+    r"vat[^\n]{0,40}(?:not\s+includ|will\s+be\s+charged\s+extra|excluded|extra)",
+    re.IGNORECASE,
+)
+
+
+def _apply_vat_determination_when_undetermined(result: QuotationCandidateFields, text: str | None) -> None:
+    """Called only when `tax_value` is still `None` after both the normal
+    label scan and `reconcile_net_tax_gross`'s algebraic derivation --
+    i.e. no VAT amount could be read from this document by any existing
+    means. Implements the explicit business rule: "if VAT is genuinely
+    not determinable, VAT = SAR 0.00 -- never assume 15%, never invent an
+    amount." This never computes a VAT figure from a stated rate (e.g.
+    "5%"); it only ever records the fixed SAR 0.00 the business rule
+    specifies, or leaves the field alone for the VAT-inclusive case.
+
+    Tags *why* in `raw_values["tax_value_basis"]` (already a persisted,
+    schema-free JSON field -- no new column needed) so "VAT-inclusive, no
+    separate line expected" and "genuinely undeterminable, 0.00 applied
+    per business rule" remain distinguishable internal states, never
+    conflated, even though only the second one changes `tax_value`.
+    """
+    full_text = text or ""
+    if _VAT_INCLUSIVE_PATTERN.search(full_text):
+        # A separate VAT figure is not expected on this document at all --
+        # the printed total already includes it. Do not fabricate a VAT
+        # amount by assuming a rate, and do not apply the "0.00" business
+        # rule here either: that rule is for "not determinable", not for
+        # "determined to be embedded in the total".
+        result.raw_values["tax_value_basis"] = "vat_inclusive"
+        return
+
+    result.raw_values["tax_value_basis"] = "undetermined_zero_applied"
+    excluded_match = _VAT_EXCLUDED_NO_AMOUNT_PATTERN.search(full_text)
+    if excluded_match:
+        result.raw_values["tax_value_note"] = normalize_whitespace(excluded_match.group(0)) or ""
+    result.tax_value = Decimal("0.00")
+    result.field_confidence["tax_value"] = ConfidenceLevel.LOW.value
+
 
 def _pattern_for(label: str) -> re.Pattern[str]:
     if label not in _LINE_PATTERN_CACHE:
@@ -149,11 +216,38 @@ def _pattern_for(label: str) -> re.Pattern[str]:
         # narrow, specific substitution for one confirmed OCR artifact --
         # not a general "any separator" relaxation, so it doesn't make
         # label matching any more permissive about what counts as a label.
+        # `|` is included because a BOQ totals row rendered through OCR
+        # commonly comes out as a table cell boundary rather than a colon
+        # (real archive: "Total (SAR) | 51,644.77") -- same narrow,
+        # single-character-class reasoning as `»`.
+        #
+        # An optional parenthetical currency/unit annotation is allowed
+        # between the label and the separator (e.g. "Total (SAR) |
+        # 51,644.77", "Sub Total (SAR) | 49,185.50") -- confirmed from the
+        # same real archive totals rows, where the currency is printed as
+        # part of the label's own table header rather than the value.
+        #
+        # An optional trailing "." directly after the label is allowed
+        # (real archive: "Kind Attn." is always printed with the period,
+        # never bare "Kind Attn") -- narrow, and only ever consumed right
+        # after the label itself, so it cannot let the separator check
+        # below become any more permissive.
+        #
+        # The separator itself may be one *or more* of `:`/`-`/`»`/`|`/`—`
+        # (an em dash is included alongside `-` for the same reason as
+        # `»`: a real, observed OCR misread), each optionally followed by
+        # whitespace -- because the real archive was found to sometimes
+        # print a doubled separator ("Kind Attn. — : Mr. Nelson,"). This
+        # still always requires at least one real separator character; it
+        # only tolerates more than one appearing together.
+        #
         # Bare whitespace is deliberately NOT accepted as a separator: that
         # would match "Reference Section 3.2 discusses..." just as readily
         # as an actual label:value line, which is exactly the over-broad
         # matching this project's label-based extraction must avoid.
-        _LINE_PATTERN_CACHE[label] = re.compile(rf"^\s*{escaped}\s*[:\-»]\s*(.+?)\s*$", re.IGNORECASE)
+        _LINE_PATTERN_CACHE[label] = re.compile(
+            rf"^\s*{escaped}\.?\s*(?:\([^)]{{0,20}}\)\s*)?(?:[:\-»|—]\s*)+(.+?)\s*$", re.IGNORECASE
+        )
     return _LINE_PATTERN_CACHE[label]
 
 
@@ -201,6 +295,9 @@ def extract_quotation_candidate(text: str | None, tables: list[ExtractedTable]) 
     elif reconciled.derived_field == "gross":
         result.gross_value = reconciled.gross
         result.field_confidence["gross_value"] = ConfidenceLevel.NEEDS_REVIEW.value
+
+    if result.tax_value is None:
+        _apply_vat_determination_when_undetermined(result, text)
 
     return result
 

@@ -12,13 +12,15 @@ the real page-rendering and result-aggregation code paths.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from unittest.mock import patch
 
 import pymupdf
+from PIL import Image
 
 from app.core.ocr_engine import OcrPageResult, OcrWord
-from app.core.ocr_extraction import extract_via_ocr
+from app.core.ocr_extraction import _effective_render_dpi, extract_via_ocr
 
 
 class FakeOcrEngine:
@@ -49,6 +51,134 @@ def _make_pdf(path: Path, page_count: int) -> None:
 
 def _text_result(page_number: int, text: str, confidence: float = 92.0) -> OcrPageResult:
     return OcrPageResult(page_number=page_number, text=text, mean_confidence=confidence)
+
+
+def _make_scanned_pdf(path: Path, *, mediabox_pt: tuple[float, float], image_px: tuple[int, int]) -> None:
+    """A single-page PDF whose page size is `mediabox_pt` (points) and
+    whose sole content is one embedded raster image of `image_px` native
+    pixels -- the same shape as a real scan-to-PDF page, used to test
+    `_effective_render_dpi` against a controlled, known resolution instead
+    of the real archive files (not available in this environment)."""
+    image = Image.new("RGB", image_px, "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=mediabox_pt[0], height=mediabox_pt[1])
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(path)
+    doc.close()
+
+
+def _png_size(image_bytes: bytes) -> tuple[int, int]:
+    return Image.open(io.BytesIO(image_bytes)).size
+
+
+# --- Per-page render DPI (real-archive DPI/rasterization fix) ---------------
+
+
+def test_effective_render_dpi_matches_fixed_default_for_a_normally_scaled_scan(tmp_path: Path) -> None:
+    # A standard US-Letter page (8.5 x 11 in) wrapping a native 300 DPI
+    # scan (2550 x 3300 px) -- the common, non-anomalous case. The
+    # computed DPI must equal the previous fixed constant exactly, so a
+    # normal scan renders byte-for-byte as it always has.
+    pdf_path = tmp_path / "normal_scan.pdf"
+    _make_scanned_pdf(pdf_path, mediabox_pt=(612.0, 792.0), image_px=(2550, 3300))
+    doc = pymupdf.open(pdf_path)
+    try:
+        assert _effective_render_dpi(doc, doc.load_page(0)) == 300
+    finally:
+        doc.close()
+
+
+def test_effective_render_dpi_is_reduced_for_a_mediabox_that_does_not_match_native_resolution(
+    tmp_path: Path,
+) -> None:
+    # Reproduces the real archive's measured anomaly: a MediaBox declared
+    # far larger (26.5 x 41.5 "inches") than the embedded image's actual
+    # native resolution (1910 x 2986 px) -- a ~72 DPI scan wrapped in an
+    # inflated page size. The computed DPI must be far below the fixed
+    # 300 default (it must not render ~10x more pixels than the source
+    # contains), and never below the configured floor.
+    pdf_path = tmp_path / "anomalous_mediabox.pdf"
+    _make_scanned_pdf(pdf_path, mediabox_pt=(26.5 * 72, 41.5 * 72), image_px=(1910, 2986))
+    doc = pymupdf.open(pdf_path)
+    try:
+        dpi = _effective_render_dpi(doc, doc.load_page(0))
+        # True native resolution here is ~72 DPI (1910px / 26.5in); the
+        # floor keeps this from degrading further, so the result clamps
+        # to exactly the floor rather than the true (too-low) native value.
+        assert dpi == 150
+        assert dpi < 300
+    finally:
+        doc.close()
+
+
+def test_effective_render_dpi_falls_back_to_default_with_no_embedded_image(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "blank_page.pdf"
+    _make_pdf(pdf_path, 1)
+    doc = pymupdf.open(pdf_path)
+    try:
+        assert _effective_render_dpi(doc, doc.load_page(0)) == 300
+    finally:
+        doc.close()
+
+
+def test_effective_render_dpi_never_exceeds_the_previous_fixed_default(tmp_path: Path) -> None:
+    # A native resolution *higher* than 300 DPI must still clamp to 300 --
+    # this fix must never make OCR slower than the old fixed behaviour.
+    pdf_path = tmp_path / "very_high_res.pdf"
+    _make_scanned_pdf(pdf_path, mediabox_pt=(612.0, 792.0), image_px=(5100, 6600))  # 600 DPI native
+    doc = pymupdf.open(pdf_path)
+    try:
+        assert _effective_render_dpi(doc, doc.load_page(0)) == 300
+    finally:
+        doc.close()
+
+
+def test_extract_via_ocr_renders_anomalous_scan_at_reduced_resolution(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "anomalous.pdf"
+    _make_scanned_pdf(pdf_path, mediabox_pt=(26.5 * 72, 41.5 * 72), image_px=(1910, 2986))
+
+    captured: dict[int, bytes] = {}
+
+    class CapturingEngine(FakeOcrEngine):
+        def ocr_image(self, image_bytes: bytes, *, page_number: int) -> OcrPageResult:
+            captured[page_number] = image_bytes
+            return super().ocr_image(image_bytes, page_number=page_number)
+
+    engine = CapturingEngine({1: _text_result(1, "Quotation Number: Q-DPI\n")})
+    result = extract_via_ocr(pdf_path, engine=engine)
+
+    assert "Q-DPI" in (result.text or "")
+    width, height = _png_size(captured[1])
+    # At the old fixed 300 DPI this page would render at roughly
+    # 26.5*300 x 41.5*300 = 7950x12450px (~10x the pixels this source
+    # actually contains). At the floor-clamped 150 DPI the fix computes
+    # here, it renders at ~3975x6225px instead -- far fewer pixels for
+    # the OCR engine to process, while still at least matching (not
+    # degrading below) the image's own native resolution.
+    assert width < 4200
+    assert height < 6500
+
+
+def test_extract_via_ocr_renders_normal_scan_unchanged(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "normal.pdf"
+    _make_scanned_pdf(pdf_path, mediabox_pt=(612.0, 792.0), image_px=(2550, 3300))
+
+    captured: dict[int, bytes] = {}
+
+    class CapturingEngine(FakeOcrEngine):
+        def ocr_image(self, image_bytes: bytes, *, page_number: int) -> OcrPageResult:
+            captured[page_number] = image_bytes
+            return super().ocr_image(image_bytes, page_number=page_number)
+
+    engine = CapturingEngine({1: _text_result(1, "Quotation Number: Q-NORMAL\n")})
+    result = extract_via_ocr(pdf_path, engine=engine)
+
+    assert "Q-NORMAL" in (result.text or "")
+    width, height = _png_size(captured[1])
+    assert (width, height) == (2550, 3300)
 
 
 # --- Engine / document availability -----------------------------------------

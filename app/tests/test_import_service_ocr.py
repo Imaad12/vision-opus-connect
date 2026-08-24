@@ -215,10 +215,15 @@ def test_explicit_net_vat_gross_are_all_captured_distinctly(db_session: Session,
 
 def test_vat_rate_alone_is_never_treated_as_a_monetary_value(db_session: Session, tmp_path: Path) -> None:
     """The brief requires: never infer a VAT rate, never invent a missing
-    value. A printed rate with no absolute amount must leave `tax_value`
-    untouched -- exactly the existing, unmodified deterministic-path
-    behavior (`_FIELD_LABELS` has no "VAT rate" label at all, so a rate-only
-    line is simply not recognized as a monetary field)."""
+    value. A printed rate with no absolute amount must never be multiplied
+    out into a fabricated VAT figure -- exactly the existing, unmodified
+    deterministic-path behavior (`_FIELD_LABELS` has no "VAT rate" label at
+    all, so a rate-only line is simply not recognized as a monetary field).
+
+    VAT is genuinely not determinable here (no VAT amount printed anywhere),
+    so the explicit business rule applies: `tax_value` normalizes to SAR
+    0.00 (never a guessed/rate-derived figure), flagged LOW confidence so
+    the candidate requires review rather than silently reading as certain."""
     path = _placeholder_scan(tmp_path)
     text = "Quotation Number: Q-RATE-ONLY\nQuotation Date: 01/06/2024\nNet Amount: 100,000.00\nVAT Rate: 5%\n"
     with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
@@ -226,8 +231,10 @@ def test_vat_rate_alone_is_never_treated_as_a_monetary_value(db_session: Session
 
     candidate = document.quotation_candidate
     assert candidate.net_value == Decimal("100000.00")
-    assert candidate.tax_value is None
+    assert candidate.tax_value == Decimal("0.00")
     assert candidate.gross_value is None
+    confidences = json.loads(candidate.field_confidence)
+    assert confidences["tax_value"] == ConfidenceLevel.LOW.value
 
 
 # --- 9. Multiple totals on one document (documented, existing behavior) -------

@@ -61,7 +61,13 @@ def test_extract_quotation_candidate_missing_fields_stay_none() -> None:
     result = extract_quotation_candidate("Nothing useful here.", [])
     assert result.quotation_number is None
     assert result.net_value is None
-    assert result.field_confidence == {}
+    # VAT is genuinely not determinable from this text (no label matched,
+    # nothing to reconcile) -- the business rule applies: tax_value is
+    # normalized to SAR 0.00, flagged LOW confidence (never HIGH, since it
+    # was never actually read off the document), never guessed via a rate.
+    assert result.tax_value == Decimal("0.00")
+    assert result.field_confidence == {"tax_value": ConfidenceLevel.LOW.value}
+    assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
 
 
 def test_extract_quotation_candidate_reads_two_column_table_rows() -> None:
@@ -182,6 +188,162 @@ def test_reference_label_still_requires_a_real_separator_not_bare_whitespace() -
     # readily as a real label:value line.
     result = extract_quotation_candidate("Reference Section 3.2 discusses further details\n", [])
     assert result.quotation_number is None
+
+
+# --- Regression: real archive "Kind Attn." client label (OCR Phase 4 fix) --
+# Every real Vinco archive document that labels its client contact prints
+# "Kind Attn." (with the period), never bare "Attn" at the start of a
+# line -- confirmed against the real archive's saved OCR output, where
+# `client_name` was never once populated from any real document despite
+# "attn" already being a recognized label alias.
+
+
+def test_kind_attn_label_is_recognized_for_client_name() -> None:
+    result = extract_quotation_candidate("Kind Attn. : Mr. Syed Nazir Ali\n", [])
+    assert result.client_name == "Mr. Syed Nazir Ali"
+
+
+def test_kind_attn_label_with_hyphen_separator_is_recognized() -> None:
+    result = extract_quotation_candidate("Kind Attn. - Mr. Nelson\n", [])
+    assert result.client_name == "Mr. Nelson"
+
+
+def test_kind_attn_label_with_doubled_em_dash_and_colon_separator_is_recognized() -> None:
+    # Real archive shape: an em dash *and* a colon together, with a space
+    # between them ("Kind Attn. — : Mr. Nelson,").
+    result = extract_quotation_candidate("Kind Attn. — : Mr. Nelson,\n", [])
+    assert result.client_name == "Mr. Nelson,"
+
+
+def test_kind_attn_label_without_a_period_is_still_recognized() -> None:
+    result = extract_quotation_candidate("Kind Attn: Mr. Ismail Shareef\n", [])
+    assert result.client_name == "Mr. Ismail Shareef"
+
+
+def test_kind_attn_takes_priority_over_bare_attn_label() -> None:
+    # "kind attn" is the more specific label and must be tried first (see
+    # `_FIELD_ORDER`) so it does not fall through to bare "attn" matching
+    # only "Attn." with "Kind" left dangling as part of the separator gap.
+    result = extract_quotation_candidate("Kind Attn. : Mr. Scott Smith\n", [])
+    assert result.client_name == "Mr. Scott Smith"
+    assert "Kind" not in (result.client_name or "")
+
+
+# --- Regression: real archive table-totals row shape (OCR Phase 4 fix) --
+# The real Vinco archive's BOQ totals rows OCR as e.g. "Total (SAR) |
+# 51,644.77" and "Sub Total (SAR) | 49,185.50" -- a table-cell pipe
+# separator instead of a colon, with the currency printed as part of the
+# label's own header cell rather than the value. Neither shape matched
+# `_pattern_for`'s original `[:\-»]` separator class (confirmed against
+# the real archive's saved OCR output), so these totals were never
+# extracted at all.
+
+
+def test_pipe_separator_from_ocrd_table_cell_is_recognized() -> None:
+    result = extract_quotation_candidate("Total (SAR) | 51,644.77\n", [])
+    assert result.gross_value == Decimal("51644.77")
+
+
+def test_pipe_separator_with_sub_total_label_is_recognized() -> None:
+    result = extract_quotation_candidate("Sub Total (SAR) | 49,185.50\n", [])
+    assert result.net_value == Decimal("49185.50")
+
+
+def test_parenthetical_currency_annotation_without_pipe_still_requires_a_real_separator() -> None:
+    # The parenthetical addition only bridges label -> separator; it must
+    # not make the separator itself optional.
+    result = extract_quotation_candidate("Total (SAR) 51,644.77\n", [])
+    assert result.gross_value is None
+
+
+def test_leading_ocr_noise_before_the_label_is_a_known_unresolved_case() -> None:
+    # Real archive shape ("ea ee Sub Total (SAR) | 49,185.50 |", "eae Total
+    # (SAR) |__22,050.00") -- Tesseract garbles a blank/empty leading table
+    # cell into noise characters before the label itself. This is
+    # deliberately NOT handled by loosening the line-start anchor (that
+    # would risk matching label text embedded mid-sentence -- the same
+    # over-broad-matching risk the bare-whitespace-separator restriction
+    # above already guards against); it falls through to the VAT/financial
+    # safety net (missing net_value blocks confirmation) rather than being
+    # guessed. Documents this as a known, accepted limitation, not a bug.
+    result = extract_quotation_candidate("eae Total (SAR) |__22,050.00\n", [])
+    assert result.gross_value is None
+
+
+# --- VAT business rule: "genuinely not determinable" -> SAR 0.00 -------
+# (OCR Phase 4). Real archive wording confirmed via the saved OCR output:
+# "VAT 5% not included in our offer", "5% VAT will be charged extra" --
+# both state VAT is excluded but print no absolute SAR figure, so no VAT
+# amount is determinable without assuming the printed rate (never done).
+# No genuine "VAT inclusive" wording was found anywhere in the real
+# archive, but the distinction must still hold for any future document
+# that does use it -- see `_apply_vat_determination_when_undetermined`.
+
+
+def test_vat_amount_explicitly_printed_is_extracted_normally_untouched_by_the_new_rule() -> None:
+    result = extract_quotation_candidate("VAT Amount: 62,500.00\n", [])
+    assert result.tax_value == Decimal("62500.00")
+    assert result.field_confidence["tax_value"] == ConfidenceLevel.HIGH.value
+    assert "tax_value_basis" not in result.raw_values
+
+
+def test_vat_excluded_no_amount_wording_normalizes_to_zero_with_a_note() -> None:
+    text = "Net Amount: 100,000.00\n3. VAT 5% not included in our offer\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.net_value == Decimal("100000.00")
+    assert result.tax_value == Decimal("0.00")
+    assert result.field_confidence["tax_value"] == ConfidenceLevel.LOW.value
+    assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
+    assert "not includ" in result.raw_values["tax_value_note"].lower()
+
+
+def test_vat_will_be_charged_extra_wording_normalizes_to_zero() -> None:
+    text = "Net Amount: 42,766.45\n5% VAT will be charged extra\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.tax_value == Decimal("0.00")
+    assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
+
+
+def test_vat_never_inferred_as_a_percentage_of_net_even_when_a_rate_is_printed() -> None:
+    # The business rule is an explicit fixed SAR 0.00, never a computed
+    # rate*net figure -- confirms no 5%/15% multiplication ever happens.
+    text = "Net Amount: 100,000.00\nVAT 5% not included in our offer\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.tax_value == Decimal("0.00")
+    assert result.tax_value != Decimal("100000.00") * Decimal("0.05")
+    assert result.tax_value != Decimal("100000.00") * Decimal("0.15")
+
+
+def test_vat_inclusive_wording_is_tagged_but_does_not_fabricate_a_split() -> None:
+    # A distinct internal state from "undetermined": the printed total is
+    # understood to already include VAT, so no separate figure is expected
+    # and none is invented -- `tax_value` stays None rather than being
+    # forced to the "not determinable" 0.00 default.
+    text = "Total Amount: 179,340.00\nAll prices are inclusive of VAT.\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.gross_value == Decimal("179340.00")
+    assert result.tax_value is None
+    assert result.raw_values["tax_value_basis"] == "vat_inclusive"
+    assert "tax_value_note" not in result.raw_values
+
+
+def test_vat_inclusive_and_undetermined_are_distinguishable_internal_states() -> None:
+    inclusive = extract_quotation_candidate("Total Amount: 100.00\nPrices include VAT.\n", [])
+    undetermined = extract_quotation_candidate("Net Amount: 100.00\n", [])
+    assert inclusive.raw_values["tax_value_basis"] != undetermined.raw_values["tax_value_basis"]
+    assert inclusive.tax_value is None
+    assert undetermined.tax_value == Decimal("0.00")
+
+
+def test_vat_derived_algebraically_from_net_and_gross_is_not_overridden_by_the_new_rule() -> None:
+    # Pre-existing `reconcile_net_tax_gross` behavior (unmodified) must
+    # still take priority: a real, derivable tax figure is never replaced
+    # by the "undetermined" 0.00 default.
+    text = "Net Amount: 1,250,000.00\nTotal Including VAT: 1,312,500.00\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.tax_value == Decimal("62500.00")
+    assert result.field_confidence["tax_value"] == ConfidenceLevel.NEEDS_REVIEW.value
+    assert "tax_value_basis" not in result.raw_values
 
 
 # --- Regression: multi-quotation-per-file detection (OCR Phase 1 fix) --

@@ -669,3 +669,200 @@ still only ever produces a *quoted* `QuotationVersion`, never an awarded
 - **No Arabic-language verification**: Tesseract supports Arabic language
   packs, but this was not exercised against real archive documents in
   this environment (see the OCR design review's open questions).
+
+## 18. Production OCR performance and real-archive extraction (OCR Phase 4)
+
+A follow-up measurement-then-fix pass, scoped to three things only:
+OCR performance, real-archive extraction gaps, and a VAT normalization
+business rule. No AI/network calls added, `financial_engine.py`
+untouched, no PO/award/invoice/dashboard work — see §16-17 for everything
+already in scope before this phase.
+
+### 18.1 Bottleneck: rendering DPI, not OCR itself
+
+Measured directly: rasterizing a page at `pymupdf`'s `get_pixmap(dpi=300)`
+and then running Tesseract on it, for a real archive page, took 30-40s —
+almost all of it inside Tesseract, not rendering. The real archive's
+pages declare a `MediaBox` (page size) that does not match their embedded
+scanned image's actual native pixel resolution — e.g. a page sized
+"26.5 x 41.5 inches" wrapping a 1910x2986px image (a ~72 DPI scan). The
+fixed `_RENDER_DPI = 300` constant rendered every page at 300 DPI against
+that inflated page size regardless, producing ~10x more pixels than the
+source actually contains for Tesseract to process, for no accuracy gain.
+
+**Fix**: `_effective_render_dpi` (`app/core/ocr_extraction.py`) computes
+each page's own DPI from its dominant embedded image's native resolution
+(`native_pixels / (mediabox_points / 72)`), clamped to `[150, 300]`. A
+normally-scaled PDF (native resolution >= 300 DPI) reproduces the old
+fixed 300 DPI exactly, by construction — zero rendering change on a
+normal scan. Falls back to 300 DPI unchanged whenever there's no
+embedded image to measure, or any error reading one.
+
+**Measured on 3 real archive pages, this container** (a direct
+render+OCR timing, old fixed 300 DPI vs. the new computed DPI, same
+Tesseract call):
+
+| page | old (300 DPI) | new (computed) | speedup | chars (old→new) | confidence (old→new) |
+|---|---|---|---|---|---|
+| 1  | 29.9s @ 7959x12442px | 8.4s @ 3980x6221px (150 DPI) | 3.6x | 1365→1506 | 71.2→70.0 |
+| 10 | 37.1s @ 8259x14509px | 9.9s @ 4130x7255px (150 DPI) | 3.8x | 2159→1984 | 67.5→73.8 |
+| 13 | 40.4s @ 8521x15117px | 11.7s @ 4261x7559px (150 DPI) | 3.5x | 2955→2835 | 80.2→83.6 |
+
+No accuracy loss on average (2/3 pages higher confidence; the third has
+fewer characters but higher confidence too — reported as measured, not
+rounded up). One genuine, narrow accuracy trade-off was found on a
+different real page during the full re-run (§18.4) — reported there, not
+hidden. (An independent, larger 8.9x-10x figure was measured for the
+same fix in an earlier session on different underlying hardware; this
+section's 3.5x-3.8x is a fresh, direct re-measurement on this container,
+reported instead of the old number so the ratio here is never inflated
+beyond what was actually re-verified.)
+
+**Whole-pipeline re-run, all 3 real files (29 pages) through
+`stage_document` end to end** (OCR + segmentation + candidate-building +
+DB writes, this container, DPI fix applied): 317s total, 10.93s/page
+average — down from an extrapolated ~37s/page at the old fixed DPI (same
+3-sample ratio applied to the full pipeline's small fixed per-page
+overhead). No `confirm_import` call anywhere in this measurement; no
+business records created.
+
+### 18.2 OCR result reuse: already correct, nothing to change
+
+Confirmed (again, directly against the code, not assumed): `extract_via_ocr`
+is called exactly once per staged document (`import_service.py`,
+`run_extraction`), and `OcrEngine.ocr_image` is called exactly once per
+page. The full OCR result is stored once in
+`ImportedDocument.raw_extracted_data`; segmentation (`propose_segments`,
+`lock_segments`), field-page lookup (`find_field_pages`), and candidate
+rebuilding all deserialize and slice that one stored result — none of
+them re-invoke the OCR engine. This means "reuse/caching" contributes
+**no additional speedup** at any scale: the entire benefit of not
+re-OCR'ing was already built into the architecture before this phase.
+The scale estimates in §18.5 are pure per-page-OCR-cost estimates for
+exactly this reason.
+
+### 18.3 Extraction fixes (real-archive evidenced, `import_extraction.py`)
+
+Three narrow label/pattern additions, each traced to a specific real
+archive OCR line (not invented):
+
+- **Table-totals pipe separator + parenthetical currency annotation**:
+  real BOQ totals rows OCR as `"Total (SAR) | 51,644.77"` /
+  `"Sub Total (SAR) | 49,185.50"` — a table-cell `|` instead of a colon,
+  with the currency printed inside the label's own header cell. Neither
+  shape matched the previous `[:\-»]` separator class or the bare-label
+  assumption. `_pattern_for` now accepts `|` and `—` (em dash — also a
+  real, observed OCR misread, alongside the existing `»` one) as
+  separators, one-or-more of them together (a real doubled-separator
+  shape, `"— :"`, was also found), and an optional `(...)` annotation and
+  trailing `.` between the label and the separator.
+- **"Kind Attn." client label**: every real archive document that labels
+  its client contact prints `"Kind Attn."` (with the period) — bare
+  `"Attn"` never once appears at the start of a line unprefixed anywhere
+  in the archive. `client_name` was therefore never populated from *any*
+  real document despite `"attn"` already being a recognized alias.
+  `"kind attn"` is now a higher-priority label alongside it.
+  Re-verified against the real 24-page archive: `client_name` now
+  populates on 8 of 10 real segments (the remaining 2 have a genuinely
+  garbled OCR line for this field — `client_name` correctly stays `None`
+  there rather than guessing).
+- **Drawing/attachment pages verified safe, no change needed**: directly
+  checked the real archive's two drawing pages (floor plans with
+  dimension callouts) against every recognized field label —
+  zero matches, before or after this phase's pattern changes. Label
+  matching is line-start-anchored and requires the literal label text, so
+  a dimension/measurement number never gets extracted as a financial
+  value; this was already true and remains true. No fix was needed here,
+  and this was verified, not assumed.
+- **Known, deliberately unresolved gap**: a table-totals label preceded
+  by OCR-garbled leading noise (`"eae Total (SAR) |__22,050.00"`,
+  `"Ee | Total (SAR) 168,495.00"`) still doesn't match — the line-start
+  anchor was not loosened to reach it, because that would risk matching
+  label text embedded mid-sentence (the same risk the bare-whitespace-
+  separator restriction already guards against). These cases correctly
+  fall through to the missing-`net_value` safety gate (`BLOCKED`) instead
+  of being guessed.
+
+### 18.4 VAT business rule: "genuinely not determinable" → SAR 0.00
+
+Real archive VAT wording, captured from the actual saved OCR output:
+explicit amounts (`"VAT 5% SAR 1,125.00"`, `"5% Vat SAR 325.00"`, etc.,
+already extracted normally, untouched by this change); and VAT-excluded/
+no-amount wording (`"VAT 5% not included in our offer"`, `"5% VAT will
+be charged extra"`) on roughly half of the real documents tested — these
+state VAT is excluded but print no absolute SAR figure anywhere. No
+genuine "VAT-inclusive" wording (prices already including VAT, no
+separate line expected) was found anywhere in the real archive, but the
+business rule still had to support it for future documents.
+
+`_apply_vat_determination_when_undetermined` runs only when `tax_value`
+is still unset after the existing label scan and `reconcile_net_tax_gross`
+(unmodified). It classifies the *reason* into two distinguishable
+internal states, tagged in `raw_values["tax_value_basis"]` (the existing
+persisted JSON field — no schema/migration needed):
+
+- `"vat_inclusive"` — explicit inclusive wording found. `tax_value` stays
+  `None` (never split out of the total by assuming a rate); no `SAR 0.00`
+  is applied here, since this is not the "undeterminable" case.
+- `"undetermined_zero_applied"` — no VAT amount is determinable by any
+  means (VAT-excluded wording with no figure, or nothing at all). Per the
+  business rule, `tax_value` is set to a fixed `Decimal("0.00")` — never
+  a rate-derived figure — and flagged `ConfidenceLevel.LOW`, so the
+  candidate requires review rather than reading as certain. The matched
+  excluded-wording phrase, if any, is recorded in
+  `raw_values["tax_value_note"]` for audit/traceability.
+
+Neither state ever multiplies a stated rate by `net_value` to invent an
+amount, and `financial_engine.reconcile_net_tax_gross` itself is
+unmodified — a real, derivable tax figure (from known net+gross) still
+always takes priority over the business-rule default.
+
+Re-verified against the real 24-page archive's 10 real segments: 6 got
+`"undetermined_zero_applied"` with the real matched wording captured
+verbatim in `tax_value_note` (e.g. `"VAT 5% not includ"`, `"VAT will be
+charged extra"`); one derived a real tax figure algebraically as before
+(unaffected); none fabricated a rate-derived amount.
+
+**One genuine, narrow accuracy trade-off found during this re-run**: on
+one real page, the lower-DPI rendering caused Tesseract to misread a
+leading "5" as "$" in `"Total (SAR) | 51,644.77"` → `"$1,644.77"`,
+producing a materially wrong `gross_value`. This is a real, if narrow,
+cost of the DPI reduction — reported honestly, not hidden. It has no
+safety impact: this segment (already carrying an unrelated cross-page
+bleed-through issue — see §10.1/ground truth page 11) was already
+`BLOCKED` by the existing missing-mandatory-field/LOW-confidence gate, so
+the wrong figure was never at risk of silently reaching confirmation.
+
+### 18.5 Scale estimate (measured throughput, not guessed)
+
+Using the measured 10.93s/page whole-pipeline average (§18.1) and this
+archive's real page/quotation ratio (24 pages / 18 quotation documents +
+drawings + a delivery note ≈ 1.5 pages/quotation — stated explicitly as
+this archive's own ratio, not a general constant):
+
+| quotations | pages (≈1.5/doc) | new DPI (10.93s/page) | old fixed DPI (≈37.2s/page, extrapolated) |
+|---|---|---|---|
+| 100    | 150    | ~27 min   | ~93 min (1.6 hr) |
+| 1,000  | 1,500  | ~4.6 hr   | ~15.5 hr |
+| 5,000  | 7,500  | ~22.8 hr  | ~77.5 hr (3.2 days) |
+| 10,000 | 15,000 | ~45.5 hr  | ~155 hr (6.5 days) |
+
+Both columns assume today's **synchronous, one-document-at-a-time**
+staging (`stage_document` calls `run_extraction` inline — the existing,
+already-documented §16 limitation, unchanged by this phase). OCR result
+reuse contributes no additional reduction beyond what's already in these
+numbers (§18.2). At 5,000-10,000 document scale the synchronous model is
+the real remaining constraint, not per-page OCR cost — background/worker
+processing (already flagged in §16 as a future-phase change, not
+attempted here) is what closes that gap, not further DPI tuning.
+
+### 18.6 Explicitly not done in this phase
+
+No change to `import_segmentation.py`'s boundary-detection signals (the
+`client_name`/"attn" boundary-signal idea from the prior review's
+recommendations was left out — it serves segmentation usability, not
+this phase's three explicit tasks, and this phase's own re-run shows the
+DPI fix already shifted some real boundaries incidentally, which is
+enough segmentation-side change to observe in one pass). No PO import, no
+award-state changes, no invoice import, no dashboards. No change to
+`app/core/financial_engine.py`. No new AI/ML/network-based extraction.
