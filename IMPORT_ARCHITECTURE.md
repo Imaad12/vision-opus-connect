@@ -592,6 +592,49 @@ diligence: a long or multi-quotation-looking segment should be split
 further with `split_segment` before locking, exactly as the boundary
 review screen is designed to prompt.
 
+**Fixed (final adversarial review)**: the residual risk named above was
+reproduced as a genuine, confirmable defect — constructed directly (not
+assumed) and confirmed end-to-end including an actual `QuotationVersion`
+write, then reverted: quotation A's own reference/date (page 1) combined
+with an entirely unidentified document's total (a later page, with
+neither its own reference nor date recognized at all) reached
+`HIGH_CONFIDENCE` and confirmed successfully, because
+`find_distinct_quotation_references`/`_dates` only compare values they
+actually recognized — by construction, none of the "other document"'s
+fields were. `app.core.import_segmentation.find_field_pages` now locates
+which page each field actually came from (reusing the same per-page
+`extract_quotation_candidate` calls `detect_segments` already makes — no
+change to that function itself, or to `detect_segments`/boundary proposal
+itself). When a financial field's page shares no page with the segment's
+own reference or date, its confidence is downgraded from HIGH to LOW, and
+`app.core.ocr_confidence.compute_ocr_confidence_status` now treats a LOW
+`net_value` as BLOCKED — the same structural gate (disables Confirm,
+enforced defensively inside `confirm_import`) a genuinely *missing* value
+already used, not a cosmetic confidence label.
+
+**Accepted trade-off, stated plainly**: this cannot distinguish "a
+different, unidentified document's total" from "this same quotation's own
+total, legitimately printed on a later page with nothing repeated in
+between" — no textual signal distinguishes them, and inventing one (a
+page-distance threshold, a layout heuristic) was explicitly out of scope.
+A genuinely long, single quotation is still correctly proposed as *one*
+segment (segmentation itself is unaffected), but its total is now flagged
+for explicit reviewer sign-off rather than silently auto-confirmed.
+Verified this is friction, not a dead end: a real edit to the flagged
+field clears it and confirmation proceeds; a plain, unchanged
+resubmission (what a `QLineEdit`'s `editingFinished` fires on ordinary
+focus-out, edited or not) deliberately does *not* clear it, so the gate
+cannot be defeated by incidental UI interaction.
+
+Re-validated against the real archive with this fix applied: all 11
+proposed segments remain `BLOCKED` (0 confirmable either way, unchanged
+from before this fix — this archive's near-total absence of captured
+financial values means the fix's specific contribution wasn't the only
+thing blocking any of them in this run), and the new check independently
+flagged 2 of the 11 segments' financial fields on page-mismatch grounds,
+confirming it fires correctly against real OCR output, not just
+constructed text.
+
 No quotation was confirmed from the real archive during this validation
 — segments were proposed, accepted, and locked only, to exercise the
 full persistence path; `confirm_import` was never called against it.
