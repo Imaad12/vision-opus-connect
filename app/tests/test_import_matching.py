@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
 
-from app.services import client_service, project_service
-from app.services.import_matching import suggest_client_matches, suggest_project_matches
-from app.services.import_service import stage_document
+from app.services import client_service, project_service, quotation_service
+from app.services.import_matching import suggest_client_matches, suggest_project_matches, suggest_quotation_matches
+from app.services.import_service import confirm_import, stage_document
 
 
 def _stage(session: Session, tmp_path, text: str, name: str = "quote.txt"):
@@ -58,3 +60,54 @@ def test_suggest_client_matches_never_returns_deleted_clients(db_session: Sessio
     matches = suggest_client_matches(db_session, document.quotation_candidate)
 
     assert client not in matches
+
+
+def test_suggest_quotation_matches_finds_existing_reference_with_date_and_total(
+    db_session: Session, tmp_path
+) -> None:
+    """Uses the real VN/QU/412/18 archive scenario: an existing quotation
+    is on file (Nov 21, 2018, SAR 168,495); a second document sharing the
+    same reference is staged. The advisory match must expose the existing
+    quotation's current date/total so a reviewer can compare before
+    deciding, without merging or overwriting anything."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    existing_document = _stage(
+        db_session,
+        tmp_path,
+        "Quotation Number: VN/QU/412/18\nQuotation Date: 21/11/2018\nNet Amount: 168,495.00\n",
+        name="existing.txt",
+    )
+    confirm_import(db_session, existing_document, client_id=client.id, project_id=project.id)
+
+    new_document = _stage(
+        db_session,
+        tmp_path,
+        "Quotation Number: VN/QU/412/18\nQuotation Date: 27/11/2018\nNet Amount: 151,955.00\n",
+        name="revision.txt",
+    )
+    matches = suggest_quotation_matches(db_session, new_document.quotation_candidate)
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert match.reference_number == "VN/QU/412/18"
+    assert match.current_version_date.isoformat() == "2018-11-21"
+    assert match.current_version_total == Decimal("168495.00")
+    assert match.project_name == "Office Facilities Work"
+    assert match.client_name == "Ashtead Technology"
+
+    # Purely advisory -- nothing was merged, overwritten, or otherwise
+    # touched by asking for suggestions.
+    assert len(quotation_service.list_versions_for_quotation(db_session, match.quotation.id)) == 1
+
+
+def test_suggest_quotation_matches_returns_empty_when_no_reference_extracted(
+    db_session: Session, tmp_path
+) -> None:
+    document = _stage(db_session, tmp_path, "Nothing structured here.\n")
+    assert suggest_quotation_matches(db_session, document.quotation_candidate) == []
+
+
+def test_suggest_quotation_matches_returns_empty_when_reference_is_new(db_session: Session, tmp_path) -> None:
+    document = _stage(db_session, tmp_path, "Quotation Number: Q-BRAND-NEW-999\n")
+    assert suggest_quotation_matches(db_session, document.quotation_candidate) == []

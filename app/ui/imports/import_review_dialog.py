@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from app.core.enums import ConfidenceLevel, Currency, ExtractionStatus, ImportReviewStatus
 from app.core.import_normalization import parse_date_maybe
 from app.database.session import session_scope
-from app.services.import_matching import suggest_client_matches, suggest_project_matches
+from app.services.import_matching import suggest_client_matches, suggest_project_matches, suggest_quotation_matches
 from app.services.import_service import get_imported_document, reject_import, update_boq_line_candidate, update_quotation_candidate
 from app.ui.confidence_labels import AMOUNT_FLAGGED_LABEL, AMOUNT_OK_LABEL, CONFIDENCE_COLORS, CONFIDENCE_LABELS
 from app.ui.errors import run_guarded
@@ -131,8 +131,12 @@ class ImportReviewDialog(QDialog):
                     for p in suggest_project_matches(session, candidate)
                 ]
                 client_matches = [(c.id, c.name) for c in suggest_client_matches(session, candidate)]
+                quotation_matches = [
+                    (m.reference_number, m.current_version_date, m.current_version_total)
+                    for m in suggest_quotation_matches(session, candidate)
+                ]
             else:
-                project_matches, client_matches = [], []
+                project_matches, client_matches, quotation_matches = [], [], []
 
             boq_rows = [
                 {
@@ -163,7 +167,7 @@ class ImportReviewDialog(QDialog):
         if candidate_data is not None:
             self._build_quotation_section(candidate_data)
         self._build_boq_section(boq_rows)
-        self._build_matching_section(candidate_data, project_matches, client_matches)
+        self._build_matching_section(candidate_data, project_matches, client_matches, quotation_matches)
         self._build_action_buttons()
 
         if self._review_status != ImportReviewStatus.NEEDS_REVIEW:
@@ -325,7 +329,9 @@ class ImportReviewDialog(QDialog):
         layout.addWidget(table)
         self._layout.addWidget(group)
 
-    def _build_matching_section(self, candidate: dict | None, project_matches: list, client_matches: list) -> None:
+    def _build_matching_section(
+        self, candidate: dict | None, project_matches: list, client_matches: list, quotation_matches: list
+    ) -> None:
         group = QGroupBox("Client & Project")
         layout = QVBoxLayout(group)
 
@@ -357,6 +363,16 @@ class ImportReviewDialog(QDialog):
         layout.addWidget(self._project_selector)
 
         layout.addWidget(QLabel("Quotation"))
+        if quotation_matches:
+            reference, existing_date, existing_total = quotation_matches[0]
+            hint = QLabel(
+                f"A quotation with reference '{reference}' already exists — current version: "
+                f"{format_date(existing_date)}, {format_money(existing_total)}. Adding this as a "
+                "revision will be checked against that date/total before it's confirmed."
+            )
+            hint.setObjectName("pageSubtitle")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
         self._quotation_combo = QComboBox()
         self._quotation_combo.addItem("New quotation", None)
         self._reload_quotation_options()

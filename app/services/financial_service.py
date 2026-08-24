@@ -59,9 +59,21 @@ def _sum_or_none(values: list[Decimal]) -> Decimal | None:
 def _get_relevant_quotation_version(session: Session, project: Project) -> QuotationVersion | None:
     """The quotation version representing this project's current quoted
     basis: the winning version if the project has been awarded, otherwise
-    the most recently created version across all of the project's
-    quotations (covering a project still at tender stage, possibly with
-    multiple revisions)."""
+    the chronologically most recent version (by `issued_date`, not by
+    insertion order) across all of the project's quotations (covering a
+    project still at tender stage, possibly with multiple revisions).
+
+    Ordering by `issued_date` rather than `id`/insertion order matters
+    once revisions can be confirmed out of order (e.g. two scanned
+    documents for the same quotation reviewed in whichever order they
+    happened to be processed) — "current" must mean "dated most recently,"
+    never "entered into the system most recently." See
+    `app.services.quotation_service.get_current_version` (the equivalent,
+    single-quotation version of this ordering) and
+    `app.services.import_service.confirm_import`'s revision-conflict
+    handling, which is what keeps an out-of-order revision from reaching
+    this table without an explicit reviewer decision in the first place.
+    """
     if project.winning_quotation_version_id is not None:
         return session.get(QuotationVersion, project.winning_quotation_version_id)
 
@@ -69,7 +81,7 @@ def _get_relevant_quotation_version(session: Session, project: Project) -> Quota
         select(QuotationVersion)
         .join(Quotation, QuotationVersion.quotation_id == Quotation.id)
         .where(Quotation.project_id == project.id, QuotationVersion.is_deleted.is_(False))
-        .order_by(QuotationVersion.id.desc())
+        .order_by(QuotationVersion.issued_date.desc().nulls_last(), QuotationVersion.id.desc())
     )
     return session.execute(stmt).scalars().first()
 

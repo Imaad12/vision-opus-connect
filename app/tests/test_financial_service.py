@@ -763,3 +763,80 @@ def test_snapshot_estimated_cost_uses_only_latest_revision_not_all_of_them(db_se
 
     # Only revision 2's total (820,000), never revision_1 + revision_2 (1,600,000).
     assert snapshot.estimated_cost == Decimal("820000")
+
+
+def test_relevant_quotation_version_uses_chronological_date_not_insertion_order(db_session: Session) -> None:
+    """Regression test for the real VN/QU/412/18 archive scenario: two
+    versions of the same quotation, entered into the database in the
+    OPPOSITE order of their actual issued dates (the chronologically
+    earlier one inserted second). The project's "current quoted basis"
+    must reflect the later-dated document (SAR 151,955), never whichever
+    row happened to be inserted last (which would incorrectly be the
+    earlier-dated SAR 168,495 row here)."""
+    project = _make_project(db_session)
+    quotation = Quotation(project_id=project.id, reference_number="VN/QU/412/18")
+    db_session.add(quotation)
+    db_session.flush()
+
+    # Inserted FIRST but dated LATER (Nov 27) -- as if the later document
+    # were reviewed/confirmed before the earlier one.
+    later_version = QuotationVersion(
+        quotation_id=quotation.id,
+        version_number=1,
+        status=QuotationStatus.DRAFT,
+        quoted_value=Decimal("151955.00"),
+        issued_date=date(2018, 11, 27),
+    )
+    db_session.add(later_version)
+    db_session.flush()
+
+    # Inserted SECOND (higher id) but dated EARLIER (Nov 21).
+    earlier_version = QuotationVersion(
+        quotation_id=quotation.id,
+        version_number=2,
+        status=QuotationStatus.DRAFT,
+        quoted_value=Decimal("168495.00"),
+        issued_date=date(2018, 11, 21),
+    )
+    db_session.add(earlier_version)
+    db_session.commit()
+
+    snapshot = build_project_financial_snapshot(db_session, project)
+
+    assert snapshot.quoted_value == Decimal("151955.00")
+
+
+def test_relevant_quotation_version_chronological_order_also_holds_in_reverse_insertion_order(
+    db_session: Session,
+) -> None:
+    """Same scenario as above, but inserted in the "normal" order
+    (earlier-dated version first) -- proves the fix doesn't merely swap
+    which insertion order wins; it genuinely follows the date either way."""
+    project = _make_project(db_session)
+    quotation = Quotation(project_id=project.id, reference_number="VN/QU/412/18")
+    db_session.add(quotation)
+    db_session.flush()
+
+    earlier_version = QuotationVersion(
+        quotation_id=quotation.id,
+        version_number=1,
+        status=QuotationStatus.DRAFT,
+        quoted_value=Decimal("168495.00"),
+        issued_date=date(2018, 11, 21),
+    )
+    db_session.add(earlier_version)
+    db_session.flush()
+
+    later_version = QuotationVersion(
+        quotation_id=quotation.id,
+        version_number=2,
+        status=QuotationStatus.DRAFT,
+        quoted_value=Decimal("151955.00"),
+        issued_date=date(2018, 11, 27),
+    )
+    db_session.add(later_version)
+    db_session.commit()
+
+    snapshot = build_project_financial_snapshot(db_session, project)
+
+    assert snapshot.quoted_value == Decimal("151955.00")

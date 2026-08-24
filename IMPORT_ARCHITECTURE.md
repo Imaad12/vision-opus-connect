@@ -207,6 +207,63 @@ record (via the same `ClientSelector`/`ProjectSelector` widgets used
 elsewhere in the app) or creates a new one — there is no code path that
 writes a `Client`/`Project` row without that explicit choice.
 
+`suggest_quotation_matches` follows the same pattern for quotations —
+*exact* reference-number equality only (a reference is an identifier, not
+free text to fuzzy-match), returning the existing quotation plus its
+current version's date/total so the reviewer can compare before deciding
+whether to add a revision or create a new quotation. It is purely
+advisory; see §10.1 for where the actual, enforced safety check lives.
+
+### 10.1 Quotation-reference conflicts: a real archive finding, and how it's handled
+
+A survey of Vision Contracting's real historical archive found the same
+quotation reference appearing more than once with different dates and
+totals, and no consistent revision-marking convention (`REV`, a letter
+suffix, or nothing at all — see the regression tests' `VN/QU/412/18`
+fixture, drawn directly from that archive). Reference number alone can
+never identify which document is the current revision.
+
+`Quotation.reference_number` already carries a database-wide unique
+constraint, so a second, *independent* `Quotation` can never silently be
+created under a reference that's already in use — `create_quotation`
+converts that constraint violation into a clear `ValidationError`. The
+gap was the *other* path: adding an incoming document as a **revision**
+of an existing quotation (`quotation_service.create_quotation_revision`)
+had no check at all comparing the incoming document's date against the
+existing quotation's current one.
+
+`confirm_import` now compares the incoming candidate against the target
+quotation's *chronologically* current version
+(`quotation_service.get_current_version` — ordered by `issued_date`, not
+insertion order) before creating the revision:
+
+- **Incoming date earlier** than the existing current version → blocked
+  by default, raising `RevisionConflictError` (a `ValidationError`
+  subclass carrying the reference, both dates, and both totals).
+- **Same date, materially different total** → also blocked by default
+  (same exception) — chronology can't resolve which is authoritative
+  when the dates tie.
+- **Incoming date later** → proceeds normally, no acknowledgement
+  needed. This is the ordinary, expected workflow and must never be
+  obstructed just because the reference already exists.
+
+`confirm_import` accepts `acknowledge_revision_conflict: bool = False` to
+let a reviewer explicitly proceed anyway — the same block-by-default,
+explicit-override shape as `stage_document`'s `allow_duplicate` parameter.
+In the UI, this is never a silently-set flag: `ImportConfirmationDialog`
+catches `RevisionConflictError` specifically and shows the conflict in a
+dialog the reviewer must explicitly answer "yes" to before retrying with
+acknowledgement set; declining leaves the document unconfirmed and
+creates nothing. An acknowledged conflict still only ever *adds* a new
+`QuotationVersion` row — nothing is ever overwritten, and both documents'
+data remain fully intact and independently queryable afterward.
+
+Because a revision can now legitimately be confirmed out of chronological
+order (once acknowledged), `financial_service._get_relevant_quotation_version`
+also orders by `issued_date` rather than insertion order — the project's
+"current quoted basis" always means the most recently *dated* version,
+never whichever row happened to be written to the database last.
+
 ## 11. Audit trail (`ImportAuditLogEntry`)
 
 Every staged document accumulates an append-only log:
