@@ -23,10 +23,16 @@ from PySide6.QtWidgets import (
 )
 
 from app.database.session import session_scope
-from app.services.import_service import check_for_duplicate, list_imported_documents, stage_document
+from app.services.import_service import (
+    check_for_duplicate,
+    get_imported_document,
+    list_imported_documents,
+    stage_document,
+)
 from app.ui.errors import run_guarded
 from app.ui.formatting import format_date
 from app.ui.imports.import_review_dialog import ImportReviewDialog
+from app.ui.imports.segment_boundary_review_dialog import SegmentBoundaryReviewDialog
 from app.ui.widgets.sortable_items import ValueSortItem
 
 _FILE_FILTER = (
@@ -42,6 +48,7 @@ _STATUS_LABELS = {
     "UNSUPPORTED": "Unsupported",
     "OCR_REQUIRED": "OCR Required",
     "MULTIPLE_QUOTATIONS_DETECTED": "Multiple Quotations Found",
+    "SEGMENTS_PROPOSED": "Boundaries Proposed",
 }
 
 _REVIEW_STATUS_LABELS = {
@@ -134,7 +141,21 @@ class ImportsPage(QWidget):
         self._open_review_by_id(item.data(1000))
 
     def _open_review_by_id(self, document_id: int) -> None:
-        dialog = ImportReviewDialog(document_id, self)
+        with session_scope() as session:
+            document = get_imported_document(session, document_id)
+            has_segments = bool(document and document.segments)
+
+        # A sequentially segmented document (see IMPORT_ARCHITECTURE.md)
+        # always opens the boundary-review hub first, even once every
+        # segment is locked/confirmed -- it's the natural place to see and
+        # re-open each segment's own quotation review. A document that was
+        # never segmented (deterministic imports, and OCR scans with no
+        # page structure to segment) opens the original single-candidate
+        # review dialog unchanged.
+        if has_segments:
+            dialog = SegmentBoundaryReviewDialog(document_id, self)
+        else:
+            dialog = ImportReviewDialog(document_id, self)
         dialog.exec()
         self.refresh()
 

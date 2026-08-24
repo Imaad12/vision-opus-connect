@@ -26,7 +26,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime
+from sqlalchemy import Boolean, DateTime
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,6 +37,7 @@ from app.core.enums import (
     ImportAuditEventType,
     ImportDocumentKind,
     ImportReviewStatus,
+    SegmentReviewStatus,
 )
 from app.database.base import Base, TimestampMixin
 
@@ -109,11 +110,39 @@ class ImportedDocument(Base, TimestampMixin):
 
     notes: Mapped[str | None] = mapped_column(Text)
 
+    # The single-candidate relationship kept by the original Phase 4/OCR
+    # Phase 1 shape -- one document, one candidate, no segments. Scoped
+    # (via the join condition) to rows with no owning segment, so it stays
+    # safely 1:1 even for a segmented OCR document, where every candidate
+    # instead belongs to one of `segments` below and this relationship
+    # simply returns None. Deterministic (non-OCR) documents never gain
+    # segments, so this is completely unaffected for them.
     quotation_candidate: Mapped["ImportedQuotationCandidate | None"] = relationship(
-        "ImportedQuotationCandidate", back_populates="document", uselist=False
+        "ImportedQuotationCandidate",
+        back_populates="document",
+        uselist=False,
+        primaryjoin=(
+            "and_(ImportedQuotationCandidate.imported_document_id == ImportedDocument.id, "
+            "ImportedQuotationCandidate.imported_document_segment_id.is_(None))"
+        ),
+        viewonly=True,
     )
     boq_line_candidates: Mapped[list["ImportedBoqLineCandidate"]] = relationship(
-        "ImportedBoqLineCandidate", back_populates="document", order_by="ImportedBoqLineCandidate.row_order"
+        "ImportedBoqLineCandidate",
+        back_populates="document",
+        order_by="ImportedBoqLineCandidate.row_order",
+        primaryjoin=(
+            "and_(ImportedBoqLineCandidate.imported_document_id == ImportedDocument.id, "
+            "ImportedBoqLineCandidate.imported_document_segment_id.is_(None))"
+        ),
+        viewonly=True,
+    )
+    #: Sequential-segmentation (see `app.core.import_segmentation`) proposed
+    #: page ranges, ordered. Empty for every deterministic (non-OCR)
+    #: document and for an OCR document whose extraction never reached
+    #: segmentation (e.g. it failed before OCR completed).
+    segments: Mapped[list["ImportedDocumentSegment"]] = relationship(
+        "ImportedDocumentSegment", back_populates="document", order_by="ImportedDocumentSegment.segment_order"
     )
     audit_log: Mapped[list["ImportAuditLogEntry"]] = relationship(
         "ImportAuditLogEntry", back_populates="document", order_by="ImportAuditLogEntry.occurred_at"
@@ -154,8 +183,23 @@ class ImportedQuotationCandidate(Base, TimestampMixin):
     __tablename__ = "imported_quotation_candidates"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    imported_document_id: Mapped[int] = mapped_column(
-        ForeignKey("imported_documents.id"), nullable=False, unique=True
+    # No longer unique: a segmented OCR document can own more than one
+    # candidate (one per accepted segment). `imported_document_segment_id`
+    # below is what's actually unique -- see that column. A deterministic
+    # (non-OCR) document is still, by construction, only ever given one
+    # candidate row (`run_extraction`'s original code path is unchanged),
+    # so this relaxation changes nothing observable for it.
+    imported_document_id: Mapped[int] = mapped_column(ForeignKey("imported_documents.id"), nullable=False)
+    # NULL for every deterministic (non-OCR) candidate and for an
+    # OCR candidate produced before sequential segmentation existed --
+    # both keep exactly Phase 4/OCR Phase 1's original one-candidate-per-
+    # document shape via `ImportedDocument.quotation_candidate` above. Set
+    # (and unique) once a segment has been locked and this candidate was
+    # built from that segment's own sliced pages alone -- see
+    # `app.services.import_service.lock_segments` and
+    # `app.core.import_segmentation.slice_raw_extraction_to_pages`.
+    imported_document_segment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("imported_document_segments.id"), unique=True
     )
 
     quotation_number: Mapped[str | None] = mapped_column(String(100))
@@ -176,7 +220,15 @@ class ImportedQuotationCandidate(Base, TimestampMixin):
     field_confidence: Mapped[str | None] = mapped_column(Text)
 
     document: Mapped["ImportedDocument"] = relationship(
-        "ImportedDocument", back_populates="quotation_candidate", foreign_keys=[imported_document_id]
+        "ImportedDocument",
+        back_populates="quotation_candidate",
+        foreign_keys=[imported_document_id],
+        viewonly=True,
+    )
+    segment: Mapped["ImportedDocumentSegment | None"] = relationship(
+        "ImportedDocumentSegment",
+        back_populates="quotation_candidate",
+        foreign_keys=[imported_document_segment_id],
     )
 
     def __repr__(self) -> str:
@@ -196,6 +248,13 @@ class ImportedBoqLineCandidate(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     imported_document_id: Mapped[int] = mapped_column(ForeignKey("imported_documents.id"), nullable=False)
+    # NULL for a deterministic (non-OCR) import or a pre-segmentation OCR
+    # candidate -- same meaning as the matching column on
+    # `ImportedQuotationCandidate` above. Many rows share one segment
+    # (unlike the candidate's segment FK, this one is not unique).
+    imported_document_segment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("imported_document_segments.id")
+    )
     row_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     group_label: Mapped[str | None] = mapped_column(String(255))
@@ -211,11 +270,114 @@ class ImportedBoqLineCandidate(Base, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text)
 
     document: Mapped["ImportedDocument"] = relationship(
-        "ImportedDocument", back_populates="boq_line_candidates", foreign_keys=[imported_document_id]
+        "ImportedDocument",
+        back_populates="boq_line_candidates",
+        foreign_keys=[imported_document_id],
+        viewonly=True,
+    )
+    segment: Mapped["ImportedDocumentSegment | None"] = relationship(
+        "ImportedDocumentSegment",
+        back_populates="boq_line_candidates",
+        foreign_keys=[imported_document_segment_id],
     )
 
     def __repr__(self) -> str:
         return f"ImportedBoqLineCandidate(id={self.id!r}, description={self.description!r})"
+
+
+class ImportedDocumentSegment(Base, TimestampMixin):
+    """One proposed (and, once resolved, locked) quotation page range
+    within a scanned batch document -- see `app.core.import_segmentation`
+    for how it is proposed and IMPORT_ARCHITECTURE.md's sequential
+    segmentation section for the full design.
+
+    `review_status` is the single lifecycle axis for both the boundary
+    review and the eventual per-segment confirmation (see
+    `SegmentReviewStatus`): PROPOSED -> ACCEPTED -> LOCKED -> CONFIRMED |
+    REJECTED, or PROPOSED/ACCEPTED -> EXCLUDED_NOT_A_QUOTATION. No
+    transition out of PROPOSED happens automatically, regardless of
+    `boundary_confidence` -- a human must always act.
+
+    `resulting_*` columns mirror `ImportedDocument`'s own -- populated
+    only once *this segment* (not the document as a whole) is confirmed,
+    since a segmented document can produce several independent
+    `Quotation`/`QuotationVersion` rows, one per confirmed segment.
+    """
+
+    __tablename__ = "imported_document_segments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    imported_document_id: Mapped[int] = mapped_column(ForeignKey("imported_documents.id"), nullable=False)
+    segment_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    start_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_page: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # `ConfidenceLevel.HIGH`/`ConfidenceLevel.LOW` values -- reusing the
+    # existing categorical vocabulary rather than inventing a second one
+    # (see `app.core.import_segmentation._classify_boundary`).
+    boundary_confidence: Mapped[str | None] = mapped_column(String(20))
+    #: Human-readable reasons behind this segment's opening boundary
+    #: (newline-joined) -- what a reviewer sees to judge whether to
+    #: accept, move, split, merge, or exclude it.
+    boundary_signals: Mapped[str | None] = mapped_column(Text)
+    #: Segmentation's own best-guess identity for this page range (see
+    #: `app.core.import_segmentation.PageSegment`) -- shown to the
+    #: reviewer on the boundary screen *before* any candidate exists, so
+    #: they have something to judge the proposal against. Purely a
+    #: display convenience: never read by `confirm_import` or anything
+    #: financial -- the real, reviewable value only ever comes from the
+    #: `ImportedQuotationCandidate` built after this segment is locked.
+    detected_quotation_number: Mapped[str | None] = mapped_column(String(100))
+    detected_quotation_date: Mapped[date | None] = mapped_column()
+
+    review_status: Mapped[SegmentReviewStatus] = mapped_column(
+        SAEnum(SegmentReviewStatus, native_enum=False),
+        default=SegmentReviewStatus.PROPOSED,
+        nullable=False,
+    )
+    #: True once a reviewer has moved, split, merged, or otherwise changed
+    #: this segment's boundary from what segmentation originally proposed
+    #: -- an audit signal distinguishing "reviewer agreed with the
+    #: proposal" from "reviewer corrected it".
+    reviewer_adjusted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Populated only after this *segment* (not necessarily the whole
+    # document) is confirmed -- see app/services/import_service.py.
+    resulting_client_id: Mapped[int | None] = mapped_column(ForeignKey("clients.id"))
+    resulting_project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"))
+    resulting_quotation_id: Mapped[int | None] = mapped_column(ForeignKey("quotations.id"))
+    resulting_quotation_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quotation_versions.id")
+    )
+    resulting_boq_id: Mapped[int | None] = mapped_column(ForeignKey("boqs.id"))
+
+    document: Mapped["ImportedDocument"] = relationship("ImportedDocument", back_populates="segments")
+    quotation_candidate: Mapped["ImportedQuotationCandidate | None"] = relationship(
+        "ImportedQuotationCandidate", back_populates="segment", uselist=False
+    )
+    boq_line_candidates: Mapped[list["ImportedBoqLineCandidate"]] = relationship(
+        "ImportedBoqLineCandidate", back_populates="segment", order_by="ImportedBoqLineCandidate.row_order"
+    )
+
+    resulting_client: Mapped["Client | None"] = relationship("Client", foreign_keys=[resulting_client_id])
+    resulting_project: Mapped["Project | None"] = relationship("Project", foreign_keys=[resulting_project_id])
+    resulting_quotation: Mapped["Quotation | None"] = relationship(
+        "Quotation", foreign_keys=[resulting_quotation_id]
+    )
+    resulting_quotation_version: Mapped["QuotationVersion | None"] = relationship(
+        "QuotationVersion", foreign_keys=[resulting_quotation_version_id]
+    )
+    resulting_boq: Mapped["BOQ | None"] = relationship("BOQ", foreign_keys=[resulting_boq_id])
+
+    def __repr__(self) -> str:
+        return (
+            f"ImportedDocumentSegment(id={self.id!r}, pages={self.start_page}-{self.end_page}, "
+            f"review_status={self.review_status!r})"
+        )
 
 
 class ImportAuditLogEntry(Base):

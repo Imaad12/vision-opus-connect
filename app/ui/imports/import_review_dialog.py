@@ -32,12 +32,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.enums import ConfidenceLevel, Currency, ExtractionStatus, ImportReviewStatus, OcrConfidenceStatus
+from app.core.enums import (
+    ConfidenceLevel,
+    Currency,
+    ExtractionStatus,
+    ImportReviewStatus,
+    OcrConfidenceStatus,
+    SegmentReviewStatus,
+)
 from app.core.import_normalization import parse_date_maybe
 from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.database.session import session_scope
 from app.services.import_matching import suggest_client_matches, suggest_project_matches, suggest_quotation_matches
-from app.services.import_service import get_imported_document, reject_import, update_boq_line_candidate, update_quotation_candidate
+from app.services.import_service import (
+    get_imported_document,
+    reject_import,
+    update_boq_line_candidate,
+    update_quotation_candidate,
+)
 from app.ui.confidence_labels import (
     AMOUNT_FLAGGED_LABEL,
     AMOUNT_OK_LABEL,
@@ -81,10 +93,11 @@ def _parse_decimal_input(text: str) -> Decimal | None:
 
 
 class ImportReviewDialog(QDialog):
-    def __init__(self, document_id: int, parent: QWidget | None = None) -> None:
+    def __init__(self, document_id: int, parent: QWidget | None = None, *, segment_id: int | None = None) -> None:
         super().__init__(parent)
         self._document_id = document_id
-        self.setWindowTitle("Review Import")
+        self._segment_id = segment_id
+        self.setWindowTitle("Review Import" if segment_id is None else "Review Quotation Segment")
         self.setMinimumSize(860, 700)
 
         self._layout = QVBoxLayout(self)
@@ -94,6 +107,19 @@ class ImportReviewDialog(QDialog):
         self._currency_combo: QComboBox | None = None
 
         self._load_and_build()
+
+    @staticmethod
+    def _segment_status_as_review_status(status: SegmentReviewStatus) -> ImportReviewStatus:
+        """Maps a segment's own lifecycle onto the `ImportReviewStatus`
+        vocabulary this dialog's editing/action-button logic already
+        understands (`NEEDS_REVIEW`/`CONFIRMED`/`REJECTED`) -- PROPOSED/
+        ACCEPTED never reach this dialog (the boundary screen handles
+        those), and LOCKED is exactly "extracted, awaiting review"."""
+        if status == SegmentReviewStatus.CONFIRMED:
+            return ImportReviewStatus.CONFIRMED
+        if status == SegmentReviewStatus.REJECTED:
+            return ImportReviewStatus.REJECTED
+        return ImportReviewStatus.NEEDS_REVIEW
 
     # --- Loading -------------------------------------------------------------
 
@@ -105,7 +131,17 @@ class ImportReviewDialog(QDialog):
                 return
 
             self._extraction_status = document.extraction_status
-            self._review_status = document.review_status
+            segment = None
+            if self._segment_id is not None:
+                segment = next((s for s in document.segments if s.id == self._segment_id), None)
+                if segment is None:
+                    self._layout.addWidget(QLabel("This quotation segment no longer exists."))
+                    return
+            self._segment = segment
+            self._review_status = (
+                self._segment_status_as_review_status(segment.review_status) if segment is not None
+                else document.review_status
+            )
             self._is_ocr = document.extraction_engine == "ocr"
             extraction_warnings: list[str] = []
             if document.raw_extracted_data:
@@ -123,9 +159,10 @@ class ImportReviewDialog(QDialog):
                 "extraction_engine": document.extraction_engine,
                 "warnings": extraction_warnings,
             }
-            candidate = document.quotation_candidate
+            candidate = segment.quotation_candidate if segment is not None else document.quotation_candidate
+            boq_line_source = list(segment.boq_line_candidates) if segment is not None else list(document.boq_line_candidates)
             self._ocr_status = (
-                compute_ocr_confidence_status(candidate, list(document.boq_line_candidates))
+                compute_ocr_confidence_status(candidate, boq_line_source)
                 if self._is_ocr
                 else None
             )
@@ -173,7 +210,7 @@ class ImportReviewDialog(QDialog):
                     "calculated_amount": line.calculated_amount,
                     "amount_flagged": line.amount_flagged,
                 }
-                for line in document.boq_line_candidates
+                for line in boq_line_source
             ]
 
         self._build_source_section(source_info)
@@ -477,8 +514,10 @@ class ImportReviewDialog(QDialog):
         self._blocked_label.setVisible(blocked)
         if blocked:
             self._blocked_label.setText(
-                "⚠ Confirm is unavailable: OCR could not read the quotation date and/or net "
-                "quoted value. Enter both above before this document can be confirmed."
+                "⚠ Confirm is unavailable: the quotation date and/or net quoted value are either "
+                "missing, or the net value was found on a page with no reference or date of its own "
+                "confirming it belongs to this quotation. Re-enter or verify both above before this "
+                "document can be confirmed."
             )
 
     def _current_currency(self) -> str | None:
@@ -495,11 +534,18 @@ class ImportReviewDialog(QDialog):
 
     # --- Field persistence -----------------------------------------------------
 
+    def _get_segment_in_session(self, document):
+        if self._segment_id is None:
+            return None
+        return next((s for s in document.segments if s.id == self._segment_id), None)
+
     def _save_field(self, field_name: str, value: object) -> None:
         def _save() -> None:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
-                update_quotation_candidate(session, document, document.quotation_candidate, **{field_name: value})
+                segment = self._get_segment_in_session(document)
+                candidate = segment.quotation_candidate if segment is not None else document.quotation_candidate
+                update_quotation_candidate(session, document, candidate, **{field_name: value})
 
         run_guarded(self, _save, context=f"editing {field_name}")
         self._refresh_ocr_gate()
@@ -513,9 +559,10 @@ class ImportReviewDialog(QDialog):
             return
         with session_scope() as session:
             document = get_imported_document(session, self._document_id)
-            self._ocr_status = compute_ocr_confidence_status(
-                document.quotation_candidate, list(document.boq_line_candidates)
-            )
+            segment = self._get_segment_in_session(document)
+            candidate = segment.quotation_candidate if segment is not None else document.quotation_candidate
+            boq_lines = list(segment.boq_line_candidates) if segment is not None else list(document.boq_line_candidates)
+            self._ocr_status = compute_ocr_confidence_status(candidate, boq_lines)
         self._apply_ocr_gate()
 
     def _save_text_field(self, field_name: str, widget: QLineEdit) -> None:
@@ -536,7 +583,9 @@ class ImportReviewDialog(QDialog):
         def _save() -> None:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
-                line = next(l for l in document.boq_line_candidates if l.id == line_id)
+                segment = self._get_segment_in_session(document)
+                boq_source = segment.boq_line_candidates if segment is not None else document.boq_line_candidates
+                line = next(l for l in boq_source if l.id == line_id)
                 update_boq_line_candidate(
                     session,
                     document,
@@ -570,6 +619,7 @@ class ImportReviewDialog(QDialog):
             project_id=self._project_selector.selected_project_id(),
             quotation_id=self._quotation_combo.currentData(),
             parent=self,
+            segment_id=self._segment_id,
         )
         if dialog.exec():
             self.accept()
@@ -589,7 +639,8 @@ class ImportReviewDialog(QDialog):
         def _do_reject() -> bool:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
-                reject_import(session, document)
+                segment = self._get_segment_in_session(document)
+                reject_import(session, document, segment=segment)
             return True
 
         if run_guarded(self, _do_reject, context="rejecting import"):
