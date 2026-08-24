@@ -96,17 +96,43 @@ class ParsedAmount:
     raw: str
 
 
-_NUMERIC_CHARS_RE = re.compile(r"[^0-9.,\-]")
+# One numeric run: an optional leading minus sign, then digits with
+# optional grouping/decimal separators (`,` or `.`) *between* digits only
+# — this never matches across a gap of letters/spaces, so "5% charges SR
+# 900.00" tokenizes as two separate runs ("5", "900.00") rather than one
+# string that could be stripped-and-concatenated into "5900.00".
+#
+# The minus sign may be separated from its digits by up to a few spaces
+# (a real OCR/typesetting artifact: "SR - 900.00" for a credit/discount
+# line) — but only when it is NOT itself glued to a preceding word/digit
+# character, via the negative lookbehind. Without that lookbehind, a
+# hyphenated identifier like "Ref-2024" or "PO-2024" would be misread as
+# the negative amount -2024; with it, the hyphen there is correctly left
+# attached to the word, not treated as a sign, and "2024" tokenizes as a
+# plain positive number instead.
+#
+# The sign character itself accepts the ASCII hyphen-minus plus two
+# Unicode dash characters (EN DASH U+2013, MINUS SIGN U+2212) that a
+# document/PDF renderer can legitimately use for a minus sign instead of
+# the plain hyphen (found via adversarial testing: without this, "–150.00"
+# silently became positive 150.00 — a sign lost, not merely a value
+# rejected, exactly the dangerous failure mode already fixed once for the
+# whitespace-separated ASCII case).
+_SIGN_CHARS = "−–-"
+_NUMERIC_TOKEN_RE = re.compile(rf"(?<![\w.])[{_SIGN_CHARS}]\s{{0,3}}\d+(?:[.,]\d+)*|\d+(?:[.,]\d+)*")
+
+# A numeric token immediately (optionally via whitespace) followed by a
+# percent sign is a rate, never a monetary amount — see the real-archive
+# case this guards against: "VAT 5% charges SR 900.00" must extract the
+# amount as 900.00, never as a number built from the "5" too.
+_PERCENT_SUFFIX_RE = re.compile(r"\s*%")
 
 
-def parse_amount(text: str) -> ParsedAmount:
-    """Parse a monetary/numeric string into a `Decimal`, flagging genuine
-    locale ambiguity instead of guessing. Any currency symbol/letters are
-    stripped first — extract currency separately via
-    `normalize_currency_token` if needed.
-    """
-    raw = text
-    cleaned = _NUMERIC_CHARS_RE.sub("", text)
+def _parse_numeric_token(cleaned: str) -> ParsedAmount:
+    """Parse one already-isolated numeric token (digits plus at most the
+    separators between them — no currency letters, no stray words) into a
+    `Decimal`, flagging genuine locale ambiguity instead of guessing."""
+    raw = cleaned
     if not cleaned or cleaned in {"-", "."}:
         return ParsedAmount(None, ambiguous=False, raw=raw)
 
@@ -154,6 +180,50 @@ def parse_amount(text: str) -> ParsedAmount:
         return ParsedAmount(Decimal(cleaned), ambiguous=False, raw=raw)
     except InvalidOperation:
         return ParsedAmount(None, ambiguous=False, raw=raw)
+
+
+def parse_amount(text: str) -> ParsedAmount:
+    """Parse a monetary/numeric string into a `Decimal`, flagging genuine
+    locale ambiguity instead of guessing. Any currency symbol/letters are
+    ignored — extract currency separately via `normalize_currency_token`
+    if needed.
+
+    Deliberately tokenizes first rather than stripping every non-numeric
+    character from the whole string and parsing what's left as one
+    number: a real archive document produced "VAT : 5% charges SR
+    900.00", and the naive strip-everything approach silently concatenated
+    the "5" from "5%" onto "900.00" into a fabricated 5,900.00 — a
+    confidently-wrong financial value. Percentage/rate numbers (a numeric
+    token directly followed by `%`) are never treated as the monetary
+    amount. If more than one genuine amount-shaped token remains after
+    excluding percentages, which one is "the" value is genuinely
+    ambiguous and must not be guessed.
+    """
+    raw = text
+    amount_tokens: list[str] = []
+    for match in _NUMERIC_TOKEN_RE.finditer(text):
+        token = re.sub(r"\s", "", match.group())  # collapse "- 900.00" -> "-900.00"
+        if token and token[0] in _SIGN_CHARS:
+            # Normalize any accepted sign character to the ASCII hyphen
+            # `Decimal(...)` actually understands -- "−150.00"/"–150.00"
+            # must parse the same way "-150.00" already does, not raise.
+            token = "-" + token[1:]
+        if token in {"-", "."}:
+            continue
+        if _PERCENT_SUFFIX_RE.match(text, match.end()):
+            continue  # a rate (e.g. "5%"), never a monetary amount
+        amount_tokens.append(token)
+
+    if not amount_tokens:
+        return ParsedAmount(None, ambiguous=False, raw=raw)
+    if len(amount_tokens) > 1:
+        # More than one candidate monetary figure on the same line/cell
+        # (and not distinguishable as a rate) — which one is the real
+        # amount is genuinely ambiguous; never guess.
+        return ParsedAmount(None, ambiguous=True, raw=raw)
+
+    result = _parse_numeric_token(amount_tokens[0])
+    return ParsedAmount(result.value, result.ambiguous, raw=raw)
 
 
 # --- Dates --------------------------------------------------------------------

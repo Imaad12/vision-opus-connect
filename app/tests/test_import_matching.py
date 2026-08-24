@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.models import Quotation
 from app.services import client_service, project_service, quotation_service
 from app.services.import_matching import suggest_client_matches, suggest_project_matches, suggest_quotation_matches
 from app.services.import_service import confirm_import, stage_document
@@ -111,3 +112,41 @@ def test_suggest_quotation_matches_returns_empty_when_no_reference_extracted(
 def test_suggest_quotation_matches_returns_empty_when_reference_is_new(db_session: Session, tmp_path) -> None:
     document = _stage(db_session, tmp_path, "Quotation Number: Q-BRAND-NEW-999\n")
     assert suggest_quotation_matches(db_session, document.quotation_candidate) == []
+
+
+def test_suggest_quotation_matches_never_fuzzy_matches_a_suffixed_reference(
+    db_session: Session, tmp_path
+) -> None:
+    """Real archive finding: VN/QU/396/18 (7 Nov, SAR 242,500) and
+    VN/QU/396B/18 (11 Nov, SAR 192,750) are the same client, same subject,
+    almost certainly a real revision -- but the reference strings differ.
+    Matching must stay exact-string-only: no fuzzy/prefix matching that
+    would treat "396" and "396B" as related, and no automatic merge or
+    revision relationship. A human reviewer must be the one to notice and
+    connect them (see IMPORT_ARCHITECTURE.md's documented limitation)."""
+    client = client_service.create_client(db_session, name="ABT Company Ltd")
+    project = project_service.create_project(db_session, name="Corrugated sheet work in Binex Office", client_id=client.id)
+    existing_document = _stage(
+        db_session,
+        tmp_path,
+        "Quotation Number: VN/QU/396/18\nQuotation Date: 07/11/2018\nNet Amount: 242,500.00\n",
+        name="396.txt",
+    )
+    confirm_import(db_session, existing_document, client_id=client.id, project_id=project.id)
+
+    new_document = _stage(
+        db_session,
+        tmp_path,
+        "Quotation Number: VN/QU/396B/18\nQuotation Date: 11/11/2018\nNet Amount: 192,750.00\n",
+        name="396b.txt",
+    )
+    matches = suggest_quotation_matches(db_session, new_document.quotation_candidate)
+
+    assert matches == []
+    # And confirming VN/QU/396B/18 creates an entirely independent
+    # quotation -- never attached as a revision of VN/QU/396/18.
+    version = confirm_import(db_session, new_document, client_id=client.id, project_id=project.id)
+    assert version.quotation_id != existing_document.resulting_quotation_id
+    all_quotations = db_session.query(Quotation).all()
+    assert len(all_quotations) == 2
+    assert {q.reference_number for q in all_quotations} == {"VN/QU/396/18", "VN/QU/396B/18"}

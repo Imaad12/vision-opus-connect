@@ -183,11 +183,21 @@ def test_unsupported_file_type_does_not_crash(db_session: Session, tmp_path: Pat
     assert document.extraction_error == "Unsupported file type"
 
 
-def test_image_file_is_marked_ocr_required(db_session: Session, tmp_path: Path) -> None:
+def test_image_file_is_marked_ocr_required_when_ocr_engine_unavailable(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Since OCR Phase 1, an image file is no longer an automatic dead end
+    -- OCR is attempted (see test_import_service_ocr.py for that path).
+    This test covers the specific case the name describes: when the OCR
+    engine itself isn't available, staging still degrades safely to
+    OCR_REQUIRED rather than crashing or fabricating a candidate --
+    deterministic regardless of whether Tesseract happens to be installed
+    in the environment running this test."""
     path = tmp_path / "scan.png"
     path.write_bytes(b"\x89PNG fake content")
 
-    document = stage_document(db_session, path)
+    with patch("app.services.import_service.extract_via_ocr", return_value=RawExtraction(requires_ocr=True)):
+        document = stage_document(db_session, path)
 
     assert document.extraction_status == ExtractionStatus.OCR_REQUIRED
 

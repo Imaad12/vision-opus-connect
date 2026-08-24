@@ -32,12 +32,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.enums import ConfidenceLevel, Currency, ExtractionStatus, ImportReviewStatus
+from app.core.enums import ConfidenceLevel, Currency, ExtractionStatus, ImportReviewStatus, OcrConfidenceStatus
 from app.core.import_normalization import parse_date_maybe
+from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.database.session import session_scope
 from app.services.import_matching import suggest_client_matches, suggest_project_matches, suggest_quotation_matches
 from app.services.import_service import get_imported_document, reject_import, update_boq_line_candidate, update_quotation_candidate
-from app.ui.confidence_labels import AMOUNT_FLAGGED_LABEL, AMOUNT_OK_LABEL, CONFIDENCE_COLORS, CONFIDENCE_LABELS
+from app.ui.confidence_labels import (
+    AMOUNT_FLAGGED_LABEL,
+    AMOUNT_OK_LABEL,
+    CONFIDENCE_COLORS,
+    CONFIDENCE_LABELS,
+    OCR_STATUS_COLORS,
+    OCR_STATUS_LABELS,
+)
 from app.ui.errors import run_guarded
 from app.ui.formatting import format_date, format_money, format_quantity
 from app.ui.imports.import_confirmation_dialog import ImportConfirmationDialog
@@ -98,6 +106,13 @@ class ImportReviewDialog(QDialog):
 
             self._extraction_status = document.extraction_status
             self._review_status = document.review_status
+            self._is_ocr = document.extraction_engine == "ocr"
+            extraction_warnings: list[str] = []
+            if document.raw_extracted_data:
+                try:
+                    extraction_warnings = json.loads(document.raw_extracted_data).get("warnings") or []
+                except (TypeError, ValueError):
+                    extraction_warnings = []
             source_info = {
                 "filename": document.filename,
                 "extension": document.extension.upper(),
@@ -105,8 +120,15 @@ class ImportReviewDialog(QDialog):
                 "imported_at": document.created_at,
                 "extraction_status": document.extraction_status,
                 "extraction_error": document.extraction_error,
+                "extraction_engine": document.extraction_engine,
+                "warnings": extraction_warnings,
             }
             candidate = document.quotation_candidate
+            self._ocr_status = (
+                compute_ocr_confidence_status(candidate, list(document.boq_line_candidates))
+                if self._is_ocr
+                else None
+            )
             candidate_data = None
             if candidate is not None:
                 candidate_data = {
@@ -160,6 +182,7 @@ class ImportReviewDialog(QDialog):
             ExtractionStatus.FAILED,
             ExtractionStatus.UNSUPPORTED,
             ExtractionStatus.OCR_REQUIRED,
+            ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED,
         ):
             self._build_terminal_section(source_info)
             return
@@ -183,7 +206,25 @@ class ImportReviewDialog(QDialog):
         form.addRow("Original Path", QLabel(info["original_path"]))
         form.addRow("Import Date", QLabel(format_date(info["imported_at"])))
         form.addRow("Extraction Status", QLabel(info["extraction_status"].value.replace("_", " ").title()))
+        if info["extraction_engine"] == "ocr":
+            engine_widget = QWidget()
+            engine_row = QHBoxLayout(engine_widget)
+            engine_row.setContentsMargins(0, 0, 0, 0)
+            engine_row.addWidget(QLabel("OCR"))
+            if self._ocr_status is not None:
+                engine_row.addWidget(Badge(OCR_STATUS_LABELS[self._ocr_status], OCR_STATUS_COLORS[self._ocr_status]))
+            engine_row.addStretch(1)
+            form.addRow("Extraction Method", engine_widget)
         self._layout.addWidget(group)
+
+        if info["warnings"]:
+            warnings_group = QGroupBox("Extraction Warnings")
+            warnings_layout = QVBoxLayout(warnings_group)
+            for warning in info["warnings"]:
+                label = QLabel(f"⚠ {warning}")
+                label.setWordWrap(True)
+                warnings_layout.addWidget(label)
+            self._layout.addWidget(warnings_group)
 
     def _build_terminal_section(self, info: dict) -> None:
         message = info["extraction_error"] or "This document could not be reviewed."
@@ -401,6 +442,12 @@ class ImportReviewDialog(QDialog):
         self._quotation_combo.blockSignals(False)
 
     def _build_action_buttons(self) -> None:
+        self._blocked_label = QLabel()
+        self._blocked_label.setWordWrap(True)
+        self._blocked_label.setObjectName("dangerButton")
+        self._blocked_label.setVisible(False)
+        self._layout.addWidget(self._blocked_label)
+
         buttons = QHBoxLayout()
         self._confirm_button = QPushButton("Confirm Import")
         self._confirm_button.setObjectName("primaryButton")
@@ -416,6 +463,23 @@ class ImportReviewDialog(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(close_button)
         self._layout.addLayout(buttons)
+        self._apply_ocr_gate()
+
+    def _apply_ocr_gate(self) -> None:
+        """OCR Phase 1: the Confirm button is unavailable while an
+        OCR-derived candidate is missing a mandatory financial field. Not
+        just a UI nicety -- `confirm_import` enforces this same rule
+        defensively even if this check is bypassed."""
+        if not hasattr(self, "_confirm_button"):
+            return
+        blocked = self._is_ocr and self._ocr_status == OcrConfidenceStatus.BLOCKED
+        self._confirm_button.setEnabled(not blocked and self._review_status == ImportReviewStatus.NEEDS_REVIEW)
+        self._blocked_label.setVisible(blocked)
+        if blocked:
+            self._blocked_label.setText(
+                "⚠ Confirm is unavailable: OCR could not read the quotation date and/or net "
+                "quoted value. Enter both above before this document can be confirmed."
+            )
 
     def _current_currency(self) -> str | None:
         return self._currency_combo.currentData() if self._currency_combo is not None else None
@@ -438,6 +502,21 @@ class ImportReviewDialog(QDialog):
                 update_quotation_candidate(session, document, document.quotation_candidate, **{field_name: value})
 
         run_guarded(self, _save, context=f"editing {field_name}")
+        self._refresh_ocr_gate()
+
+    def _refresh_ocr_gate(self) -> None:
+        """Re-evaluate the OCR confidence gate against the candidate's
+        *current* (possibly just-edited) values, so filling in a missing
+        date/net value re-enables Confirm immediately without closing and
+        reopening this dialog."""
+        if not self._is_ocr:
+            return
+        with session_scope() as session:
+            document = get_imported_document(session, self._document_id)
+            self._ocr_status = compute_ocr_confidence_status(
+                document.quotation_candidate, list(document.boq_line_candidates)
+            )
+        self._apply_ocr_gate()
 
     def _save_text_field(self, field_name: str, widget: QLineEdit) -> None:
         self._save_field(field_name, widget.text().strip() or None)
@@ -479,6 +558,7 @@ class ImportReviewDialog(QDialog):
         self._boq_table.item(row, 7).setText(format_money(calculated_amount, None))
         self._boq_table.item(row, 8).setText(AMOUNT_FLAGGED_LABEL if flagged else AMOUNT_OK_LABEL)
         self._loading_boq = False
+        self._refresh_ocr_gate()
 
     # --- Confirm / reject --------------------------------------------------------
 

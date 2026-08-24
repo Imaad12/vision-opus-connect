@@ -85,18 +85,59 @@ result or crashing, `WordImporter` immediately reports
 `unsupported=True` with a message asking the user to save the file as
 `.docx` and re-import. No converter is bundled in Phase 4.
 
-## 5. Scanned PDFs and images: OCR is out of scope, on purpose
+## 5. Scanned PDFs and images: local OCR (OCR Phase 1)
 
 `PDFImporter` extracts text page-by-page; if the average extractable text
-per page falls below a small threshold, the document is staged as
-`ExtractionStatus.OCR_REQUIRED` instead of returning near-empty candidate
-data. `ImageImporter` (`.png`/`.jpg`/`.tif`/...) *always* reports
-`requires_ocr` — there is no text layer to read at all. Per the Phase 4
-brief, no OCR is attempted and no external/cloud OCR service is called; an
-`OCR_REQUIRED` document is simply staged for manual review/entry. This is
-a deliberate application of the same principle as password-protected PDFs
-and corrupt files: **never fabricate structured data from a source the
-deterministic pipeline cannot actually read.**
+per page falls below a small threshold, the document is flagged
+`requires_ocr` instead of returning near-empty candidate data.
+`ImageImporter` (`.png`/`.jpg`/`.tif`/...) *always* reports `requires_ocr`
+— there is no text layer to read at all. Phase 4 stopped there
+(`ExtractionStatus.OCR_REQUIRED`, manual entry only); **OCR Phase 1** adds
+one thing on top: `app.services.import_service.run_extraction` now
+attempts local, offline OCR (`app.core.ocr_extraction.extract_via_ocr`)
+before giving up, still ending in `OCR_REQUIRED` if the OCR engine itself
+is unavailable/fails, or `UNSUPPORTED` if the file can't even be opened.
+No external/cloud OCR service is ever called — see §13.
+
+The design is deliberately "OCR produces the exact same `RawExtraction`
+every other importer already produces, then everything downstream is
+unchanged":
+
+- **`app.core.ocr_engine`** wraps Tesseract (`pytesseract`, optional
+  dependency — see `pyproject.toml`'s `ocr` extra) behind an `OcrEngine`
+  interface. `is_available()` is checked before anything is attempted; an
+  engine that isn't installed degrades to `OCR_REQUIRED`, never a crash.
+- **`app.core.ocr_extraction.extract_via_ocr`** rasterizes each page (via
+  `pymupdf`, the same library `PDFImporter` already uses) and calls the
+  engine once per page. A single bad page (render failure, engine
+  exception, empty result) is caught and recorded per-page — it never
+  aborts the rest of the document.
+- **`app.core.ocr_table_reconstruction`** turns one page's OCR word
+  positions into a grid (`ExtractedTable`, the same dataclass
+  `pymupdf.find_tables()` already produces) using a conservative
+  gap-based column heuristic. If the layout isn't confidently table-shaped
+  it returns nothing rather than guessing — the page is instead flagged
+  with a warning so BOQ lines can be added/corrected manually.
+- **`app.core.import_extraction.extract_candidates`** (unchanged) then
+  runs over OCR'd text/tables exactly as it runs over a clean text layer
+  — the same label matching, the same `reconcile_net_tax_gross` VAT
+  handling, the same BOQ header/column detection. OCR never gets its own
+  parsing logic.
+- **`app.core.ocr_confidence.compute_ocr_confidence_status`** is a small,
+  three-state gate (`OcrConfidenceStatus`: `HIGH_CONFIDENCE` /
+  `REVIEW_REQUIRED` / `BLOCKED`) computed on demand from the candidate's
+  *current* values. `BLOCKED` — the quotation date and/or net value is
+  still missing — is the one state that actually disables Confirm, both
+  in `ImportReviewDialog` and defensively inside `confirm_import` itself
+  (`ImportedDocument.extraction_engine == "ocr"` gates this; a
+  deterministically-parsed document is unaffected). The other two states
+  are informational badges only — human review remains the unconditional
+  gate for every document regardless of confidence, exactly as in Phase 4.
+
+This is still the same principle as password-protected PDFs and corrupt
+files: **never fabricate structured data from a source that can't
+actually be read** — OCR just moves the boundary of what "can be read"
+covers, without changing what happens on either side of it.
 
 ## 6. Raw extraction vs. normalized candidate data
 
@@ -264,6 +305,30 @@ also orders by `issued_date` rather than insertion order — the project's
 "current quoted basis" always means the most recently *dated* version,
 never whichever row happened to be written to the database last.
 
+### 10.2 Related-but-differently-referenced quotations: a documented future requirement
+
+The same real-archive review that found §10.1's case also found
+`VN/QU/396/18` (7 Nov 2018, SAR 242,500) and `VN/QU/396B/18` (11 Nov 2018,
+SAR 192,750) — same client, same subject ("Corrugated sheet work in Binex
+Office"), almost certainly the same negotiation re-quoted lower four days
+later. Unlike §10.1's case, the reference *strings* differ (`396` vs
+`396B`), so `suggest_quotation_matches`' exact-equality matching correctly
+does **not** connect them — and it must not be made to. Fuzzy/prefix
+matching that treated "396" and "396B" as related would just as readily
+connect two genuinely unrelated quotations that happen to share a numeric
+prefix (`VN/QU/39/18` and `VN/QU/396/18`, for instance) — an
+automatically-recognized-and-merged wrong pairing is a worse outcome than
+today's "reviewer must notice it themselves."
+
+This is deliberately **not implemented**: a same-client-plus-similar-
+subject relationship signal is a real, useful thing for a future phase to
+surface as an *additional advisory hint* (alongside, never instead of,
+exact-reference matching) — but it needs its own design pass (what counts
+as "similar enough," how it's presented, whether it's ever allowed to
+pre-select anything) rather than a quick fuzzy-match bolt-on. Tracked here
+as a known gap, confirmed twice now against real archive data, for a
+future phase to pick up deliberately.
+
 ## 11. Audit trail (`ImportAuditLogEntry`)
 
 Every staged document accumulates an append-only log:
@@ -361,3 +426,99 @@ file, confirming without selecting a client/project).
   unset rather than guessing.
 - **No date-format ambiguity flag** (unlike amounts): day-first parsing is
   applied as a fixed business assumption rather than flagged per-value.
+- **OCR (Phase 1) has been run against the real archive with real
+  Tesseract** (a follow-up to the original design/build): 3 real scanned
+  files (29 pages total, 16 distinct quotation references) were staged
+  through the actual pipeline. Structured field capture was very low
+  before the fixes below — a two-column "Label: Value" print layout
+  frequently loses the label word or the colon to OCR noise, and even a
+  perfect read often used label wording (bare `Reference:`) this
+  project's original vocabulary didn't recognize at all. Three real,
+  demonstrated defects were fixed as a direct result — see the items
+  below; each one traces to a specific real-archive artifact, not a
+  hypothetical.
+  - **Fixed**: `parse_amount` could concatenate a percentage rate onto an
+    adjacent monetary figure (`"5% charges SR 900.00"` → a fabricated
+    `5,900.00` at `HIGH` confidence) — the real archive's page-11 ghosting
+    artifact reproduced this exactly. `parse_amount` now tokenizes the
+    input and never treats a `%`-suffixed token as part of the amount; two
+    or more non-percentage candidates on one line/cell are now flagged
+    ambiguous rather than guessed.
+  - **Fixed**: `_FIELD_LABELS["quotation_number"]` didn't include bare
+    `"reference"` or `"quotation reference"` — the real archive's actual
+    label wording — so even flawless OCR never populated
+    `quotation_number`. Both are now recognized (lowest priority, after
+    every more specific label, to limit false positives from an unrelated
+    `"Reference: <correspondence note>"` line elsewhere on the same
+    document — a known, accepted trade-off, the same shape as `"attn"`
+    already being accepted for `client_name`). `_pattern_for`'s separator
+    class also now accepts `»`, the specific glyph Tesseract was observed
+    substituting for a printed colon on this archive — not a general
+    "any separator" relaxation.
+  - **Fixed**: a single staged file that bundles multiple independent
+    quotations (the tested 24-page archive file contains 16) could have
+    its fields silently spliced across documents — `quotation_date` from
+    page 1's quotation ending up on a candidate whose `net_value` (had it
+    been captured) came from page 8's unrelated quotation. `run_extraction`
+    now calls `find_distinct_quotation_references` before building a
+    candidate; more than one distinct reference anywhere in the file stops
+    candidate/BOQ creation entirely (`ExtractionStatus.
+    MULTIPLE_QUOTATIONS_DETECTED`, raw OCR text still preserved, nothing
+    confirmable) rather than guessing which document's fields belong
+    together. No document-segmentation engine was built — this is a
+    refusal, not a split.
+  - **Fixed (adversarial-review round 1)**: reference-counting alone
+    missed the case where one document's reference/date survive but a
+    *different* document's date/total survive elsewhere in the same file
+    — reproduced directly via code execution, not assumed. `run_extraction`
+    now also counts distinct `quotation_date` values (a single quotation
+    only ever has one issue date) as a second, independent multi-document
+    signal alongside references.
+  - **Fixed (adversarial-review round 2)**: `parse_amount` recognized only
+    the ASCII hyphen as a negative sign — a real minus sign (U+2212) or en
+    dash (U+2013), either producible by a PDF renderer/OCR engine, silently
+    lost its sign and returned a *positive* value (e.g. `"−151,955.00"` →
+    `151955.00`) instead of being rejected or correctly negated. Now
+    recognized and normalized to the same negative `Decimal` a plain
+    `"-151,955.00"` already produced.
+  - **Residual, explicitly unresolved risk**: if a document loses *both*
+    its reference and its date entirely while an unrelated total survives
+    elsewhere in the same file, neither signal catches it — confirmed
+    still reachable by direct construction in the second adversarial
+    review. Real-archive evidence somewhat bounds the practical risk: across
+    all 18 real quotation documents tested (29 pages, both plain-text and
+    table-shaped totals), **zero** ever had a financial value (`net_value`/
+    `tax_value`/`gross_value`) successfully captured on any page at all —
+    the specific "clean total, lost reference and date" combination this
+    gap requires has no observed instance in this archive, because
+    financial-line capture itself is currently near-zero regardless of
+    reference/date survival. This is not a reason to consider the gap
+    closed — a cleaner scan, a different archive, or an OCR quality
+    improvement could easily produce a clean total on an otherwise-unlabeled
+    page. Closing it fully needs per-field source-page/line provenance
+    tracking, a larger change than either adversarial pass's fixes;
+    tracked here as the priority follow-up, not silently accepted.
+- **BOQ table reconstruction from OCR is a best-effort heuristic**
+  (gap-based column splitting on word positions), not true table
+  structure detection — it declines (rather than guesses) when a page's
+  layout is inconsistent, but a scan with unusual column spacing may
+  still be flagged "uncertain" more often than a human would consider
+  necessary. Confirmed conservative against the real archive: 0/6+ real
+  BOQ tables were reconstructed, but in every case that meant zero rows,
+  never misaligned/fabricated ones. Manual BOQ entry remains available in
+  every case.
+- **No conflict detection for multiple distinct totals on one page**: if
+  a document prints more than one "total"-shaped label with different
+  values, the existing first-match-wins label matching (unchanged from
+  Phase 4) picks one; there is no explicit multi-value warning yet. Human
+  review remains the safety net regardless of which value was picked up.
+  Deliberately not addressed in the OCR-safety-fix pass (out of its
+  narrow scope) — a candidate future improvement.
+- **No automatic relationship detection between differently-referenced
+  quotations** (e.g. `VN/QU/396/18` vs `VN/QU/396B/18`, same client, same
+  subject, four days apart — a real archive pair) — see §10.2. Deliberately
+  not implemented; exact-reference matching must not be loosened to guess
+  at this.
+- **No Arabic-language verification**: Tesseract supports Arabic language
+  packs, but this was not exercised against real archive documents in
+  this environment (see the OCR design review's open questions).

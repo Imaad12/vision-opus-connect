@@ -9,7 +9,7 @@ them into one mapping would blur that distinction.
 
 from __future__ import annotations
 
-from app.core.enums import ConfidenceLevel
+from app.core.enums import ConfidenceLevel, OcrConfidenceStatus
 from app.ui.style import FAVORABLE, INK_MUTED, UNFAVORABLE
 
 CONFIDENCE_LABELS = {
@@ -26,3 +26,17 @@ CONFIDENCE_COLORS = {
 
 AMOUNT_OK_LABEL = "Amount matches"
 AMOUNT_FLAGGED_LABEL = "Check amount"
+
+# OCR Phase 1's minimum-viable document-level gate -- see
+# `app.core.enums.OcrConfidenceStatus` for what each state means.
+OCR_STATUS_LABELS = {
+    OcrConfidenceStatus.HIGH_CONFIDENCE: "OCR: high confidence",
+    OcrConfidenceStatus.REVIEW_REQUIRED: "OCR: review required",
+    OcrConfidenceStatus.BLOCKED: "OCR: cannot confirm yet",
+}
+
+OCR_STATUS_COLORS = {
+    OcrConfidenceStatus.HIGH_CONFIDENCE: FAVORABLE,
+    OcrConfidenceStatus.REVIEW_REQUIRED: INK_MUTED,
+    OcrConfidenceStatus.BLOCKED: UNFAVORABLE,
+}

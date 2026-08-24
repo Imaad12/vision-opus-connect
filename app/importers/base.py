@@ -48,6 +48,13 @@ class RawExtraction:
     unsupported: bool = False
     unsupported_reason: str | None = None
 
+    #: Per-page OCR metadata (OCR Phase 1) -- absent/None for anything that
+    #: didn't go through OCR. Small, JSON-serializable summaries only
+    #: (`{"page_number": int, "char_count": int, "mean_confidence": float
+    #: | None, "failed": bool}`); the actual OCR text lives in `text`
+    #: alongside every other importer's output, never duplicated here.
+    ocr_pages: list[dict] | None = None
+
 
 class BaseImporter(ABC):
     """Common interface for all document importers."""

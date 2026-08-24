@@ -38,9 +38,12 @@ from app.core.enums import (
     ExtractionStatus,
     ImportAuditEventType,
     ImportReviewStatus,
+    OcrConfidenceStatus,
 )
 from app.core.financial_engine import calculate_line_total
 from app.core.import_extraction import extract_candidates
+from app.core.ocr_confidence import compute_ocr_confidence_status
+from app.core.ocr_extraction import extract_via_ocr
 from app.importers.base import RawExtraction, build_default_registry
 from app.models import (
     BOQ,
@@ -199,6 +202,7 @@ def _serialize_raw_extraction(raw: RawExtraction) -> str:
             "text": raw.text,
             "tables": [dataclasses.asdict(table) for table in raw.tables],
             "warnings": raw.warnings,
+            "ocr_pages": raw.ocr_pages,
         }
     )
 
@@ -246,12 +250,77 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
         return
 
     if raw.requires_ocr:
-        document.extraction_status = ExtractionStatus.OCR_REQUIRED
-        document.extraction_error = None
+        try:
+            ocr_raw = extract_via_ocr(path)
+        except Exception as exc:  # noqa: BLE001 - matches the guarantee this function already
+            # makes for the deterministic importer above: never raise out of run_extraction.
+            logger.exception("OCR extraction failed for imported document %s (%s)", document.id, document.filename)
+            document.extraction_status = ExtractionStatus.FAILED
+            document.extraction_error = f"OCR extraction failed: {exc}"
+            session.flush()
+            return
+        if ocr_raw.requires_ocr or ocr_raw.unsupported:
+            # OCR engine unavailable, or the file couldn't even be opened
+            # for OCR -- same terminal/re-attemptable states Phase 4
+            # already has, never a fabricated candidate.
+            document.extraction_status = (
+                ExtractionStatus.UNSUPPORTED if ocr_raw.unsupported else ExtractionStatus.OCR_REQUIRED
+            )
+            document.extraction_error = ocr_raw.unsupported_reason
+            document.raw_extracted_data = _serialize_raw_extraction(ocr_raw)
+            session.flush()
+            return
+        raw = ocr_raw
+        document.raw_extracted_data = _serialize_raw_extraction(raw)
+        document.extraction_engine = "ocr"
+
+    result = extract_candidates(raw)
+
+    multi_signals: list[str] = []
+    if len(result.distinct_references) > 1:
+        multi_signals.append(f"{len(result.distinct_references)} distinct references found: " + ", ".join(result.distinct_references))
+    if len(result.distinct_dates) > 1:
+        # A second, independent signal alongside distinct references --
+        # needed because a real archive scan can lose the reference label
+        # on one page while its date survives (or vice versa on another
+        # page). Confirmed via adversarial review: reference-counting
+        # alone missed a real, constructible case where a candidate spliced
+        # one document's reference/date onto a different document's net
+        # value, both reporting HIGH field confidence, with nothing else
+        # to catch it. A single quotation only ever has one issue date, so
+        # more than one found here is not a false-positive-prone signal.
+        multi_signals.append(
+            f"{len(result.distinct_dates)} distinct dates found: "
+            + ", ".join(d.isoformat() for d in result.distinct_dates)
+        )
+
+    if multi_signals:
+        # This one staged file appears to bundle more than one independent
+        # quotation document (a real, demonstrated risk for scanned
+        # archives — see IMPORT_ARCHITECTURE.md). Building a single
+        # candidate here would risk silently splicing a date from one
+        # quotation onto a total from another, since field extraction has
+        # no way to know two lines came from different documents. No
+        # candidate/BOQ rows are created; the raw OCR/page data already
+        # stored above (`raw_extracted_data`) is preserved for manual
+        # review, and confirmation is blocked (no candidate exists to
+        # confirm).
+        document.extraction_status = ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+        document.extraction_error = (
+            "This file appears to contain more than one quotation document ("
+            + "; ".join(multi_signals)
+            + "). Split it into separate files and re-import each one, or enter "
+            "this document's data manually."
+        )
+        _log(
+            session,
+            document,
+            ImportAuditEventType.EXTRACTED,
+            note=f"Multiple quotation documents detected ({'; '.join(multi_signals)}); no candidate created.",
+        )
         session.flush()
         return
 
-    result = extract_candidates(raw)
     document.document_kind = result.document_kind
 
     candidate = ImportedQuotationCandidate(
@@ -521,6 +590,19 @@ def confirm_import(
     candidate = document.quotation_candidate
     if candidate is None:
         raise ValidationError("Nothing to confirm — extraction did not produce any quotation data.")
+
+    if document.extraction_engine == "ocr":
+        # Defensive, service-layer gate (never trust the UI alone): an
+        # OCR-derived candidate can never be confirmed while a mandatory
+        # financial field is still missing/unresolved. This does not apply
+        # to deterministically-parsed documents, which keep Phase 4's
+        # original, unchanged behavior.
+        status = compute_ocr_confidence_status(candidate, list(document.boq_line_candidates))
+        if status == OcrConfidenceStatus.BLOCKED:
+            raise ValidationError(
+                "This document was extracted via OCR and is missing the quotation date and/or "
+                "net quoted value, so it cannot be confirmed yet. Enter both before confirming."
+            )
 
     if client_id is not None:
         client = client_service.get_client(session, client_id)

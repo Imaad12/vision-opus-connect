@@ -139,6 +139,12 @@ class ExtractionStatus(StrEnum):
     FAILED = "FAILED"
     UNSUPPORTED = "UNSUPPORTED"
     OCR_REQUIRED = "OCR_REQUIRED"
+    #: More than one distinct quotation reference was found in a single
+    #: staged file (a real archive scan bundling several quotations into
+    #: one PDF) — no candidate is built, since it can't be attributed to
+    #: any one of them without risking a spliced record. Never reachable
+    #: for a document that genuinely contains exactly one quotation.
+    MULTIPLE_QUOTATIONS_DETECTED = "MULTIPLE_QUOTATIONS_DETECTED"
 
 
 class ImportReviewStatus(StrEnum):
@@ -168,3 +174,26 @@ class ImportAuditEventType(StrEnum):
     EDITED = "EDITED"
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
+
+
+class OcrConfidenceStatus(StrEnum):
+    """Minimum-viable, document-level gate for an OCR-derived import
+    candidate — deliberately just three states, not a scoring framework.
+    Computed on demand from the candidate's current field values (see
+    `app.core.ocr_confidence`), never persisted, so it always reflects the
+    latest reviewer edits rather than a stale snapshot from extraction
+    time. Meaningful only for documents extracted via OCR
+    (`ImportedDocument.extraction_engine == "ocr"`); deterministic-parsed
+    documents are unaffected and keep Phase 4's original review rules.
+
+    HIGH_CONFIDENCE and REVIEW_REQUIRED are both still, and always,
+    gated by the *human* reviewing and clicking Confirm — the badge is
+    informational, never a bypass. BLOCKED is the one state that actually
+    disables the Confirm action, because it means a mandatory financial
+    field (the quotation date, or the quoted net value) is still missing
+    or unresolved.
+    """
+
+    HIGH_CONFIDENCE = "HIGH_CONFIDENCE"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    BLOCKED = "BLOCKED"

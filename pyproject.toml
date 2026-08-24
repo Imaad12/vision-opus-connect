@@ -29,6 +29,15 @@ dev = [
     "pytest-cov>=5.0,<6.0",
     "xlwt>=1.3,<2.0",
 ]
+# Local, offline OCR (OCR Phase 1) -- optional: `app.core.ocr_engine`
+# imports both lazily and degrades to `is_available() == False` when
+# neither is installed, so the rest of the application is unaffected
+# either way. Also requires the Tesseract binary itself on the machine
+# (not a Python package, so not listed here) -- see app/core/ocr_engine.py.
+ocr = [
+    "pytesseract>=0.3,<1.0",
+    "Pillow>=10.0,<11.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

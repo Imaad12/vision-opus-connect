@@ -82,6 +82,14 @@ class ImportedDocument(Base, TimestampMixin):
     extraction_error: Mapped[str | None] = mapped_column(Text)
     raw_extracted_data: Mapped[str | None] = mapped_column(Text)
 
+    # NULL for the original Phase 4 deterministic parsers; "ocr" once OCR
+    # Phase 1 extraction produced this document's candidate data. Existing
+    # rows are unaffected (NULL), and nothing changes for them -- this
+    # column only gates the extra OCR-specific safety checks in
+    # `app.services.import_service.confirm_import` and
+    # `app.core.ocr_confidence`, never anything for a deterministic import.
+    extraction_engine: Mapped[str | None] = mapped_column(String(20))
+
     review_status: Mapped[ImportReviewStatus] = mapped_column(
         SAEnum(ImportReviewStatus, native_enum=False),
         default=ImportReviewStatus.NEEDS_REVIEW,
