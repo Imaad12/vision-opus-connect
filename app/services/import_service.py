@@ -43,8 +43,8 @@ from app.core.enums import (
     SegmentReviewStatus,
 )
 from app.core.financial_engine import calculate_line_total
-from app.core.import_extraction import extract_candidates
-from app.core.import_segmentation import detect_segments, slice_raw_extraction_to_pages
+from app.core.import_extraction import QuotationCandidateFields, extract_candidates
+from app.core.import_segmentation import detect_segments, find_field_pages, slice_raw_extraction_to_pages
 from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.core.ocr_extraction import extract_via_ocr
 from app.importers.base import ExtractedTable, RawExtraction, build_default_registry
@@ -337,6 +337,52 @@ def _multi_signal_messages(result) -> list[str]:
     return multi_signals
 
 
+_FINANCIAL_FIELDS = ("net_value", "tax_value", "gross_value")
+_IDENTITY_FIELDS = ("quotation_number", "quotation_date")
+
+
+def _flag_financial_fields_without_identity_corroboration(
+    raw: RawExtraction, quotation: QuotationCandidateFields
+) -> None:
+    """Adversarial-review finding: within one slice (a locked segment, or
+    a whole non-segmented document), a financial value found on a page
+    that shares *no* page with either the reference or the date it will
+    be confirmed alongside is exactly as untrustworthy as a value that
+    was never found at all -- nothing on that specific page ties it to
+    this quotation's own identity, and the existing distinct-reference/
+    distinct-date check cannot help, because it only compares references
+    or dates it actually recognized, and by construction none of the
+    "other document" case's fields were recognized at all.
+
+    This does not touch `detect_segments`/boundary proposal (a
+    legitimate quotation spanning many pages, with its total on a much
+    later page, is still one correctly-proposed segment -- see
+    IMPORT_ARCHITECTURE.md's sequential segmentation section on why a
+    fixed page-distance boundary rule is deliberately never used). It
+    only downgrades that specific field's *confidence* from HIGH to LOW
+    -- a mechanical, page-number comparison, not a heuristic guess at
+    what the value "should" be -- so `app.core.ocr_confidence` can refuse
+    to treat it as confirmable without a human explicitly reviewing it
+    (see that module's `_MANDATORY_FIELDS` handling of a LOW `net_value`).
+    Mutates `quotation.field_confidence` in place; does nothing if `raw`
+    has no page structure (nothing to compare pages against) or the
+    field wasn't found on any page.
+    """
+    field_pages = find_field_pages(raw, _IDENTITY_FIELDS + _FINANCIAL_FIELDS)
+    if not field_pages:
+        return
+    identity_pages = {field_pages[name] for name in _IDENTITY_FIELDS if name in field_pages}
+    if not identity_pages:
+        # Neither reference nor date was found anywhere in this slice --
+        # already handled by the existing "missing mandatory field"
+        # BLOCKED check; nothing this function adds is needed here.
+        return
+    for name in _FINANCIAL_FIELDS:
+        value_page = field_pages.get(name)
+        if value_page is not None and value_page not in identity_pages:
+            quotation.field_confidence[name] = ConfidenceLevel.LOW.value
+
+
 def _build_candidate_from_extraction(
     session: Session,
     document: ImportedDocument,
@@ -406,6 +452,8 @@ def _build_candidate_from_extraction(
             )
         session.flush()
         return False
+
+    _flag_financial_fields_without_identity_corroboration(raw, result.quotation)
 
     segment_kwargs = {"imported_document_segment_id": segment.id} if segment is not None else {}
     if segment is None:
@@ -846,11 +894,27 @@ def update_quotation_candidate(
     elif document.review_status == ImportReviewStatus.CONFIRMED:
         raise ValidationError("This import has already been confirmed and can no longer be edited.")
 
+    try:
+        confidences: dict = json.loads(candidate.field_confidence) if candidate.field_confidence else {}
+    except (TypeError, ValueError):
+        confidences = {}
+    confidence_changed = False
+
     for field_name, new_value in fields.items():
         if field_name not in _QUOTATION_EDITABLE_FIELDS:
             raise ValidationError(f"'{field_name}' is not an editable field.")
         old_value = getattr(candidate, field_name)
         if old_value == new_value:
+            # Deliberately not treated as a review action: a QLineEdit's
+            # `editingFinished` fires on plain focus-out regardless of
+            # whether the reviewer actually changed anything, so treating
+            # an unchanged resubmission as "reviewed" would let a LOW-
+            # flagged field (see `_flag_financial_fields_without_identity_
+            # corroboration`) clear itself just by tabbing past it --
+            # defeating the very gate this exists to enforce. A genuinely
+            # correct flagged value still requires an actual edit to
+            # confirm, exactly like a missing value already requires one
+            # to be typed in at all.
             continue
         _log(
             session,
@@ -861,6 +925,16 @@ def update_quotation_candidate(
             new_value=str(new_value) if new_value is not None else None,
         )
         setattr(candidate, field_name, new_value)
+        # A genuine value change is real reviewer input -- clear any LOW/
+        # NEEDS_REVIEW flag this field carried, so a corrected value is
+        # never left artificially blocked by a stale flag from extraction
+        # time.
+        if confidences.get(field_name) != ConfidenceLevel.HIGH.value:
+            confidences[field_name] = ConfidenceLevel.HIGH.value
+            confidence_changed = True
+
+    if confidence_changed:
+        candidate.field_confidence = json.dumps(confidences)
 
     session.flush()
     return candidate
@@ -1078,8 +1152,10 @@ def confirm_import(
         status = compute_ocr_confidence_status(candidate, boq_lines)
         if status == OcrConfidenceStatus.BLOCKED:
             raise ValidationError(
-                "This document was extracted via OCR and is missing the quotation date and/or "
-                "net quoted value, so it cannot be confirmed yet. Enter both before confirming."
+                "This document was extracted via OCR and cannot be confirmed yet: the quotation "
+                "date and/or net quoted value are either missing, or the net value was found on a "
+                "page with no reference or date of its own to confirm it belongs to this quotation. "
+                "Enter or re-confirm both before confirming."
             )
 
     if client_id is not None:

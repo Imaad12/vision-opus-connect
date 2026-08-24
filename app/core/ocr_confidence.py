@@ -43,6 +43,21 @@ def compute_ocr_confidence_status(
     except (TypeError, ValueError):
         confidences = {}
 
+    # A mandatory field flagged LOW (as opposed to merely NEEDS_REVIEW, or
+    # simply absent from this dict) is not "needs a second look" -- it is
+    # exactly as untrustworthy as that field being missing outright. The
+    # one producer of this specific state today is
+    # `app.services.import_service._flag_financial_fields_without_
+    # identity_corroboration`: a net_value found on a page that shares no
+    # page with the reference or date it would be confirmed alongside
+    # (adversarial-review finding -- see IMPORT_ARCHITECTURE.md). Treating
+    # it as BLOCKED, not just REVIEW_REQUIRED, is what makes this a
+    # structural gate rather than a cosmetic confidence label: it disables
+    # Confirm in the UI *and* is enforced defensively inside
+    # `confirm_import` itself, the same way a missing value already is.
+    if confidences.get("net_value") == ConfidenceLevel.LOW.value:
+        return OcrConfidenceStatus.BLOCKED
+
     if not confidences:
         return OcrConfidenceStatus.REVIEW_REQUIRED
 

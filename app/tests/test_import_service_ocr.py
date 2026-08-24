@@ -15,6 +15,7 @@ enforced defensively inside `confirm_import` itself, not just in the UI.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +41,7 @@ from app.services.import_service import (
     reject_import,
     split_segment,
     stage_document,
+    update_quotation_candidate,
 )
 
 _PATCH_TARGET = "app.services.import_service.extract_via_ocr"
@@ -980,3 +982,183 @@ def test_confirmed_segment_boundary_cannot_be_changed(db_session: Session, tmp_p
         move_segment_boundary(db_session, document, seg_a, new_end_page=2)
     with pytest.raises(ValidationError, match="already been confirmed"):
         merge_segments(db_session, document, seg_a, seg_b)
+
+
+# --- Final adversarial review: financial value with no page-level identity ----
+# corroboration (the "reference A + unrelated total B" exploit) ---------------
+
+
+def test_financial_value_on_an_unidentified_page_cannot_splice_into_a_confirmable_candidate(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """The exact exploit from the final adversarial review: quotation A's
+    reference/date survive (page 1); an entirely separate, unidentified
+    document's total survives later in the same file (page 3) with
+    neither its own reference nor date recognized at all. Segmentation
+    itself proposes no boundary here (page 3 contributes zero identity
+    signal, so it is absorbed as a continuation -- the documented,
+    accepted trade-off that avoids ever incorrectly splitting a
+    legitimate long quotation). Before this fix, the resulting single
+    segment's candidate combined A's own reference/date with the
+    unrelated total, all individually HIGH confidence, fully
+    confirmable, and wrong -- reproduced and confirmed end-to-end
+    (including an actual `QuotationVersion` write) during the review.
+    Must now be blocked."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: VN/QU/412/18\nDate: 27/11/2018\nClient: Ashtead Technology\n"
+        "--- Page 2 ---\n"
+        "Item 1 description continues\nQty: 10\n"
+        "--- Page 3 ---\n"
+        "Net Amount: 999,999.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 1  # segmentation itself is correctly unaffected -- see module docstring
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    candidate = seg.quotation_candidate
+    assert candidate is not None
+    assert candidate.quotation_number == "VN/QU/412/18"
+    assert candidate.net_value == Decimal("999999.00")  # still visible for the reviewer to inspect/correct
+    confidence = json.loads(candidate.field_confidence)
+    assert confidence["net_value"] == "LOW"
+
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    with pytest.raises(ValidationError, match="cannot be confirmed yet"):
+        confirm_import(db_session, document, segment=seg, client_id=client.id, project_id=project.id)
+
+    from app.models import Quotation
+
+    assert db_session.query(Quotation).count() == 0
+
+
+def test_legitimate_long_quotation_total_is_not_split_but_requires_reviewer_sign_off(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """The honest trade-off this fix accepts: a genuinely long, single
+    quotation whose own total legitimately appears on a later page is
+    NOT incorrectly split into multiple segments (segmentation itself is
+    unaffected -- there is no per-page signal to distinguish this from
+    the exploit above, by design). Its total is flagged for explicit
+    reviewer sign-off rather than auto-confirmed, but an actual review
+    action (re-entering the value) unblocks it -- this is friction, not
+    a dead end."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: VN/QU/500/18\nDate: 01/12/2018\n"
+        "--- Page 2 ---\nItem 1: Supply cabling\nQty: 100\n"
+        "--- Page 3 ---\nItem 2: Supply trunking\nQty: 40\n"
+        "--- Page 4 ---\nItem 3: Labor\nQty: 1\n"
+        "--- Page 5 ---\nNet Amount: 55,000.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 1  # not incorrectly split
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    candidate = seg.quotation_candidate
+    assert candidate.net_value == Decimal("55000.00")
+
+    client = client_service.create_client(db_session, name="Client")
+    project = project_service.create_project(db_session, name="Project", client_id=client.id)
+    with pytest.raises(ValidationError, match="cannot be confirmed yet"):
+        confirm_import(db_session, document, segment=seg, client_id=client.id, project_id=project.id)
+
+    # A genuine reviewer action (re-entering the value after checking the
+    # source scan) clears the flag -- not a permanent dead end.
+    update_quotation_candidate(db_session, document, candidate, net_value=Decimal("55000.01"))
+    update_quotation_candidate(db_session, document, candidate, net_value=Decimal("55000.00"))
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    version = confirm_import(db_session, document, segment=seg, client_id=client.id, project_id=project.id)
+    assert version.quoted_value == Decimal("55000.00")
+
+
+def test_plain_focus_change_does_not_clear_the_low_confidence_flag(db_session: Session, tmp_path: Path) -> None:
+    """A reviewer merely tabbing through the net-value field (the same
+    UI event a genuine edit produces, `editingFinished`, but with an
+    unchanged value) must not silently clear the LOW flag -- only an
+    actual value change counts as review sign-off. Otherwise the gate
+    could be defeated by incidental UI interaction rather than deliberate
+    review."""
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: VN/QU/412/18\nDate: 27/11/2018\n--- Page 2 ---\nNet Amount: 999,999.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+    segments = list_segments(db_session, document)
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    candidate = seg.quotation_candidate
+    # Resubmitting the SAME value -- what a plain focus-out produces.
+    update_quotation_candidate(db_session, document, candidate, net_value=candidate.net_value)
+
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    confidence = json.loads(seg.quotation_candidate.field_confidence)
+    assert confidence["net_value"] == "LOW"  # still flagged -- unchanged resubmission is not review
+
+
+def test_same_page_reference_date_and_total_are_unaffected(db_session: Session, tmp_path: Path) -> None:
+    """The overwhelming common case -- everything on one page -- must
+    stay HIGH confidence and immediately confirmable, exactly as before
+    this fix."""
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: VN/QU/412/18\nDate: 27/11/2018\nNet Amount: 151,955.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    # No page markers at all -- falls back to the original single-
+    # candidate path, unaffected by segmentation or this fix.
+    assert document.extraction_status == ExtractionStatus.EXTRACTION_COMPLETE
+    candidate = document.quotation_candidate
+    confidence = json.loads(candidate.field_confidence)
+    assert confidence["net_value"] == "HIGH"
+
+    client = client_service.create_client(db_session, name="Client")
+    project = project_service.create_project(db_session, name="Project", client_id=client.id)
+    version = confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+    assert version.quoted_value == Decimal("151955.00")
+
+
+def test_mistaken_manual_merge_across_a_low_confidence_boundary_still_blocked(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """If a reviewer merges two segments across a LOW-confidence
+    date-conflict boundary (mistakenly believing it's one document), the
+    pre-existing within-slice distinct-date multi-signal check -- wholly
+    unrelated to this round's fix -- still catches it: no candidate is
+    created at all, a stronger outcome than merely flagging one field."""
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: 444 REV / 18\nDate: 23.12.2018\n--- Page 2 ---\nDate: 27/11/2018\nNet Amount: 151,955.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 2
+    assert segments[1].boundary_confidence == ConfidenceLevel.LOW.value
+
+    merged = merge_segments(db_session, document, segments[0], segments[1])
+    accept_segment(db_session, document, merged)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    (seg,) = list_segments(db_session, document)
+    assert seg.quotation_candidate is None

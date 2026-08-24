@@ -514,8 +514,10 @@ class ImportReviewDialog(QDialog):
         self._blocked_label.setVisible(blocked)
         if blocked:
             self._blocked_label.setText(
-                "⚠ Confirm is unavailable: OCR could not read the quotation date and/or net "
-                "quoted value. Enter both above before this document can be confirmed."
+                "⚠ Confirm is unavailable: the quotation date and/or net quoted value are either "
+                "missing, or the net value was found on a page with no reference or date of its own "
+                "confirming it belongs to this quotation. Re-enter or verify both above before this "
+                "document can be confirmed."
             )
 
     def _current_currency(self) -> str | None:

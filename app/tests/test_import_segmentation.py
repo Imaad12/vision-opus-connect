@@ -347,3 +347,48 @@ def test_same_date_different_reference_still_splits_high_confidence() -> None:
     segments = detect_segments(raw)
     assert len(segments) == 2
     assert segments[1].boundary_confidence == ConfidenceLevel.HIGH.value
+
+
+# --- find_field_pages (final adversarial review) ----------------------------
+
+
+def test_find_field_pages_locates_each_field_first_occurrence() -> None:
+    from app.core.import_segmentation import find_field_pages
+
+    raw = RawExtraction(
+        text=_pages(
+            "Reference: VN/QU/412/18\nDate: 27/11/2018\n",
+            "Item continues, no labels here.\n",
+            "Net Amount: 999,999.00\n",
+        )
+    )
+    pages = find_field_pages(raw, ("quotation_number", "quotation_date", "net_value"))
+    assert pages == {"quotation_number": 1, "quotation_date": 1, "net_value": 3}
+
+
+def test_find_field_pages_returns_empty_dict_for_unmarked_text() -> None:
+    from app.core.import_segmentation import find_field_pages
+
+    raw = RawExtraction(text="Reference: VN/QU/412/18\nNet Amount: 999,999.00\n")
+    assert find_field_pages(raw, ("quotation_number", "net_value")) == {}
+
+
+def test_find_field_pages_matches_the_page_a_whole_slice_extraction_would_use() -> None:
+    """The correctness guarantee `find_field_pages` depends on: the page
+    it reports for a field is the exact same page whose line
+    `extract_quotation_candidate` picks when run once on the whole
+    (unsliced) merged text -- proven directly, not just asserted."""
+    from app.core.import_segmentation import find_field_pages
+    from app.core.import_extraction import extract_quotation_candidate
+
+    raw = RawExtraction(
+        text=_pages(
+            "Reference: A-100\nDate: 01/01/2024\n",
+            "Net Amount: 1,000.00\n",
+            "Net Amount: 2,000.00\n",  # a second, later occurrence -- must not win
+        )
+    )
+    whole_slice = extract_quotation_candidate(raw.text, raw.tables)
+    pages = find_field_pages(raw, ("net_value",))
+    assert whole_slice.net_value == Decimal("1000.00")
+    assert pages["net_value"] == 2  # the FIRST page with a match, not the second

@@ -110,6 +110,42 @@ def _page_number_from_table_name(name: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def find_field_pages(raw: RawExtraction, field_names: tuple[str, ...]) -> dict[str, int]:
+    """For each name in `field_names`, the page number where that field
+    was found -- specifically, the lowest-numbered page whose *own*,
+    independent `extract_quotation_candidate` call finds a value for it.
+
+    This deliberately matches `extract_quotation_candidate`'s own
+    first-match-wins rule when it is instead run once on the whole
+    (multi-page) slice: the first page in ascending order that contains
+    any matching line for a field is exactly the page whose line a
+    whole-slice extraction would have used, since a whole-slice scan
+    encounters that page's lines before any later page's. No behavior of
+    `extract_quotation_candidate` itself is changed or reimplemented here
+    — this only re-runs it once per page (already exactly what
+    `detect_segments` does for boundary detection) and records where the
+    winning value came from.
+
+    Returns only entries for fields actually found somewhere. Returns an
+    empty dict for text with no page markers (nothing to attribute a page
+    to)."""
+    pages = _split_pages(raw.text)
+    if not pages:
+        return {}
+    found: dict[str, int] = {}
+    remaining = set(field_names)
+    for page_number in sorted(pages):
+        if not remaining:
+            break
+        page_tables = [t for t in raw.tables if _page_number_from_table_name(t.name) == page_number]
+        fields = extract_quotation_candidate(pages[page_number], page_tables)
+        for name in list(remaining):
+            if getattr(fields, name, None) is not None:
+                found[name] = page_number
+                remaining.discard(name)
+    return found
+
+
 def slice_raw_extraction_to_pages(raw: RawExtraction, start_page: int, end_page: int) -> RawExtraction:
     """Build a new `RawExtraction` containing only the pages in
     `[start_page, end_page]` (inclusive). This is the structural
@@ -336,4 +372,4 @@ def detect_segments(raw: RawExtraction) -> list[PageSegment]:
     return segments
 
 
-__all__ = ["PageSegment", "detect_segments", "slice_raw_extraction_to_pages"]
+__all__ = ["PageSegment", "detect_segments", "find_field_pages", "slice_raw_extraction_to_pages"]
