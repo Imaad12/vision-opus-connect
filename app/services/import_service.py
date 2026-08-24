@@ -276,7 +276,25 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
 
     result = extract_candidates(raw)
 
+    multi_signals: list[str] = []
     if len(result.distinct_references) > 1:
+        multi_signals.append(f"{len(result.distinct_references)} distinct references found: " + ", ".join(result.distinct_references))
+    if len(result.distinct_dates) > 1:
+        # A second, independent signal alongside distinct references --
+        # needed because a real archive scan can lose the reference label
+        # on one page while its date survives (or vice versa on another
+        # page). Confirmed via adversarial review: reference-counting
+        # alone missed a real, constructible case where a candidate spliced
+        # one document's reference/date onto a different document's net
+        # value, both reporting HIGH field confidence, with nothing else
+        # to catch it. A single quotation only ever has one issue date, so
+        # more than one found here is not a false-positive-prone signal.
+        multi_signals.append(
+            f"{len(result.distinct_dates)} distinct dates found: "
+            + ", ".join(d.isoformat() for d in result.distinct_dates)
+        )
+
+    if multi_signals:
         # This one staged file appears to bundle more than one independent
         # quotation document (a real, demonstrated risk for scanned
         # archives — see IMPORT_ARCHITECTURE.md). Building a single
@@ -289,16 +307,16 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
         # confirm).
         document.extraction_status = ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
         document.extraction_error = (
-            "This file appears to contain more than one quotation document "
-            f"({len(result.distinct_references)} distinct references found: "
-            f"{', '.join(result.distinct_references)}). Split it into separate "
-            "files and re-import each one, or enter this document's data manually."
+            "This file appears to contain more than one quotation document ("
+            + "; ".join(multi_signals)
+            + "). Split it into separate files and re-import each one, or enter "
+            "this document's data manually."
         )
         _log(
             session,
             document,
             ImportAuditEventType.EXTRACTED,
-            note=f"Multiple quotation references detected ({len(result.distinct_references)}); no candidate created.",
+            note=f"Multiple quotation documents detected ({'; '.join(multi_signals)}); no candidate created.",
         )
         session.flush()
         return

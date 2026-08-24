@@ -101,7 +101,16 @@ class ParsedAmount:
 # — this never matches across a gap of letters/spaces, so "5% charges SR
 # 900.00" tokenizes as two separate runs ("5", "900.00") rather than one
 # string that could be stripped-and-concatenated into "5900.00".
-_NUMERIC_TOKEN_RE = re.compile(r"-?\d+(?:[.,]\d+)*")
+#
+# The minus sign may be separated from its digits by up to a few spaces
+# (a real OCR/typesetting artifact: "SR - 900.00" for a credit/discount
+# line) — but only when it is NOT itself glued to a preceding word/digit
+# character, via the negative lookbehind. Without that lookbehind, a
+# hyphenated identifier like "Ref-2024" or "PO-2024" would be misread as
+# the negative amount -2024; with it, the hyphen there is correctly left
+# attached to the word, not treated as a sign, and "2024" tokenizes as a
+# plain positive number instead.
+_NUMERIC_TOKEN_RE = re.compile(r"(?<![\w.])-\s{0,3}\d+(?:[.,]\d+)*|\d+(?:[.,]\d+)*")
 
 # A numeric token immediately (optionally via whitespace) followed by a
 # percent sign is a rate, never a monetary amount — see the real-archive
@@ -184,7 +193,7 @@ def parse_amount(text: str) -> ParsedAmount:
     raw = text
     amount_tokens: list[str] = []
     for match in _NUMERIC_TOKEN_RE.finditer(text):
-        token = match.group()
+        token = re.sub(r"\s", "", match.group())  # collapse "- 900.00" -> "-900.00"
         if token in {"-", "."}:
             continue
         if _PERCENT_SUFFIX_RE.match(text, match.end()):

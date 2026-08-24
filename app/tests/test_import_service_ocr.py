@@ -496,6 +496,39 @@ def test_single_quotation_file_is_unaffected_by_the_multi_quotation_check(
     assert document.quotation_candidate.net_value == Decimal("151955.00")
 
 
+def test_lost_reference_on_one_document_cannot_splice_its_neighbors_total(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Adversarial-review finding, reproduced end-to-end: document A's
+    reference/date are clean; document B's reference line was entirely
+    lost to OCR (a real, observed failure mode), but its different date
+    and net value survived. Reference-counting alone found only one
+    reference (A's) and would have built a single candidate combining A's
+    reference/date with B's unrelated total -- every field individually
+    HIGH confidence, fully confirmable, and wrong. Must now be caught."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
+        "--- Page 8 ---\n"
+        "Date: 27/11/2018\nNet Amount: 151,955.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    assert document.extraction_status == ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+    assert document.quotation_candidate is None
+    assert "distinct dates" in document.extraction_error
+
+    client = client_service.create_client(db_session, name="Some Client")
+    project = project_service.create_project(db_session, name="Some Project", client_id=client.id)
+    with pytest.raises(ValidationError, match="Nothing to confirm"):
+        confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+
+    from app.models import Quotation
+
+    assert db_session.query(Quotation).count() == 0
+
+
 # --- Issue 5: uncertain BOQ structure must never fabricate financial rows -----
 
 

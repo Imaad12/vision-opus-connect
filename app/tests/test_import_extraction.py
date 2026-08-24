@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from app.core.enums import ConfidenceLevel, ImportDocumentKind
@@ -5,6 +6,7 @@ from app.core.import_extraction import (
     extract_boq_rows,
     extract_candidates,
     extract_quotation_candidate,
+    find_distinct_quotation_dates,
     find_distinct_quotation_references,
 )
 from app.importers.base import ExtractedTable, RawExtraction
@@ -217,3 +219,66 @@ def test_extract_candidates_reports_multiple_distinct_references() -> None:
     raw = RawExtraction(text=text, tables=[])
     result = extract_candidates(raw)
     assert result.distinct_references == ["VN/QU/412/18", "VN/QU/417/18"]
+
+
+# --- Regression: distinct-date detection closes a real splicing gap ------
+# Adversarial-review finding: reference-counting alone missed the case
+# where one document's reference survives OCR but a *different* document's
+# date and net value survive elsewhere in the same file -- producing a
+# single spliced candidate (real reference + wrong document's date/total)
+# that reference-counting alone (only one reference ever found) would
+# never flag, and every individually-matched field reports HIGH
+# confidence. Counting distinct dates is a second, independent signal.
+
+
+def test_find_distinct_quotation_dates_single_document() -> None:
+    dates = find_distinct_quotation_dates("Reference: VN/QU/412/18\nDate: 27/11/2018\n", [])
+    assert dates == [date(2018, 11, 27)]
+
+
+def test_find_distinct_quotation_dates_detects_multiple_documents() -> None:
+    text = (
+        "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
+        "--- Page 8 ---\n"
+        "Date: 27/11/2018\nNet Amount: 151,955.00\n"
+    )
+    dates = find_distinct_quotation_dates(text, [])
+    assert dates == [date(2018, 12, 23), date(2018, 11, 27)]
+
+
+def test_find_distinct_quotation_dates_ignores_unparseable_text() -> None:
+    # A date-labeled line whose value doesn't actually parse as a date is
+    # not reliable evidence of a second document -- excluded, not counted.
+    text = "Date: 27/11/2018\nDate: not a real date\n"
+    assert find_distinct_quotation_dates(text, []) == [date(2018, 11, 27)]
+
+
+def test_find_distinct_quotation_dates_same_date_different_formatting_is_one_date() -> None:
+    # Formatting differences alone (e.g. the same date OCR'd slightly
+    # differently across two lines) must not look like two documents.
+    text = "Date: 27/11/2018\nQuote Date: 2018-11-27\n"
+    assert find_distinct_quotation_dates(text, []) == [date(2018, 11, 27)]
+
+
+def test_extract_candidates_reports_distinct_dates() -> None:
+    raw = RawExtraction(text=SAMPLE_QUOTATION_TEXT, tables=[])
+    result = extract_candidates(raw)
+    assert result.distinct_dates == [date(2024, 3, 15)]
+
+
+def test_reference_survives_but_a_different_documents_date_and_total_do_not_merge_undetected() -> None:
+    """Direct reproduction of the adversarial-review finding: document A's
+    reference and date are clean; document B's reference line was lost to
+    OCR entirely, but its (different) date and net value survived. Before
+    this fix, `distinct_references` alone found only one reference (A's)
+    and the whole file was treated as a single document -- silently
+    splicing A's reference/date onto B's unrelated total. `distinct_dates`
+    must now independently catch this."""
+    text = (
+        "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
+        "--- Page 8 ---\n"
+        "Date: 27/11/2018\nNet Amount: 151,955.00\n"
+    )
+    result = extract_candidates(RawExtraction(text=text, tables=[]))
+    assert len(result.distinct_references) <= 1  # the gap: reference alone doesn't catch it
+    assert len(result.distinct_dates) > 1  # the fix: dates do

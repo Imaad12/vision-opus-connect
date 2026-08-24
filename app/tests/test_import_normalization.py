@@ -142,6 +142,29 @@ def test_parse_amount_negative_amount_still_parses() -> None:
     assert parse_amount("-150.00").value == Decimal("-150.00")
 
 
+# --- Regression: minus sign separated from its digits by OCR/typesetting
+# --- spacing must not silently lose its sign (adversarial-review finding)
+
+
+def test_parse_amount_negative_sign_survives_a_space_before_the_digits() -> None:
+    """A real OCR/typesetting artifact: a standalone minus sign with a
+    gap before its digits ("- 150.00", e.g. a discount/credit line). The
+    tokenization rewrite initially lost the sign here (the leading `-?`
+    only matched a minus glued directly to a digit), silently turning a
+    negative amount positive -- the most dangerous class of transcription
+    error, since the wrong value still looks perfectly plausible."""
+    assert parse_amount("- 150.00").value == Decimal("-150.00")
+    assert parse_amount("SR - 900.00").value == Decimal("-900.00")
+
+
+def test_parse_amount_hyphenated_identifier_is_not_read_as_negative() -> None:
+    """The fix for the above must not overcorrect: a hyphen glued to a
+    word (a reference/PO number, not a standalone sign) must never be
+    treated as negating the number that follows it."""
+    assert parse_amount("Ref-2024").value == Decimal("2024")
+    assert parse_amount("PO-2024 total").value == Decimal("2024")
+
+
 def test_parse_amount_quantity_with_unit_suffix_still_parses() -> None:
     # Real archive BOQ-cell shape: "42766.45 LM" -- the unit suffix is not
     # a percentage and must not trigger the ambiguous-multi-token path.
