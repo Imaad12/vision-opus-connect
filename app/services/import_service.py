@@ -53,11 +53,19 @@ from app.models import (
     Trade,
 )
 from app.services import client_service, project_service, quotation_service
-from app.services.errors import ValidationError
+from app.services.errors import RevisionConflictError, ValidationError
 
 logger = logging.getLogger("app.services.import_service")
 
 _HASH_CHUNK_SIZE = 1 << 20  # 1 MiB — avoids loading a large file into memory at once
+
+# A revision's total is considered "materially different" from an existing
+# one past this tolerance — the same 1% / 1-currency-unit rule already used
+# for BOQ extracted-vs-calculated amount flagging (see
+# app.core.import_extraction / update_boq_line_candidate), reused here
+# rather than inventing a second threshold.
+_MATERIAL_DIFFERENCE_FRACTION = Decimal("0.01")
+_MATERIAL_DIFFERENCE_FLOOR = Decimal("1")
 
 
 # --- Hashing / duplicate detection ------------------------------------------
@@ -391,6 +399,86 @@ def update_boq_line_candidate(
 # --- Confirmation / rejection --------------------------------------------------
 
 
+def _totals_differ_materially(a: Decimal | None, b: Decimal | None) -> bool:
+    """True if `a` and `b` are far enough apart that they can't reasonably
+    be read as "the same total" — or if either is unknown, since an
+    unknown total can't be confirmed to match either (conservative on
+    purpose: this feeds a revision-conflict check, and guessing "probably
+    fine" from missing data is exactly what this check exists to avoid)."""
+    if a is None or b is None:
+        return True
+    difference = abs(a - b)
+    tolerance = max(_MATERIAL_DIFFERENCE_FLOOR, abs(b) * _MATERIAL_DIFFERENCE_FRACTION)
+    return difference > tolerance
+
+
+def _detect_revision_conflict(
+    candidate: ImportedQuotationCandidate, existing_version
+) -> RevisionConflictError | None:
+    """Compare an incoming quotation candidate against the current version
+    of the existing quotation it's about to be added as a revision of.
+    Returns a (not-yet-raised) `RevisionConflictError` describing the
+    conflict, or `None` if there isn't one — used both to raise the error
+    and, when the caller has acknowledged it, to describe what was
+    acknowledged in the audit log.
+
+    Deliberately conservative: if either date is unknown, no chronology
+    comparison is possible, so no conflict is reported (this only ever
+    *blocks* a comparable conflict, never a case it can't evaluate).
+    """
+    if existing_version is None or existing_version.issued_date is None or candidate.quotation_date is None:
+        return None
+
+    if candidate.quotation_date < existing_version.issued_date:
+        conflict_type = "earlier"
+    elif candidate.quotation_date == existing_version.issued_date and _totals_differ_materially(
+        candidate.net_value, existing_version.quoted_value
+    ):
+        conflict_type = "same_date_conflict"
+    else:
+        return None
+
+    reference = candidate.quotation_number
+    incoming_date_str = candidate.quotation_date.isoformat()
+    existing_date_str = existing_version.issued_date.isoformat()
+    incoming_total_str = f"{candidate.net_value:,.2f}" if candidate.net_value is not None else "unknown"
+    existing_total_str = (
+        f"{existing_version.quoted_value:,.2f}" if existing_version.quoted_value is not None else "unknown"
+    )
+
+    if conflict_type == "earlier":
+        reason = (
+            f"The incoming document is dated {incoming_date_str}, which is earlier than the "
+            f"existing quotation's current version, dated {existing_date_str}."
+        )
+    else:
+        reason = (
+            f"The incoming document has the same date ({incoming_date_str}) as the existing "
+            "quotation's current version, but a materially different total — the dates alone "
+            "cannot determine which one is authoritative."
+        )
+
+    message = (
+        f"Quotation reference '{reference}' already exists with a conflicting revision.\n\n"
+        f"Incoming: date {incoming_date_str}, total {incoming_total_str}\n"
+        f"Existing (current): date {existing_date_str}, total {existing_total_str}\n\n"
+        f"{reason}\n\n"
+        "Confirming will add this as a new revision anyway — both documents will be preserved "
+        "and neither will be overwritten. Proceed only after checking which one should actually "
+        "be treated as current."
+    )
+
+    return RevisionConflictError(
+        message,
+        conflict_type=conflict_type,
+        reference=reference,
+        incoming_date=candidate.quotation_date,
+        incoming_total=candidate.net_value,
+        existing_date=existing_version.issued_date,
+        existing_total=existing_version.quoted_value,
+    )
+
+
 def confirm_import(
     session: Session,
     document: ImportedDocument,
@@ -402,6 +490,7 @@ def confirm_import(
     new_project_code: str | None = None,
     quotation_id: int | None = None,
     include_boq: bool = True,
+    acknowledge_revision_conflict: bool = False,
 ):
     """Write the reviewed candidate data into the real business tables.
     This is the ONLY function in the application that turns an
@@ -412,6 +501,17 @@ def confirm_import(
     figure — it never sets `Project.contract_value` (only
     `quotation_service.mark_awarded` may do that, from the Quotations
     screen, as a separate, explicit user action).
+
+    When `quotation_id` targets an existing quotation, the incoming
+    candidate's date is compared against that quotation's current version
+    (`quotation_service.get_current_version`) before the revision is
+    created. An incoming date earlier than the existing one, or an equal
+    date with a materially different total, raises `RevisionConflictError`
+    unless `acknowledge_revision_conflict=True` is passed — which must
+    only ever come from an explicit reviewer action, never a default. This
+    never overwrites or edits an existing `QuotationVersion`; an
+    acknowledged conflict still creates a brand-new row, preserving both
+    the existing and incoming documents' history intact.
     """
     if document.review_status == ImportReviewStatus.CONFIRMED:
         raise ValidationError("This import has already been confirmed.")
@@ -451,10 +551,17 @@ def confirm_import(
     except ValueError:
         currency_enum = DEFAULT_CURRENCY
 
+    conflict: RevisionConflictError | None = None
     if quotation_id is not None:
         quotation = session.get(Quotation, quotation_id)
         if quotation is None:
             raise ValidationError("Select a valid quotation.")
+
+        existing_version = quotation_service.get_current_version(session, quotation)
+        conflict = _detect_revision_conflict(candidate, existing_version)
+        if conflict is not None and not acknowledge_revision_conflict:
+            raise conflict
+
         version = quotation_service.create_quotation_revision(
             session,
             quotation,
@@ -511,12 +618,13 @@ def confirm_import(
     document.resulting_quotation_version_id = version.id
     document.resulting_boq_id = boq.id if boq else None
 
-    _log(
-        session,
-        document,
-        ImportAuditEventType.CONFIRMED,
-        note=f"Confirmed into project #{project.id}, quotation version #{version.id}.",
-    )
+    note = f"Confirmed into project #{project.id}, quotation version #{version.id}."
+    if conflict is not None:
+        note += (
+            f" Reviewer acknowledged a {conflict.conflict_type} revision conflict "
+            f"(incoming {conflict.incoming_date} vs. existing {conflict.existing_date})."
+        )
+    _log(session, document, ImportAuditEventType.CONFIRMED, note=note)
     session.flush()
     return version
 

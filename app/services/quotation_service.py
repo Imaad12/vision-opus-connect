@@ -68,6 +68,25 @@ def list_versions_for_quotation(session: Session, quotation_id: int) -> list[Quo
     return list(session.execute(stmt).scalars().all())
 
 
+def get_current_version(session: Session, quotation: Quotation) -> QuotationVersion | None:
+    """The chronologically most recent version of this quotation — ordered
+    by `issued_date` (nulls last), then `id` as a deterministic tiebreak.
+
+    Deliberately NOT the highest `version_number`: a revision can be
+    confirmed out of chronological order (see
+    `app.services.import_service.confirm_import`'s revision-conflict
+    handling, which requires explicit acknowledgement before that's
+    allowed to happen at all). "Current" always means "most recent by the
+    date on the document," never "most recently entered into the system."
+    """
+    stmt = (
+        select(QuotationVersion)
+        .where(QuotationVersion.quotation_id == quotation.id, QuotationVersion.is_deleted.is_(False))
+        .order_by(QuotationVersion.issued_date.desc().nulls_last(), QuotationVersion.id.desc())
+    )
+    return session.execute(stmt).scalars().first()
+
+
 def create_quotation(
     session: Session,
     project: Project,

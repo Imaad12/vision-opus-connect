@@ -4,16 +4,30 @@ happen, then CONFIRM IMPORT / REJECT / GO BACK. This dialog never computes
 or edits candidate data — it only calls `import_service.confirm_import`
 (and, if the user chooses, `reject_import`) with the choices already made
 on the review screen.
+
+Confirming as a revision of an existing quotation can additionally raise
+`RevisionConflictError` (incoming date earlier than, or tied with a
+differing total to, the existing quotation's current version) — see
+`_confirm`. That is handled here rather than via the generic
+`app.ui.errors.run_guarded` helper specifically so a reviewer can be shown
+the conflict and asked to explicitly decide, rather than just being told
+"blocked." The default, every time, is blocked; only an explicit "yes" on
+that prompt re-attempts confirmation with the acknowledgement set.
 """
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.session import session_scope
+from app.services.errors import RevisionConflictError, ValidationError
 from app.services.import_service import confirm_import, get_imported_document, reject_import
-from app.ui.errors import run_guarded
+from app.ui.errors import run_guarded, show_database_error, show_unexpected_error, show_validation_error
 from app.ui.formatting import format_money
+from app.ui.logging_setup import get_logger
+
+logger = get_logger("ui.imports.import_confirmation_dialog")
 
 
 class ImportConfirmationDialog(QDialog):
@@ -111,6 +125,9 @@ class ImportConfirmationDialog(QDialog):
         return project.name if project else None
 
     def _confirm(self) -> None:
+        self._attempt_confirm(acknowledge_revision_conflict=False)
+
+    def _attempt_confirm(self, *, acknowledge_revision_conflict: bool) -> None:
         def _do_confirm() -> bool:
             with session_scope() as session:
                 document = get_imported_document(session, self._document_id)
@@ -121,11 +138,44 @@ class ImportConfirmationDialog(QDialog):
                     new_client_name=self._new_client_name,
                     project_id=self._project_id,
                     quotation_id=self._quotation_id,
+                    acknowledge_revision_conflict=acknowledge_revision_conflict,
                 )
             return True
 
-        if run_guarded(self, _do_confirm, context="confirming import"):
+        try:
+            succeeded = _do_confirm()
+        except RevisionConflictError as exc:
+            if self._prompt_revision_conflict(exc):
+                self._attempt_confirm(acknowledge_revision_conflict=True)
+            return
+        except ValidationError as exc:
+            show_validation_error(self, str(exc))
+            return
+        except SQLAlchemyError:
+            logger.exception("Database error while confirming import")
+            show_database_error(self)
+            return
+        except Exception:
+            logger.exception("Unexpected error while confirming import")
+            show_unexpected_error(self)
+            return
+
+        if succeeded:
             self.accept()
+
+    def _prompt_revision_conflict(self, exc: RevisionConflictError) -> bool:
+        """Show the conflict plainly and require an explicit yes/no —
+        blocked stays the default (No is the default button; closing the
+        dialog also counts as "No"). Returns True only if the reviewer
+        explicitly chose to proceed anyway."""
+        reply = QMessageBox.warning(
+            self,
+            "Revision conflict",
+            f"{exc}\n\nProceed and add this as a new revision anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def _reject(self) -> None:
         def _do_reject() -> bool:

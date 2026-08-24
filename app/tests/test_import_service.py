@@ -6,10 +6,13 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.orm import Session
 
+from decimal import Decimal
+
 from app.core.enums import ExtractionStatus, ImportReviewStatus
 from app.importers.base import BaseImporter, RawExtraction
-from app.services import client_service, project_service
-from app.services.errors import ValidationError
+from app.services import client_service, project_service, quotation_service
+from app.services.errors import RevisionConflictError, ValidationError
+from app.services.financial_service import build_project_financial_snapshot
 from app.services.import_service import (
     check_for_duplicate,
     compute_file_hash,
@@ -38,6 +41,32 @@ BOQ_CSV = (
     "1,Excavation works,Civil,m3,100,50.00,5000.00\n"
     "2,Blockwork,Civil,m2,200,75.00,15000.00\n"
 )
+
+# The real archive regression scenario (see the Phase 4 revision-conflict
+# review): the exact same quotation reference, VN/QU/412/18, appears twice
+# in Vision Contracting's real historical documents with no revision
+# marker at all -- only the date and total differ.
+VN_QU_412_18_EARLIER_TEXT = """\
+Quotation Number: VN/QU/412/18
+Quotation Date: 21/11/2018
+Client Name: Ashtead Technology
+Project Name: Office Facilities Work
+Net Amount: 168,495.00
+"""
+
+VN_QU_412_18_LATER_TEXT = """\
+Quotation Number: VN/QU/412/18
+Quotation Date: 27/11/2018
+Client Name: Ashtead Technology
+Project Name: Office Facilities Work
+Net Amount: 151,955.00
+"""
+
+
+def _write_text(tmp_path: Path, name: str, text: str) -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def _write_quotation_txt(tmp_path: Path, name: str = "quote.txt") -> Path:
@@ -286,7 +315,8 @@ def test_confirm_import_as_new_revision_of_existing_quotation(db_session: Sessio
     version_one = confirm_import(db_session, document_one, client_id=client.id, project_id=project.id)
 
     revised_path = tmp_path / "v2.txt"
-    revised_path.write_text(QUOTATION_TEXT.replace("1,250,000.00", "1,300,000.00"), encoding="utf-8")
+    revised_text = QUOTATION_TEXT.replace("1,250,000.00", "1,300,000.00").replace("15/03/2024", "22/03/2024")
+    revised_path.write_text(revised_text, encoding="utf-8")
     document_two = stage_document(db_session, revised_path)
     version_two = confirm_import(
         db_session,
@@ -399,3 +429,259 @@ def test_confirm_import_failure_rolls_back_the_new_client_and_project(db_session
     assert document.review_status == ImportReviewStatus.NEEDS_REVIEW
     assert document.resulting_client_id is None
     assert document.resulting_project_id is None
+
+
+# --- Revision-conflict handling (real VN/QU/412/18 archive scenario) --------
+
+
+def _confirm_as_new(db_session: Session, tmp_path: Path, text: str, name: str, client, project):
+    document = stage_document(db_session, _write_text(tmp_path, name, text))
+    version = confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+    db_session.commit()  # mirror production: staging/confirming are each their own session_scope()
+    return document, version
+
+
+def test_confirm_same_reference_as_new_quotation_blocked_by_unique_reference_protection(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """The existing database-wide UniqueConstraint on Quotation.reference_number
+    already prevents two independent Quotation rows from ever sharing a
+    reference -- this proves that protection end-to-end for the real
+    VN/QU/412/18 pair, not just by reading the schema."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _confirm_as_new(db_session, tmp_path, VN_QU_412_18_EARLIER_TEXT, "a.txt", client, project)
+
+    document_b = stage_document(db_session, _write_text(tmp_path, "b.txt", VN_QU_412_18_LATER_TEXT))
+    with pytest.raises(ValidationError, match="already in use"):
+        confirm_import(db_session, document_b, client_id=client.id, project_id=project.id)
+
+
+def test_confirm_earlier_dated_revision_blocked_without_acknowledgement(db_session: Session, tmp_path: Path) -> None:
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    # Later document (Nov 27) confirmed first, as if it were reviewed before
+    # the earlier one.
+    _, later_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_LATER_TEXT, "later.txt", client, project
+    )
+
+    document_earlier = stage_document(db_session, _write_text(tmp_path, "earlier.txt", VN_QU_412_18_EARLIER_TEXT))
+
+    with pytest.raises(RevisionConflictError) as excinfo:
+        confirm_import(
+            db_session,
+            document_earlier,
+            client_id=client.id,
+            project_id=project.id,
+            quotation_id=later_version.quotation_id,
+        )
+
+    exc = excinfo.value
+    assert exc.conflict_type == "earlier"
+    assert exc.reference == "VN/QU/412/18"
+    assert exc.incoming_date.isoformat() == "2018-11-21"
+    assert exc.incoming_total == Decimal("168495.00")
+    assert exc.existing_date.isoformat() == "2018-11-27"
+    assert exc.existing_total == Decimal("151955.00")
+    message = str(exc)
+    assert "VN/QU/412/18" in message
+    assert "2018-11-21" in message
+    assert "168,495.00" in message
+    assert "2018-11-27" in message
+    assert "151,955.00" in message
+
+    # Nothing was created by the blocked attempt.
+    assert len(quotation_service.list_versions_for_quotation(db_session, later_version.quotation_id)) == 1
+    document_earlier = get_imported_document(db_session, document_earlier.id)
+    assert document_earlier.review_status == ImportReviewStatus.NEEDS_REVIEW
+
+
+def test_confirm_earlier_dated_revision_succeeds_with_explicit_acknowledgement(
+    db_session: Session, tmp_path: Path
+) -> None:
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _, later_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_LATER_TEXT, "later.txt", client, project
+    )
+
+    document_earlier = stage_document(db_session, _write_text(tmp_path, "earlier.txt", VN_QU_412_18_EARLIER_TEXT))
+    earlier_version = confirm_import(
+        db_session,
+        document_earlier,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=later_version.quotation_id,
+        acknowledge_revision_conflict=True,
+    )
+
+    assert earlier_version.quotation_id == later_version.quotation_id
+    assert earlier_version.version_number == later_version.version_number + 1
+
+    document_earlier = get_imported_document(db_session, document_earlier.id)
+    assert document_earlier.review_status == ImportReviewStatus.CONFIRMED
+    # Don't rely on audit_log ordering (occurred_at can tie at
+    # second-resolution) -- just confirm the acknowledgement was logged.
+    assert any("acknowledged" in (entry.note or "").lower() for entry in document_earlier.audit_log)
+
+
+def test_confirm_later_dated_revision_succeeds_without_acknowledgement(db_session: Session, tmp_path: Path) -> None:
+    """The normal, expected workflow -- documents reviewed in chronological
+    order -- must never require acknowledgement."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _, earlier_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_EARLIER_TEXT, "earlier.txt", client, project
+    )
+
+    document_later = stage_document(db_session, _write_text(tmp_path, "later.txt", VN_QU_412_18_LATER_TEXT))
+    later_version = confirm_import(
+        db_session,
+        document_later,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=earlier_version.quotation_id,
+    )
+
+    assert later_version.quotation_id == earlier_version.quotation_id
+    assert later_version.version_number == earlier_version.version_number + 1
+
+
+def test_confirm_same_date_materially_different_total_blocked_without_acknowledgement(
+    db_session: Session, tmp_path: Path
+) -> None:
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    same_date_text = VN_QU_412_18_LATER_TEXT  # 27/11/2018, 151,955.00
+    _, first_version = _confirm_as_new(db_session, tmp_path, same_date_text, "first.txt", client, project)
+
+    conflicting_text = same_date_text.replace("151,955.00", "168,495.00")
+    document_two = stage_document(db_session, _write_text(tmp_path, "second.txt", conflicting_text))
+
+    with pytest.raises(RevisionConflictError) as excinfo:
+        confirm_import(
+            db_session,
+            document_two,
+            client_id=client.id,
+            project_id=project.id,
+            quotation_id=first_version.quotation_id,
+        )
+
+    assert excinfo.value.conflict_type == "same_date_conflict"
+    assert len(quotation_service.list_versions_for_quotation(db_session, first_version.quotation_id)) == 1
+
+
+def test_confirm_same_date_conflict_succeeds_with_explicit_acknowledgement(
+    db_session: Session, tmp_path: Path
+) -> None:
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    same_date_text = VN_QU_412_18_LATER_TEXT
+    _, first_version = _confirm_as_new(db_session, tmp_path, same_date_text, "first.txt", client, project)
+
+    conflicting_text = same_date_text.replace("151,955.00", "168,495.00")
+    document_two = stage_document(db_session, _write_text(tmp_path, "second.txt", conflicting_text))
+    second_version = confirm_import(
+        db_session,
+        document_two,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=first_version.quotation_id,
+        acknowledge_revision_conflict=True,
+    )
+
+    assert second_version.quotation_id == first_version.quotation_id
+    assert second_version.version_number == first_version.version_number + 1
+
+
+def test_acknowledged_conflict_preserves_both_versions_intact(db_session: Session, tmp_path: Path) -> None:
+    """Never overwrite: after an acknowledged out-of-order revision, both
+    QuotationVersion rows must still carry their own, original date and
+    quoted value -- exactly as reviewed and confirmed."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _, later_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_LATER_TEXT, "later.txt", client, project
+    )
+    document_earlier = stage_document(db_session, _write_text(tmp_path, "earlier.txt", VN_QU_412_18_EARLIER_TEXT))
+    confirm_import(
+        db_session,
+        document_earlier,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=later_version.quotation_id,
+        acknowledge_revision_conflict=True,
+    )
+
+    versions = quotation_service.list_versions_for_quotation(db_session, later_version.quotation_id)
+    assert len(versions) == 2
+    by_date = {v.issued_date.isoformat(): v.quoted_value for v in versions}
+    assert by_date == {
+        "2018-11-27": Decimal("151955.00"),
+        "2018-11-21": Decimal("168495.00"),
+    }
+
+
+def test_confirm_import_reflects_chronological_basis_after_out_of_order_acknowledged_revision(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """End-to-end, through the real confirm_import pipeline (not a direct
+    model construction): after an acknowledged out-of-order revision, the
+    project's live financial snapshot must reflect the chronologically
+    later document (SAR 151,955), never whichever was inserted last."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _, later_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_LATER_TEXT, "later.txt", client, project
+    )
+    document_earlier = stage_document(db_session, _write_text(tmp_path, "earlier.txt", VN_QU_412_18_EARLIER_TEXT))
+    confirm_import(
+        db_session,
+        document_earlier,
+        client_id=client.id,
+        project_id=project.id,
+        quotation_id=later_version.quotation_id,
+        acknowledge_revision_conflict=True,
+    )
+
+    project = project_service.get_project(db_session, project.id)
+    snapshot = build_project_financial_snapshot(db_session, project)
+    assert snapshot.quoted_value == Decimal("151955.00")
+
+
+def test_confirm_revision_conflict_acknowledged_but_later_failure_still_rolls_back_completely(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A conflict being acknowledged doesn't bypass the rest of confirm_import's
+    safety: if something later in the same call still fails (here, a
+    corrected-to-invalid negative quoted value), the whole transaction
+    must roll back -- no new QuotationVersion, no change to the document's
+    review status."""
+    client = client_service.create_client(db_session, name="Ashtead Technology")
+    project = project_service.create_project(db_session, name="Office Facilities Work", client_id=client.id)
+    _, later_version = _confirm_as_new(
+        db_session, tmp_path, VN_QU_412_18_LATER_TEXT, "later.txt", client, project
+    )
+
+    document_earlier = stage_document(db_session, _write_text(tmp_path, "earlier.txt", VN_QU_412_18_EARLIER_TEXT))
+    update_quotation_candidate(
+        db_session, document_earlier, document_earlier.quotation_candidate, net_value=Decimal("-100.00")
+    )
+    db_session.commit()
+
+    with pytest.raises(ValidationError, match="cannot be negative"):
+        confirm_import(
+            db_session,
+            document_earlier,
+            client_id=client.id,
+            project_id=project.id,
+            quotation_id=later_version.quotation_id,
+            acknowledge_revision_conflict=True,
+        )
+    db_session.rollback()  # mirrors app.database.session.session_scope()'s exception handler
+
+    assert len(quotation_service.list_versions_for_quotation(db_session, later_version.quotation_id)) == 1
+    document_earlier = get_imported_document(db_session, document_earlier.id)
+    assert document_earlier.review_status == ImportReviewStatus.NEEDS_REVIEW
+    assert document_earlier.resulting_quotation_version_id is None
