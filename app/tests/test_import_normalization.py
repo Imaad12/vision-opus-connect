@@ -165,6 +165,19 @@ def test_parse_amount_hyphenated_identifier_is_not_read_as_negative() -> None:
     assert parse_amount("PO-2024 total").value == Decimal("2024")
 
 
+def test_parse_amount_unicode_minus_and_en_dash_are_recognized_as_negative() -> None:
+    """Adversarial-review finding: a document/PDF renderer can produce a
+    real minus sign (U+2212) or en dash (U+2013) instead of a plain ASCII
+    hyphen for a negative amount. Before this fix, neither was recognized
+    as a sign at all, so the tokenizer silently dropped it and returned a
+    *positive* value -- the same dangerous sign-loss failure mode already
+    fixed once for whitespace-separated ASCII minus signs, just triggered
+    by a different character instead of different spacing."""
+    assert parse_amount("−151,955.00").value == Decimal("-151955.00")  # MINUS SIGN
+    assert parse_amount("–151,955.00").value == Decimal("-151955.00")  # EN DASH
+    assert parse_amount("SR − 900.00").value == Decimal("-900.00")
+
+
 def test_parse_amount_quantity_with_unit_suffix_still_parses() -> None:
     # Real archive BOQ-cell shape: "42766.45 LM" -- the unit suffix is not
     # a percentage and must not trigger the ambiguous-multi-token path.

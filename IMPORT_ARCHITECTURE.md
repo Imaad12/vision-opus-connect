@@ -467,6 +467,37 @@ file, confirming without selecting a client/project).
     confirmable) rather than guessing which document's fields belong
     together. No document-segmentation engine was built — this is a
     refusal, not a split.
+  - **Fixed (adversarial-review round 1)**: reference-counting alone
+    missed the case where one document's reference/date survive but a
+    *different* document's date/total survive elsewhere in the same file
+    — reproduced directly via code execution, not assumed. `run_extraction`
+    now also counts distinct `quotation_date` values (a single quotation
+    only ever has one issue date) as a second, independent multi-document
+    signal alongside references.
+  - **Fixed (adversarial-review round 2)**: `parse_amount` recognized only
+    the ASCII hyphen as a negative sign — a real minus sign (U+2212) or en
+    dash (U+2013), either producible by a PDF renderer/OCR engine, silently
+    lost its sign and returned a *positive* value (e.g. `"−151,955.00"` →
+    `151955.00`) instead of being rejected or correctly negated. Now
+    recognized and normalized to the same negative `Decimal` a plain
+    `"-151,955.00"` already produced.
+  - **Residual, explicitly unresolved risk**: if a document loses *both*
+    its reference and its date entirely while an unrelated total survives
+    elsewhere in the same file, neither signal catches it — confirmed
+    still reachable by direct construction in the second adversarial
+    review. Real-archive evidence somewhat bounds the practical risk: across
+    all 18 real quotation documents tested (29 pages, both plain-text and
+    table-shaped totals), **zero** ever had a financial value (`net_value`/
+    `tax_value`/`gross_value`) successfully captured on any page at all —
+    the specific "clean total, lost reference and date" combination this
+    gap requires has no observed instance in this archive, because
+    financial-line capture itself is currently near-zero regardless of
+    reference/date survival. This is not a reason to consider the gap
+    closed — a cleaner scan, a different archive, or an OCR quality
+    improvement could easily produce a clean total on an otherwise-unlabeled
+    page. Closing it fully needs per-field source-page/line provenance
+    tracking, a larger change than either adversarial pass's fixes;
+    tracked here as the priority follow-up, not silently accepted.
 - **BOQ table reconstruction from OCR is a best-effort heuristic**
   (gap-based column splitting on word positions), not true table
   structure detection — it declines (rather than guesses) when a page's

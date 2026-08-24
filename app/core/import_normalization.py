@@ -110,7 +110,16 @@ class ParsedAmount:
 # the negative amount -2024; with it, the hyphen there is correctly left
 # attached to the word, not treated as a sign, and "2024" tokenizes as a
 # plain positive number instead.
-_NUMERIC_TOKEN_RE = re.compile(r"(?<![\w.])-\s{0,3}\d+(?:[.,]\d+)*|\d+(?:[.,]\d+)*")
+#
+# The sign character itself accepts the ASCII hyphen-minus plus two
+# Unicode dash characters (EN DASH U+2013, MINUS SIGN U+2212) that a
+# document/PDF renderer can legitimately use for a minus sign instead of
+# the plain hyphen (found via adversarial testing: without this, "–150.00"
+# silently became positive 150.00 — a sign lost, not merely a value
+# rejected, exactly the dangerous failure mode already fixed once for the
+# whitespace-separated ASCII case).
+_SIGN_CHARS = "−–-"
+_NUMERIC_TOKEN_RE = re.compile(rf"(?<![\w.])[{_SIGN_CHARS}]\s{{0,3}}\d+(?:[.,]\d+)*|\d+(?:[.,]\d+)*")
 
 # A numeric token immediately (optionally via whitespace) followed by a
 # percent sign is a rate, never a monetary amount — see the real-archive
@@ -194,6 +203,11 @@ def parse_amount(text: str) -> ParsedAmount:
     amount_tokens: list[str] = []
     for match in _NUMERIC_TOKEN_RE.finditer(text):
         token = re.sub(r"\s", "", match.group())  # collapse "- 900.00" -> "-900.00"
+        if token and token[0] in _SIGN_CHARS:
+            # Normalize any accepted sign character to the ASCII hyphen
+            # `Decimal(...)` actually understands -- "−150.00"/"–150.00"
+            # must parse the same way "-150.00" already does, not raise.
+            token = "-" + token[1:]
         if token in {"-", "."}:
             continue
         if _PERCENT_SUFFIX_RE.match(text, match.end()):
