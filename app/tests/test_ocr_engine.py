@@ -1,13 +1,23 @@
+from unittest.mock import patch
+
 from app.core.ocr_engine import TesseractOcrEngine, _words_to_page_result, get_default_ocr_engine
 
 
 def test_tesseract_engine_reports_unavailable_when_dependencies_missing() -> None:
-    """This sandbox genuinely has neither `pytesseract` nor the Tesseract
-    binary installed -- `is_available()` must say so cleanly rather than
-    raising, so the rest of the application can degrade to OCR_REQUIRED
-    instead of crashing."""
+    """`is_available()` must say so cleanly rather than raising when the
+    engine can't be reached, so the rest of the application can degrade to
+    OCR_REQUIRED instead of crashing. Forces the "unavailable" branch via a
+    mock rather than relying on Tesseract being absent from whatever
+    environment happens to run this test (it may or may not be installed)."""
     engine = TesseractOcrEngine()
-    assert engine.is_available() is False
+    with patch("pytesseract.get_tesseract_version", side_effect=Exception("tesseract not found")):
+        assert engine.is_available() is False
+
+
+def test_tesseract_engine_reports_available_when_dependencies_present() -> None:
+    engine = TesseractOcrEngine()
+    with patch("pytesseract.get_tesseract_version", return_value="5.3.4"):
+        assert engine.is_available() is True
 
 
 def test_tesseract_engine_ocr_image_fails_safely_when_dependencies_missing() -> None:

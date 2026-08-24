@@ -41,6 +41,7 @@ _STATUS_LABELS = {
     "FAILED": "Failed",
     "UNSUPPORTED": "Unsupported",
     "OCR_REQUIRED": "OCR Required",
+    "MULTIPLE_QUOTATIONS_DETECTED": "Multiple Quotations Found",
 }
 
 _REVIEW_STATUS_LABELS = {

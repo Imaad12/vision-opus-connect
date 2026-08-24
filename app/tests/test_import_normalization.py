@@ -86,6 +86,68 @@ def test_parse_amount_empty_or_garbage_returns_none_not_ambiguous() -> None:
     assert result.ambiguous is False
 
 
+# --- Regression: a percentage rate must never be concatenated onto a ---
+# --- monetary amount (real archive finding, OCR Phase 1 fix) -----------
+
+
+def test_parse_amount_percentage_prefix_is_never_folded_into_the_amount() -> None:
+    """The real-archive finding this guards against: OCR produced the raw
+    string "5% charges SR 900.00" for a VAT line whose actual amount is
+    SR 900.00. The naive "strip every non-numeric character and parse
+    what's left" approach silently concatenated "5" onto "900.00" into a
+    fabricated 5,900.00 -- a confidently-wrong financial value."""
+    result = parse_amount("5% charges SR 900.00")
+    assert result.value == Decimal("900.00")
+    assert result.ambiguous is False
+
+
+def test_parse_amount_percentage_prefix_variant_with_equals_sign() -> None:
+    result = parse_amount("VAT 5% = 900.00")
+    assert result.value == Decimal("900.00")
+    assert result.ambiguous is False
+
+
+def test_parse_amount_plain_decimal_still_parses() -> None:
+    result = parse_amount("900.00")
+    assert result.value == Decimal("900.00")
+    assert result.ambiguous is False
+
+
+def test_parse_amount_currency_prefixed_thousands_still_parses() -> None:
+    assert parse_amount("SR 151,955.00").value == Decimal("151955.00")
+    assert parse_amount("SAR 168,495.00").value == Decimal("168495.00")
+
+
+def test_parse_amount_percentage_alone_yields_no_value_not_a_guess() -> None:
+    # A rate with no accompanying amount at all -- nothing to extract, and
+    # the "5" must never be treated as the amount just because it's the
+    # only digit present.
+    result = parse_amount("5%")
+    assert result.value is None
+    assert result.ambiguous is False
+
+
+def test_parse_amount_two_distinct_amounts_on_one_line_is_ambiguous() -> None:
+    # More than one genuine (non-percentage) monetary figure on the same
+    # line/cell -- which one is "the" value is genuinely ambiguous and
+    # must be flagged for review, never guessed (e.g. by taking the first).
+    result = parse_amount("Total 168,495.00 and 500.00 discount")
+    assert result.value is None
+    assert result.ambiguous is True
+
+
+def test_parse_amount_negative_amount_still_parses() -> None:
+    # Existing behavior (a price adjustment/correction) must survive the
+    # tokenization rewrite unchanged.
+    assert parse_amount("-150.00").value == Decimal("-150.00")
+
+
+def test_parse_amount_quantity_with_unit_suffix_still_parses() -> None:
+    # Real archive BOQ-cell shape: "42766.45 LM" -- the unit suffix is not
+    # a percentage and must not trigger the ambiguous-multi-token path.
+    assert parse_amount("42766.45 LM").value == Decimal("42766.45")
+
+
 def test_parse_date_maybe_common_formats() -> None:
     from datetime import date
 

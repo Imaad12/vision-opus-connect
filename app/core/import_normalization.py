@@ -96,17 +96,25 @@ class ParsedAmount:
     raw: str
 
 
-_NUMERIC_CHARS_RE = re.compile(r"[^0-9.,\-]")
+# One numeric run: an optional leading minus sign, then digits with
+# optional grouping/decimal separators (`,` or `.`) *between* digits only
+# — this never matches across a gap of letters/spaces, so "5% charges SR
+# 900.00" tokenizes as two separate runs ("5", "900.00") rather than one
+# string that could be stripped-and-concatenated into "5900.00".
+_NUMERIC_TOKEN_RE = re.compile(r"-?\d+(?:[.,]\d+)*")
+
+# A numeric token immediately (optionally via whitespace) followed by a
+# percent sign is a rate, never a monetary amount — see the real-archive
+# case this guards against: "VAT 5% charges SR 900.00" must extract the
+# amount as 900.00, never as a number built from the "5" too.
+_PERCENT_SUFFIX_RE = re.compile(r"\s*%")
 
 
-def parse_amount(text: str) -> ParsedAmount:
-    """Parse a monetary/numeric string into a `Decimal`, flagging genuine
-    locale ambiguity instead of guessing. Any currency symbol/letters are
-    stripped first — extract currency separately via
-    `normalize_currency_token` if needed.
-    """
-    raw = text
-    cleaned = _NUMERIC_CHARS_RE.sub("", text)
+def _parse_numeric_token(cleaned: str) -> ParsedAmount:
+    """Parse one already-isolated numeric token (digits plus at most the
+    separators between them — no currency letters, no stray words) into a
+    `Decimal`, flagging genuine locale ambiguity instead of guessing."""
+    raw = cleaned
     if not cleaned or cleaned in {"-", "."}:
         return ParsedAmount(None, ambiguous=False, raw=raw)
 
@@ -154,6 +162,45 @@ def parse_amount(text: str) -> ParsedAmount:
         return ParsedAmount(Decimal(cleaned), ambiguous=False, raw=raw)
     except InvalidOperation:
         return ParsedAmount(None, ambiguous=False, raw=raw)
+
+
+def parse_amount(text: str) -> ParsedAmount:
+    """Parse a monetary/numeric string into a `Decimal`, flagging genuine
+    locale ambiguity instead of guessing. Any currency symbol/letters are
+    ignored — extract currency separately via `normalize_currency_token`
+    if needed.
+
+    Deliberately tokenizes first rather than stripping every non-numeric
+    character from the whole string and parsing what's left as one
+    number: a real archive document produced "VAT : 5% charges SR
+    900.00", and the naive strip-everything approach silently concatenated
+    the "5" from "5%" onto "900.00" into a fabricated 5,900.00 — a
+    confidently-wrong financial value. Percentage/rate numbers (a numeric
+    token directly followed by `%`) are never treated as the monetary
+    amount. If more than one genuine amount-shaped token remains after
+    excluding percentages, which one is "the" value is genuinely
+    ambiguous and must not be guessed.
+    """
+    raw = text
+    amount_tokens: list[str] = []
+    for match in _NUMERIC_TOKEN_RE.finditer(text):
+        token = match.group()
+        if token in {"-", "."}:
+            continue
+        if _PERCENT_SUFFIX_RE.match(text, match.end()):
+            continue  # a rate (e.g. "5%"), never a monetary amount
+        amount_tokens.append(token)
+
+    if not amount_tokens:
+        return ParsedAmount(None, ambiguous=False, raw=raw)
+    if len(amount_tokens) > 1:
+        # More than one candidate monetary figure on the same line/cell
+        # (and not distinguishable as a rate) — which one is the real
+        # amount is genuinely ambiguous; never guess.
+        return ParsedAmount(None, ambiguous=True, raw=raw)
+
+    result = _parse_numeric_token(amount_tokens[0])
+    return ParsedAmount(result.value, result.ambiguous, raw=raw)
 
 
 # --- Dates --------------------------------------------------------------------

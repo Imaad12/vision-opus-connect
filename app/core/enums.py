@@ -139,6 +139,12 @@ class ExtractionStatus(StrEnum):
     FAILED = "FAILED"
     UNSUPPORTED = "UNSUPPORTED"
     OCR_REQUIRED = "OCR_REQUIRED"
+    #: More than one distinct quotation reference was found in a single
+    #: staged file (a real archive scan bundling several quotations into
+    #: one PDF) — no candidate is built, since it can't be attributed to
+    #: any one of them without risking a spliced record. Never reachable
+    #: for a document that genuinely contains exactly one quotation.
+    MULTIPLE_QUOTATIONS_DETECTED = "MULTIPLE_QUOTATIONS_DETECTED"
 
 
 class ImportReviewStatus(StrEnum):

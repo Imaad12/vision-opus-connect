@@ -275,6 +275,34 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
         document.extraction_engine = "ocr"
 
     result = extract_candidates(raw)
+
+    if len(result.distinct_references) > 1:
+        # This one staged file appears to bundle more than one independent
+        # quotation document (a real, demonstrated risk for scanned
+        # archives — see IMPORT_ARCHITECTURE.md). Building a single
+        # candidate here would risk silently splicing a date from one
+        # quotation onto a total from another, since field extraction has
+        # no way to know two lines came from different documents. No
+        # candidate/BOQ rows are created; the raw OCR/page data already
+        # stored above (`raw_extracted_data`) is preserved for manual
+        # review, and confirmation is blocked (no candidate exists to
+        # confirm).
+        document.extraction_status = ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+        document.extraction_error = (
+            "This file appears to contain more than one quotation document "
+            f"({len(result.distinct_references)} distinct references found: "
+            f"{', '.join(result.distinct_references)}). Split it into separate "
+            "files and re-import each one, or enter this document's data manually."
+        )
+        _log(
+            session,
+            document,
+            ImportAuditEventType.EXTRACTED,
+            note=f"Multiple quotation references detected ({len(result.distinct_references)}); no candidate created.",
+        )
+        session.flush()
+        return
+
     document.document_kind = result.document_kind
 
     candidate = ImportedQuotationCandidate(

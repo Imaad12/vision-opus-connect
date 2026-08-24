@@ -80,12 +80,37 @@ class ExtractionResult:
     quotation: QuotationCandidateFields
     boq_rows: list[BoqRowCandidate]
     document_kind: ImportDocumentKind
+    #: Distinct quotation reference strings found anywhere in the source
+    #: (see `find_distinct_quotation_references`). Length > 1 means this
+    #: staged file appears to bundle more than one independent quotation
+    #: document — the caller (`app.services.import_service.run_extraction`)
+    #: must not build a single candidate from it in that case.
+    distinct_references: list[str] = field(default_factory=list)
 
 
 # --- Quotation field scanning ------------------------------------------------
 
 _FIELD_LABELS: dict[str, tuple[str, ...]] = {
-    "quotation_number": ("quotation no", "quotation number", "quote no", "quote number", "reference no", "reference number", "ref no"),
+    # "reference"/"quotation reference" are deliberately the lowest-priority
+    # (shortest/least specific) labels here -- confirmed from real archive
+    # documents that print bare "Reference:" or "Quotation Reference:" for
+    # their own quotation number. Sorted after the more specific labels
+    # below (see `_FIELD_ORDER`), so a document that also has an unrelated
+    # "Reference: <correspondence note>" line elsewhere is only matched by
+    # bare "reference" if nothing more specific was found first -- a known,
+    # accepted trade-off (the same shape as "attn" already being accepted
+    # for `client_name` even though it sometimes captures a person's name).
+    "quotation_number": (
+        "quotation no",
+        "quotation number",
+        "quote no",
+        "quote number",
+        "reference no",
+        "reference number",
+        "ref no",
+        "quotation reference",
+        "reference",
+    ),
     "quotation_date": ("quotation date", "quote date", "date"),
     "client_name": ("client name", "client", "customer name", "customer", "bill to", "attn"),
     "project_name": ("project name", "project title", "project"),
@@ -112,7 +137,17 @@ _LINE_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
 def _pattern_for(label: str) -> re.Pattern[str]:
     if label not in _LINE_PATTERN_CACHE:
         escaped = re.escape(label)
-        _LINE_PATTERN_CACHE[label] = re.compile(rf"^\s*{escaped}\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE)
+        # `»` is included alongside `:`/`-` because real-archive OCR output
+        # (Tesseract, real Vinco scans) was observed to misread a printed
+        # colon as `»` specifically ("Reference » VN/QU/412/18"). This is a
+        # narrow, specific substitution for one confirmed OCR artifact --
+        # not a general "any separator" relaxation, so it doesn't make
+        # label matching any more permissive about what counts as a label.
+        # Bare whitespace is deliberately NOT accepted as a separator: that
+        # would match "Reference Section 3.2 discusses..." just as readily
+        # as an actual label:value line, which is exactly the over-broad
+        # matching this project's label-based extraction must avoid.
+        _LINE_PATTERN_CACHE[label] = re.compile(rf"^\s*{escaped}\s*[:\-»]\s*(.+?)\s*$", re.IGNORECASE)
     return _LINE_PATTERN_CACHE[label]
 
 
@@ -199,6 +234,35 @@ def _apply_field(result: QuotationCandidateFields, field_name: str, raw_value: s
 
     setattr(result, field_name, raw_value)
     result.field_confidence[field_name] = ConfidenceLevel.HIGH.value
+
+
+def find_distinct_quotation_references(text: str | None, tables: list[ExtractedTable]) -> list[str]:
+    """Scan for every line matching a quotation-reference label (not just
+    the first, unlike `extract_quotation_candidate`), returning the
+    distinct non-empty captured values in the order first seen.
+
+    This exists solely so the caller can detect "this one staged file
+    appears to contain more than one quotation document" (a real,
+    demonstrated risk for multi-page scanned archives — a single 24-page
+    scan can bundle 16+ independent quotations) and refuse to build one
+    spliced candidate from it. It is deliberately NOT used to pick which
+    reference "wins" — that would just move the same field-bleeding risk
+    one level up. No document-segmentation or per-quotation parsing is
+    attempted here; this only counts distinct reference strings.
+    """
+    lines = _candidate_lines(text, tables)
+    labels = _FIELD_LABELS["quotation_number"]
+    seen: list[str] = []
+    for label in labels:
+        pattern = _pattern_for(label)
+        for line in lines:
+            match = pattern.match(line)
+            if not match:
+                continue
+            value = normalize_whitespace(match.group(1))
+            if value and value not in seen:
+                seen.append(value)
+    return seen
 
 
 # --- BOQ row scanning ---------------------------------------------------------
@@ -304,6 +368,7 @@ def extract_boq_rows(tables: list[ExtractedTable]) -> list[BoqRowCandidate]:
 def extract_candidates(raw: RawExtraction) -> ExtractionResult:
     quotation = extract_quotation_candidate(raw.text, raw.tables)
     boq_rows = extract_boq_rows(raw.tables)
+    distinct_references = find_distinct_quotation_references(raw.text, raw.tables)
 
     has_quotation_data = any(
         getattr(quotation, name) is not None
@@ -323,4 +388,6 @@ def extract_candidates(raw: RawExtraction) -> ExtractionResult:
     else:
         kind = ImportDocumentKind.UNKNOWN
 
-    return ExtractionResult(quotation=quotation, boq_rows=boq_rows, document_kind=kind)
+    return ExtractionResult(
+        quotation=quotation, boq_rows=boq_rows, document_kind=kind, distinct_references=distinct_references
+    )

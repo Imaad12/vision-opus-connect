@@ -182,6 +182,7 @@ class ImportReviewDialog(QDialog):
             ExtractionStatus.FAILED,
             ExtractionStatus.UNSUPPORTED,
             ExtractionStatus.OCR_REQUIRED,
+            ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED,
         ):
             self._build_terminal_section(source_info)
             return

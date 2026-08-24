@@ -305,6 +305,30 @@ also orders by `issued_date` rather than insertion order — the project's
 "current quoted basis" always means the most recently *dated* version,
 never whichever row happened to be written to the database last.
 
+### 10.2 Related-but-differently-referenced quotations: a documented future requirement
+
+The same real-archive review that found §10.1's case also found
+`VN/QU/396/18` (7 Nov 2018, SAR 242,500) and `VN/QU/396B/18` (11 Nov 2018,
+SAR 192,750) — same client, same subject ("Corrugated sheet work in Binex
+Office"), almost certainly the same negotiation re-quoted lower four days
+later. Unlike §10.1's case, the reference *strings* differ (`396` vs
+`396B`), so `suggest_quotation_matches`' exact-equality matching correctly
+does **not** connect them — and it must not be made to. Fuzzy/prefix
+matching that treated "396" and "396B" as related would just as readily
+connect two genuinely unrelated quotations that happen to share a numeric
+prefix (`VN/QU/39/18` and `VN/QU/396/18`, for instance) — an
+automatically-recognized-and-merged wrong pairing is a worse outcome than
+today's "reviewer must notice it themselves."
+
+This is deliberately **not implemented**: a same-client-plus-similar-
+subject relationship signal is a real, useful thing for a future phase to
+surface as an *additional advisory hint* (alongside, never instead of,
+exact-reference matching) — but it needs its own design pass (what counts
+as "similar enough," how it's presented, whether it's ever allowed to
+pre-select anything) rather than a quick fuzzy-match bolt-on. Tracked here
+as a known gap, confirmed twice now against real archive data, for a
+future phase to pick up deliberately.
+
 ## 11. Audit trail (`ImportAuditLogEntry`)
 
 Every staged document accumulates an append-only log:
@@ -402,24 +426,68 @@ file, confirming without selecting a client/project).
   unset rather than guessing.
 - **No date-format ambiguity flag** (unlike amounts): day-first parsing is
   applied as a fixed business assumption rather than flagged per-value.
-- **OCR (Phase 1) has not been run against real Tesseract in this
-  environment**: `pytesseract`/Tesseract are not installed in the
-  development sandbox this was built in, so OCR's own tests inject a fake
-  `OcrEngine` at that one boundary — the page rasterization and result
-  aggregation around it are real. Running against the real archive scans
-  with real Tesseract installed is a pre-merge action item, not something
-  this phase could verify directly.
+- **OCR (Phase 1) has been run against the real archive with real
+  Tesseract** (a follow-up to the original design/build): 3 real scanned
+  files (29 pages total, 16 distinct quotation references) were staged
+  through the actual pipeline. Structured field capture was very low
+  before the fixes below — a two-column "Label: Value" print layout
+  frequently loses the label word or the colon to OCR noise, and even a
+  perfect read often used label wording (bare `Reference:`) this
+  project's original vocabulary didn't recognize at all. Three real,
+  demonstrated defects were fixed as a direct result — see the items
+  below; each one traces to a specific real-archive artifact, not a
+  hypothetical.
+  - **Fixed**: `parse_amount` could concatenate a percentage rate onto an
+    adjacent monetary figure (`"5% charges SR 900.00"` → a fabricated
+    `5,900.00` at `HIGH` confidence) — the real archive's page-11 ghosting
+    artifact reproduced this exactly. `parse_amount` now tokenizes the
+    input and never treats a `%`-suffixed token as part of the amount; two
+    or more non-percentage candidates on one line/cell are now flagged
+    ambiguous rather than guessed.
+  - **Fixed**: `_FIELD_LABELS["quotation_number"]` didn't include bare
+    `"reference"` or `"quotation reference"` — the real archive's actual
+    label wording — so even flawless OCR never populated
+    `quotation_number`. Both are now recognized (lowest priority, after
+    every more specific label, to limit false positives from an unrelated
+    `"Reference: <correspondence note>"` line elsewhere on the same
+    document — a known, accepted trade-off, the same shape as `"attn"`
+    already being accepted for `client_name`). `_pattern_for`'s separator
+    class also now accepts `»`, the specific glyph Tesseract was observed
+    substituting for a printed colon on this archive — not a general
+    "any separator" relaxation.
+  - **Fixed**: a single staged file that bundles multiple independent
+    quotations (the tested 24-page archive file contains 16) could have
+    its fields silently spliced across documents — `quotation_date` from
+    page 1's quotation ending up on a candidate whose `net_value` (had it
+    been captured) came from page 8's unrelated quotation. `run_extraction`
+    now calls `find_distinct_quotation_references` before building a
+    candidate; more than one distinct reference anywhere in the file stops
+    candidate/BOQ creation entirely (`ExtractionStatus.
+    MULTIPLE_QUOTATIONS_DETECTED`, raw OCR text still preserved, nothing
+    confirmable) rather than guessing which document's fields belong
+    together. No document-segmentation engine was built — this is a
+    refusal, not a split.
 - **BOQ table reconstruction from OCR is a best-effort heuristic**
   (gap-based column splitting on word positions), not true table
   structure detection — it declines (rather than guesses) when a page's
   layout is inconsistent, but a scan with unusual column spacing may
   still be flagged "uncertain" more often than a human would consider
-  necessary. Manual BOQ entry remains available in every case.
+  necessary. Confirmed conservative against the real archive: 0/6+ real
+  BOQ tables were reconstructed, but in every case that meant zero rows,
+  never misaligned/fabricated ones. Manual BOQ entry remains available in
+  every case.
 - **No conflict detection for multiple distinct totals on one page**: if
   a document prints more than one "total"-shaped label with different
   values, the existing first-match-wins label matching (unchanged from
   Phase 4) picks one; there is no explicit multi-value warning yet. Human
   review remains the safety net regardless of which value was picked up.
+  Deliberately not addressed in the OCR-safety-fix pass (out of its
+  narrow scope) — a candidate future improvement.
+- **No automatic relationship detection between differently-referenced
+  quotations** (e.g. `VN/QU/396/18` vs `VN/QU/396B/18`, same client, same
+  subject, four days apart — a real archive pair) — see §10.2. Deliberately
+  not implemented; exact-reference matching must not be loosened to guess
+  at this.
 - **No Arabic-language verification**: Tesseract supports Arabic language
   packs, but this was not exercised against real archive documents in
   this environment (see the OCR design review's open questions).

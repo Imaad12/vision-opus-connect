@@ -421,3 +421,103 @@ def test_original_source_file_is_byte_identical_after_the_full_pipeline(db_sessi
     # And a second stage_document call against the same untouched file
     # still recognizes it as the exact same content.
     assert check_for_duplicate(db_session, path) is not None
+
+
+# --- 17. Multi-quotation files must not become one spliced candidate -----------
+# Real archive finding: a single scanned PDF (the tested 24-page file) can
+# bundle many independent quotations. Building one ImportedQuotationCandidate
+# from the whole file risks silently combining a date from one quotation
+# with a total from a completely different one.
+
+
+def test_multi_quotation_file_creates_no_candidate(db_session: Session, tmp_path: Path) -> None:
+    """Direct reproduction of the real scenario: page 1's quotation A
+    (444 REV/18) followed later in the same file by page 8's quotation B
+    (VN/QU/412/18) -- must never merge into a single candidate."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Quotation Reference: 444 REV / 18\nDate: 23.12.2018\n"
+        "--- Page 8 ---\n"
+        "Reference: VN/QU/412/18\nDate: Nov 27, 2018\nNet Amount: 151,955.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    assert document.extraction_status == ExtractionStatus.MULTIPLE_QUOTATIONS_DETECTED
+    assert document.quotation_candidate is None
+    assert list(document.boq_line_candidates) == []
+    assert "444 REV / 18" in document.extraction_error
+    assert "VN/QU/412/18" in document.extraction_error
+    # The raw OCR text is still preserved for manual review, never discarded.
+    assert document.raw_extracted_data is not None
+    import json
+
+    assert "VN/QU/412/18" in json.loads(document.raw_extracted_data)["text"]
+
+
+def test_multi_quotation_file_cannot_be_confirmed(db_session: Session, tmp_path: Path) -> None:
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: 444 REV / 18\n" "Reference: VN/QU/412/18\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    client = client_service.create_client(db_session, name="Some Client")
+    project = project_service.create_project(db_session, name="Some Project", client_id=client.id)
+
+    with pytest.raises(ValidationError, match="Nothing to confirm"):
+        confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+
+    from app.models import Client, Project, Quotation
+
+    assert db_session.query(Quotation).count() == 0
+    # The client/project created above for the attempt itself are fine
+    # (existing rows, unrelated to this document) -- confirm this specific
+    # document resulted in no *quotation* record at all.
+    assert db_session.query(Client).count() == 1
+    assert db_session.query(Project).count() == 1
+    document = get_imported_document(db_session, document.id)
+    assert document.review_status == ImportReviewStatus.NEEDS_REVIEW
+    assert document.resulting_quotation_id is None
+
+
+def test_single_quotation_file_is_unaffected_by_the_multi_quotation_check(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """The common case -- one document, one reference -- must still build
+    a normal candidate exactly as before."""
+    path = _placeholder_scan(tmp_path)
+    text = "Reference: VN/QU/412/18\nDate: Nov 27, 2018\nNet Amount: 151,955.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    assert document.extraction_status == ExtractionStatus.EXTRACTION_COMPLETE
+    assert document.quotation_candidate is not None
+    assert document.quotation_candidate.quotation_number == "VN/QU/412/18"
+    assert document.quotation_candidate.net_value == Decimal("151955.00")
+
+
+# --- Issue 5: uncertain BOQ structure must never fabricate financial rows -----
+
+
+def test_real_archive_shaped_garbled_boq_header_creates_no_rows(db_session: Session, tmp_path: Path) -> None:
+    """Reproduces the exact real-archive OCR failure mode: a BOQ header
+    row OCR'd with its "Description"/"Qty" keywords lost ("mae Unit Rate"
+    instead of "Description | Qty | Unit Rate | Total"), leaving only one
+    recognizable keyword. Must yield zero BOQ rows -- never guessed/
+    misaligned ones -- exactly as observed against the real archive."""
+    path = _placeholder_scan(tmp_path)
+    table = ExtractedTable(
+        name="page 8 (OCR)",
+        rows=[
+            ["mae Unit Rate"],
+            ["Close workshop area", "177", "75", "13,275.00"],
+            ["Painting work", "487m", "30", "14,610.00"],
+        ],
+    )
+    text = "Reference: VN/QU/412/18\nDate: Nov 27, 2018\nNet Amount: 151,955.00\n"
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text, tables=[table])):
+        document = stage_document(db_session, path)
+
+    assert list(document.boq_line_candidates) == []
+    # The quotation-level fields are unaffected by the BOQ table failure.
+    assert document.quotation_candidate.net_value == Decimal("151955.00")
