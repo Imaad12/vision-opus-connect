@@ -1153,3 +1153,101 @@ most segments remain `BLOCKED` — now predominantly by the date-parsing
 gaps in §20.4, not by net/gross. This is answered directly: the net/gross
 problem this task targeted is now meaningfully smaller; date parsing has
 taken over as the dominant blocker and is the next round's target.
+
+## 21. Targeted date extraction improvement (OCR Phase 4 round 4)
+
+Round 3 found date parsing was now the dominant reason most correctly-
+bounded segments stayed `BLOCKED`, with two more real date-format
+variants and a leading-noise-on-`Date` instance flagged but not yet
+confirmed one-by-one. This round verified each against the real OCR text
+before changing anything.
+
+### 21.1 Every real Date line in the archive, checked individually
+
+Grepped every `Date` line in the real saved OCR output (24 pages) and
+classified each — three genuinely distinct root causes confirmed, not
+assumed to be the same:
+
+| Real line | Root cause |
+|---|---|
+| `Date: 23.12.2018`, `Date - November 27, 2018.`, `Date : Nov 19, 2018.`, `Date - November 07, 2018.`, `Date : Nov 07, 2018.` (6 lines) | Already handled (round 2's trailing-punctuation fix, or no defect at all) |
+| `Date - November 18 , 2018.` (page 14) | **New**: a space *before* the comma |
+| `Date - November 03,2018.`, `Date - November 29,2018.` ×2 (pages 19, 21, 22) | **New**: no space *after* the comma — confirmed on 3 separate real documents, the more common of the two |
+| `\| Date : November 18, 2018.` (page 16), `\| Date — November 11, 2018.` (page 17) | The already-known leading-OCR-noise-before-label limitation (previously seen on Reference/Total lines) — a third, distinct instance, this time on `Date` |
+| `- Nov 27, 2018.` (page 8, VN/QU/412/18 1st occurrence) | The label word itself is entirely gone (round 2 finding) — unrelated to comma spacing, unaffected either way |
+
+### 21.2 Fix made
+
+One narrow addition to `parse_date_maybe` (`import_normalization.py`):
+normalize any whitespace immediately around the comma in "Month DD,
+YYYY" to exactly `", "` before matching against the existing, unchanged
+`_DATE_FORMATS` list. This handles both new variants with a single rule
+(a space added before the comma is removed, a missing space after it is
+inserted) — no new format strings, reusing the existing infrastructure
+exactly as instructed. It only ever touches whitespace directly adjacent
+to a comma; it can never change what date is represented, cannot rescue
+genuinely unparseable text (verified by test), and does not touch the
+leading-noise cases at all — deliberately left alone, for the third time
+now, for the same, consistently-applied reason: no single safe, narrow
+shape exists to anchor a fix to across noise prefixes as different as
+`"|"`, `"ie"`, `"eae"`, and `"3"`. This is the "stop and report" case
+named in the task, applied to this one sub-pattern rather than to the
+whole effort.
+
+No segmentation code was touched — the investigation did not find a case
+where a date fix required a segmentation change.
+
+### 21.3 Real-archive re-validation
+
+Fresh Tesseract OCR, this session; all 3 source PDFs confirmed byte-
+identical by SHA-256 before and after; no `confirm_import` call anywhere
+in the validation scripts, and no `Quotation`/`QuotationVersion`/
+`Client`/`Project` rows exist in any of the run's databases by
+construction.
+
+| Metric | Before this round | After |
+|---|---|---|
+| Segments / correctly bounded / under-split | 15 / 13 / 2 (unchanged) | 15 / 13 / 2 |
+| Dates visibly present on a real quotation's own page | 14 of 15 (the 15th is the delivery note, not a quotation) | 14 |
+| Dates correctly extracted | 8 | **12** |
+| Dates still missing | 7 (3 leading-noise/lost-label + 4 comma-spacing) | 3 (1 lost-label — VN/QU/412/18 1st; 2 leading-noise — VN/QU/403/18, VN/QU/396B/18) |
+| Incorrect dates | 0 | 0 (no wrong date was ever produced — a value either parses to the one real date it represents, or stays `None`) |
+| Net / gross / VAT correctly extracted (of 15, from §20.5) | 7 / 4 / 11 | unchanged: 7 / 4 / 11 — this round touched no other extraction path |
+| `HIGH_CONFIDENCE` | 1 (VN/QU/395/18) | **2** (+ VN/QU/420/18) |
+| `REVIEW_REQUIRED` | 1 (VN/QU/396/18) | **2** (+ VN/QU/390/18) |
+| `BLOCKED` | 13 | 11 |
+| Confirmable segments (`HIGH_CONFIDENCE` + `REVIEW_REQUIRED`) | 2 / 15 | **4 / 15** |
+
+Each of the 4 newly-recovered dates was checked against the real
+scanned quotation directly: VN/QU/389/18 → 2018-11-18, VN/QU/390/18 →
+2018-11-03, VN/QU/419/18 → 2018-11-29, VN/QU/420/18 → 2018-11-29 — all
+four match the visual ground truth exactly.
+
+One nuance worth stating plainly: VN/QU/389/18's date is now correctly
+extracted, but its segment is still `BLOCKED` — its `net_value` is
+independently flagged `LOW` by the pre-existing identity-corroboration
+check (§18/§20.3), because its own net figure legitimately sits on a
+different page from its reference/date (a normal, correct 2-page layout
+for this business's own template, not a defect). Fixing the date does
+not and should not change that separate, already-conservative gate.
+
+### 21.4 Is quotation ingestion now practically usable?
+
+Confirmable segments doubled (2 → 4 of 15) from a single, narrow date
+fix, on top of round 3's net/gross recovery. That is real, verified
+progress, not just a bigger test count. But the honest answer is not yet
+fully: 11 of 15 segments are still `BLOCKED`, for a mix of reasons this
+project has now catalogued precisely rather than guessed at —
+2 confirmed cross-document splices/mis-bounded segments, 3 pages with
+genuinely illegible or reading-order-scrambled financial or date data,
+3 segments hitting the leading-noise-before-label limitation, and the
+delivery note correctly excluded. None of these remaining gaps are a
+single narrow pattern away from fixed — most now require either
+accepting them as permanent manual-review cases (the honest majority),
+or a materially different, higher-risk approach (fuzzy/confidence-scored
+label matching, or real table/layout reconstruction) that this project
+has consistently and deliberately declined to build. Quotation ingestion
+is meaningfully more usable than at the start of this fix sequence, and
+every remaining blocker is now named and explained rather than mysterious
+— but "practically usable at scale with only light review" is not yet
+true for a majority of real documents in this archive.

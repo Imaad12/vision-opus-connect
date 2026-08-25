@@ -229,6 +229,29 @@ def test_kind_attn_takes_priority_over_bare_attn_label() -> None:
     assert "Kind" not in (result.client_name or "")
 
 
+# --- Regression: real archive leading OCR noise before "Date" (OCR Phase 4 round 4) --
+# A third, distinct real instance of the already-known leading-noise-
+# before-label limitation (previously seen on Reference and Total lines,
+# e.g. `test_leading_ocr_noise_before_the_label_is_a_known_unresolved_case`
+# and `test_case_6b_...` in test_import_segmentation.py) -- this time on
+# a Date line: real archive pages 16 ("| Date : November 18, 2018.") and
+# 23 ("ie Date : Nov 21, 2018."). Deliberately NOT fixed, for the same
+# reason as every other instance: widening the line-start anchor to
+# tolerate arbitrary leading noise risks matching label text embedded
+# mid-sentence elsewhere, and the noise prefixes observed ("|", "ie",
+# "eae", "3") have no single safe, narrow shape to anchor a fix to.
+
+
+def test_leading_ocr_noise_before_date_label_is_a_known_unresolved_case() -> None:
+    result = extract_quotation_candidate("| Date : November 18, 2018.\n", [])
+    assert result.quotation_date is None
+
+
+def test_leading_ocr_noise_before_date_label_second_real_instance() -> None:
+    result = extract_quotation_candidate("ie Date : Nov 21, 2018.\n", [])
+    assert result.quotation_date is None
+
+
 # --- Regression: real archive table-totals row shape (OCR Phase 4 fix) --
 # The real Vinco archive's BOQ totals rows OCR as e.g. "Total (SAR) |
 # 51,644.77" and "Sub Total (SAR) | 49,185.50" -- a table-cell pipe

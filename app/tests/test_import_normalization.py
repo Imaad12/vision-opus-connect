@@ -258,6 +258,55 @@ def test_parse_date_maybe_trailing_punctuation_does_not_rescue_garbage() -> None
     assert parse_date_maybe("not a date at all.") is None
 
 
+# --- Regression: real archive comma-spacing date variants (OCR Phase 4 round 4) --
+# Diagnosing why several correctly-bounded real segments remained BLOCKED
+# despite good net/tax/gross values found two more real, distinct date-
+# format variants -- both around the comma in "Month DD, YYYY", both
+# confirmed directly against the real archive's saved OCR output, and
+# both different from each other and from the round 2 trailing-
+# punctuation fix.
+
+
+def test_parse_date_maybe_tolerates_space_before_the_comma() -> None:
+    # Real archive page 14 (VN/QU/389/18): "Date - November 18 , 2018."
+    from datetime import date
+
+    assert parse_date_maybe("November 18 , 2018.") == date(2018, 11, 18)
+
+
+def test_parse_date_maybe_tolerates_no_space_after_the_comma() -> None:
+    # Real archive: confirmed on three separate real documents --
+    # pages 19 (VN/QU/390/18), 21 (VN/QU/419/18), and 22 (VN/QU/420/18),
+    # all "Date - Month DD,YYYY." with no space after the comma.
+    from datetime import date
+
+    assert parse_date_maybe("November 29,2018.") == date(2018, 11, 29)
+    assert parse_date_maybe("November 03,2018.") == date(2018, 11, 3)
+
+
+def test_parse_date_maybe_comma_spacing_combines_with_trailing_punctuation() -> None:
+    # Both real artifacts can appear together on the same real line.
+    from datetime import date
+
+    assert parse_date_maybe("November 29,2018.") == date(2018, 11, 29)
+    assert parse_date_maybe("November 18 , 2018.") == date(2018, 11, 18)
+
+
+def test_parse_date_maybe_comma_spacing_still_requires_a_real_date() -> None:
+    # Normalizing comma whitespace must never rescue genuinely unparseable
+    # text -- only whitespace around the comma is ever touched.
+    assert parse_date_maybe("see item 3 , 4 for details") is None
+    assert parse_date_maybe("November 2018abc,xyz") is None
+
+
+def test_parse_date_maybe_normal_comma_spacing_is_unaffected() -> None:
+    # The already-correct "Month DD, YYYY" shape must keep working
+    # unchanged -- the new normalization is a no-op on it.
+    from datetime import date
+
+    assert parse_date_maybe("November 27, 2018") == date(2018, 11, 27)
+
+
 def test_normalize_unit_aliases() -> None:
     assert normalize_unit("SQM") == "m2"
     assert normalize_unit("Sq.M") == "m2"

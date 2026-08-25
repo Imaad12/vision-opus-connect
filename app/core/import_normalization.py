@@ -256,13 +256,27 @@ _DATE_FORMATS = (
 # otherwise match one of them exactly.
 _TRAILING_HARMLESS_PUNCTUATION_RE = re.compile(r"[.:;]+$")
 
+# Two more real, recurring archive OCR artifacts around the comma in
+# "Month DD, YYYY" -- confirmed directly against the real archive's date
+# lines, both distinct from the trailing-punctuation case above and from
+# each other: a space *before* the comma ("November 18 , 2018.", real
+# page 14) and no space *after* it ("November 29,2018.", real pages
+# 19/21/22 -- the more common of the two, confirmed on three separate
+# real documents). Both are pure whitespace differences around a comma
+# that is already exactly where `_DATE_FORMATS`'s "%B %d, %Y"/"%b %d, %Y"
+# expect it -- normalizing any whitespace around that comma to exactly
+# ", " never touches a day/month/year digit or word, and reuses the
+# existing format strings unchanged rather than adding new ones.
+_DATE_COMMA_SPACING_RE = re.compile(r"\s*,\s*")
+
 
 def parse_date_maybe(text: str | None) -> date | None:
     """Try a fixed set of common date formats, day-first where ambiguous
     (this business operates in the UAE, where day/month/year is the norm).
-    Tolerates harmless trailing punctuation left over from OCR (see
-    `_TRAILING_HARMLESS_PUNCTUATION_RE`) without changing the parsed date
-    itself. Returns `None` — never a wrong guess — if nothing matches."""
+    Tolerates harmless trailing punctuation and comma-spacing left over
+    from OCR (see `_TRAILING_HARMLESS_PUNCTUATION_RE` and
+    `_DATE_COMMA_SPACING_RE`) without changing the parsed date itself.
+    Returns `None` — never a wrong guess — if nothing matches."""
     cleaned = normalize_whitespace(text)
     if not cleaned:
         return None
@@ -270,6 +284,10 @@ def parse_date_maybe(text: str | None) -> date | None:
     stripped = _TRAILING_HARMLESS_PUNCTUATION_RE.sub("", cleaned).strip()
     if stripped and stripped != cleaned:
         candidates.append(stripped)
+    for base in list(candidates):
+        comma_normalized = _DATE_COMMA_SPACING_RE.sub(", ", base)
+        if comma_normalized not in candidates:
+            candidates.append(comma_normalized)
     for candidate in candidates:
         for fmt in _DATE_FORMATS:
             try:
