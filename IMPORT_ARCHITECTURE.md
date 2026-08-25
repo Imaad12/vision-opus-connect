@@ -1033,3 +1033,123 @@ attempted again here for the same reason. This is now the second
 real-archive instance of that specific limitation (pages 10–11 was the
 first) — both remain correctly `BLOCKED`, both are genuine, tracked
 residual gaps, not silently accepted.
+
+## 20. Targeted net/gross extraction improvement (OCR Phase 4 round 3)
+
+Round 2's business acceptance found the main remaining usefulness
+problem was net/gross financial totals frequently missing even on
+correctly-bounded segments. This round root-caused every miss on the 13
+correctly-bounded real segments against the actual saved OCR text before
+changing anything, grouped the misses into two fixable root causes and
+several genuinely unfixable ones, and implemented only the fixable ones.
+
+### 20.1 Diagnostic: real archive, per correctly-bounded segment
+
+| Pages | Doc | Net (before → after) | Gross (before → after) | Root cause if missing |
+|---|---|---|---|---|
+| 1–2, 3–4 | 444REV/18, 444/18 | N/A (rate-based, none printed) | N/A | — |
+| 5–7 | VN/QU/417/18 | missing → missing | missing → missing | **Unfixable**: the "cost of the work..." sentence is split mid-word across two non-adjacent OCR lines ("...wit" / "h labor and..."), and the VAT amount is orphaned on its own line — a reading-order/layout defect, not a pattern gap |
+| 8–9 | VN/QU/412/18 (1st) | missing → missing | N/A | **Unfixable**: the totals line is lost to OCR noise entirely (no recoverable digits) |
+| 12 | VN/QU/401/18 | N/A (rate-based) | N/A | — |
+| 13 | delivery note | N/A (not a quotation) | N/A | — |
+| 14–15 | VN/QU/389/18 | missing → **16,850.00** ✓ | missing → **17,692.50** ✓ | Fixed: "cost of the work" sentence + separator-less "Total Amount" |
+| 16 | VN/QU/403/18 | missing → **22,500.00** ✓ | missing → **23,625.00** ✓ (via existing reconciliation, net+tax) | Fixed |
+| 17 | VN/QU/396B/18 | missing → **192,750.00** ✓ | N/A (no separate total printed) | Fixed |
+| 18 | VN/QU/396/18 | missing → **242,500.00** ✓ | N/A | Fixed |
+| 19 | VN/QU/390/18 | already correct (38,400.00) | missing → missing | **Unfixable**: real VAT/Total lines are reading-order scrambled — the Total line's separator is a bare `;` with the amount missing entirely, and the VAT amount sits on its own unlabeled line |
+| 20 | VN/QU/395/18 | missing → **6,500.00** ✓ | missing → **6,825.00** ✓ | Fixed |
+| 21 | VN/QU/419/18 | missing → missing | missing → missing | **Unfixable**: the entire 2-row BOQ table area is garbled — no "Sub total"/"VAT"/"Total" label survives at all |
+
+5 of 8 real, printed-but-missed net values fixed (389, 403, 396B, 396,
+395); 3 genuinely require table/layout reading-order reconstruction, not
+a narrow pattern — exactly the "stop and report" case named in this
+task, applied per-page rather than to the whole effort, since it would
+be wrong to let 3 hard pages block fixing the 5 pages that had a real,
+narrow, safe fix available.
+
+### 20.2 Root causes (grouped) and fixes made
+
+**Root cause 1 — net value printed only as a fixed boilerplate sentence,
+never a "Label: Value" line.** The archive's own recurring wording ("The
+cost of the work with labor and materials SAR 22,500.00", and the
+variant "The cost of the work labor charges only SAR 6,500.00") can
+never be reached by `_FIELD_LABELS`/`_pattern_for`, which require a
+literal label word before a separator. Fix: `_find_net_value_from_cost_sentence`
+(`import_extraction.py`) searches for the fixed phrase "cost of the
+work" (via `search()`, not an anchored `match()` — safe because that
+phrase is specific business wording, not a coincidence risk) through to
+a real trailing decimal amount. Only ever a fallback when the normal
+scan found nothing for `net_value`; never overrides an existing value;
+confirmed by test not to fire when the amount is missing or the sentence
+is split across lines (the page 5 case).
+
+**Root cause 2 — "Total"/"Total Amount" directly followed by a currency
+token and amount, no separator character at all** ("Total Amount SR
+17,692.50", "Total SAR 6,825.00"). Fix: `_find_gross_value_without_separator`,
+same fallback-only design. Deliberately kept line-start-anchored (unlike
+root cause 1's pattern) since "total" alone is common enough prose that
+the anchor is worth keeping — this means it does not reach the same
+leading-noise-before-label limitation already documented (`"3 Total SAR
+23,625.00"`), which stays a known, accepted gap, not newly introduced.
+
+**Bonus, not a new fix**: 403's gross value (23,625.00) was recovered
+purely through the *existing, unmodified* `reconcile_net_tax_gross` —
+once its net (22,500.00) was found by fix 1 and its tax (1,125.00) was
+already found (round 2), the pre-existing reconciliation logic derived
+gross algebraically, exactly the explicitly-approved case this task
+permits. No new arithmetic was written.
+
+### 20.3 A new fix, caught by the same old safety net
+
+Real-archive re-validation surfaced a genuine new failure mode: on the
+still-unfixed pages 10–11 splice (VN/QU/406/18 + an unrelated
+bleed-through page), the new "cost of the work" pattern now finds a
+real, literal figure — but it's the bleed-through page's own value
+(18,000.00), not 406's real total (49,185.50, itself unrecoverable
+behind leading-noise). Reproduced directly as a regression test
+(`test_cost_of_the_work_sentence_on_an_unidentified_page_cannot_splice_either`):
+the pre-existing, unmodified `_flag_financial_fields_without_identity_corroboration`
+check catches this exactly as designed — the value is found on a page
+sharing no identity with the segment's own reference/date, so it's
+downgraded to `LOW` and the segment stays `BLOCKED`. Nothing new was
+needed here; this is the intended behavior of an existing safety
+mechanism extending automatically to a new extraction path, precisely
+because that mechanism was never bypassed or special-cased.
+
+### 20.4 A newly-discovered, out-of-scope date-parsing gap
+
+Diagnosing why several now-correctly-valued segments (389, 403, 396B,
+419, and the still-merged 420/412 segment) remain `BLOCKED` despite good
+net/tax/gross values found two *additional* real date-format variants
+`parse_date_maybe` does not yet tolerate, beyond the trailing-punctuation
+fix from round 2: a space *before* the comma ("November 18 , 2018.",
+page 14) and no space *after* it ("November 29,2018.", page 22). A third
+case (page 16's date) is not a format issue at all but the
+already-documented leading-noise-before-label limitation, this time on a
+`Date` line ("`| Date : November 18, 2018.`"). None of these are fixed
+in this round — date parsing is out of this task's explicit scope
+(targeted net/gross extraction) — but they are now the dominant reason
+most segments remain `BLOCKED`, and are the clear highest-impact target
+for the next round.
+
+### 20.5 Real-archive re-validation
+
+Re-running the full real archive (fresh Tesseract OCR, this session; all
+3 source PDFs confirmed byte-identical by SHA-256 before and after):
+
+| Metric | Before this round | After |
+|---|---|---|
+| Segments produced / correctly bounded / under-split | 15 / 13 / 2 (unchanged — no segmentation code touched) | 15 / 13 / 2 |
+| Net values correctly extracted (of 15 segments) | 2 (390, and N/A cases) | 7 (389, 403, 396B, 396, 390, 395, 420) |
+| Gross values correctly extracted (of 15) | 0 | 4 (389, 403, 395, 420) |
+| VAT values correctly extracted or correctly ruled (of 15) | 11 | 11 (unchanged — no VAT pattern changes this round) |
+| Wrong values (both pre-existing, on the already-known pages 10–11 splice) | net + gross wrong | net now differently wrong (18,000.00 vs. the old derived 744.77) — still `LOW`/`BLOCKED`, never confirmable either way |
+| Blocked segments | 14 | 13 |
+| Confirmable segments (`REVIEW_REQUIRED` or `HIGH_CONFIDENCE`) | 1 | 2 (VN/QU/396/18 now `REVIEW_REQUIRED`; VN/QU/395/18 now the archive's first `HIGH_CONFIDENCE` segment — net, tax, *and* gross all independently found, all `HIGH`) |
+
+Net/gross coverage on the correctly-bounded segments improved
+substantially (5 real net values and 3 real gross values recovered), but
+most segments remain `BLOCKED` — now predominantly by the date-parsing
+gaps in §20.4, not by net/gross. This is answered directly: the net/gross
+problem this task targeted is now meaningfully smaller; date parsing has
+taken over as the dominant blocker and is the next round's target.

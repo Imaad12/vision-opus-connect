@@ -404,6 +404,107 @@ def test_separator_less_vat_pattern_never_fires_on_rate_only_extra_wording() -> 
     assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
 
 
+# --- Regression: real archive "cost of the work" net-value sentence (Phase 4 round 3) --
+# The business acceptance test found net/gross values frequently missing
+# even on correctly-bounded real segments. Direct inspection of the real
+# OCR text traced most of these to the archive's own fixed boilerplate
+# sentence ("The cost of the work with labor and materials SAR X.XX") --
+# never a "Label: Value" line, so the normal label scan can never reach
+# it. Confirmed on 4 independent real quotations with this exact wording,
+# plus one wording variant.
+
+
+def test_cost_of_the_work_sentence_is_extracted_as_net_value() -> None:
+    result = extract_quotation_candidate(
+        "The cost of the work with labor and materials SAR 22,500.00\n", []
+    )
+    assert result.net_value == Decimal("22500.00")
+    assert result.field_confidence["net_value"] == ConfidenceLevel.HIGH.value
+
+
+def test_cost_of_the_work_sentence_with_ocr_merged_the_prefix_still_matches() -> None:
+    # Real archive OCR artifact: "The" merges into "Thelcost" -- the
+    # pattern searches for "cost of the work" itself, not an anchored
+    # sentence start, so this doesn't need special-casing.
+    result = extract_quotation_candidate(
+        "Thelcost of the work with labor and materials SR 192,750.00\n", []
+    )
+    assert result.net_value == Decimal("192750.00")
+
+
+def test_cost_of_the_work_labor_charges_only_wording_variant_is_extracted() -> None:
+    result = extract_quotation_candidate(
+        "The cost of the work labor charges only SAR 6,500.00\n", []
+    )
+    assert result.net_value == Decimal("6500.00")
+
+
+def test_cost_of_the_work_sentence_never_overrides_an_already_found_net_value() -> None:
+    text = "Net Amount: 100,000.00\nThe cost of the work with labor and materials SAR 22,500.00\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.net_value == Decimal("100000.00")
+
+
+def test_cost_of_the_work_phrase_alone_with_no_amount_never_matches() -> None:
+    # The phrase appearing without a trailing decimal amount (e.g. cut off
+    # mid-sentence by a line break) must never fabricate a net value.
+    result = extract_quotation_candidate("the cost of the work will be discussed separately\n", [])
+    assert result.net_value is None
+
+
+def test_cost_of_the_work_sentence_split_across_lines_correctly_does_not_match() -> None:
+    # Real archive page 5 shape: the sentence is split mid-word across two
+    # non-adjacent lines by an OCR reading-order artifact ("The cost of
+    # the work wit" / "h labor and materials SR 170,800.00" appear far
+    # apart with unrelated content between them). This is a genuine table/
+    # layout limitation, not addressed by this line-level pattern -- and
+    # it must not be, since guessing which orphaned amount belongs to
+    # which orphaned sentence fragment would be exactly the kind of
+    # unsafe inference this project avoids.
+    text = "h labor and materials SR 170,800.00\nsome unrelated line\nThe cost of the work wit\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.net_value is None
+
+
+# --- Regression: real archive separator-less "Total" wording (Phase 4 round 3) --
+# The real archive also prints "Total"/"Total Amount" directly followed
+# by a currency token and the amount with only whitespace between them --
+# confirmed on 2 independent real quotations.
+
+
+def test_total_amount_with_no_separator_is_extracted_as_gross_value() -> None:
+    result = extract_quotation_candidate("Total Amount SR 17,692.50\n", [])
+    assert result.gross_value == Decimal("17692.50")
+    assert result.field_confidence["gross_value"] == ConfidenceLevel.HIGH.value
+
+
+def test_bare_total_with_no_separator_is_extracted_as_gross_value() -> None:
+    result = extract_quotation_candidate("Total SAR 6,825.00\n", [])
+    assert result.gross_value == Decimal("6825.00")
+
+
+def test_separator_less_total_never_overrides_an_already_found_gross_value() -> None:
+    text = "Total Including VAT: 50,000.00\nTotal SAR 6,825.00\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.gross_value == Decimal("50000.00")
+
+
+def test_separator_less_total_still_requires_a_line_start_anchor() -> None:
+    # Real archive shape ("3 Total SAR 23,625.00" -- leading list-numbering
+    # noise before the label): deliberately NOT relaxed, for the same
+    # over-broad-matching risk already declined for other labels in this
+    # module. A known, accepted limitation, not a bug.
+    result = extract_quotation_candidate("3 Total SAR 23,625.00\n", [])
+    assert result.gross_value is None
+
+
+def test_separator_less_total_requires_a_recognized_currency_token() -> None:
+    # "Total" followed by ordinary prose (not a currency + amount) must
+    # never match -- e.g. a validity/terms line.
+    result = extract_quotation_candidate("Total duration is 30 days\n", [])
+    assert result.gross_value is None
+
+
 # --- Regression: real archive OCR colon-substitute separators (Phase 4) --
 # Beyond the previously confirmed `»`, `—`, and `|`, the real archive was
 # found to also misread a printed colon as `>` ("Reference > VN/QU/389/18",

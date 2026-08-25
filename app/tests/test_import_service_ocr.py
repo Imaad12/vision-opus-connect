@@ -1047,6 +1047,52 @@ def test_financial_value_on_an_unidentified_page_cannot_splice_into_a_confirmabl
     assert db_session.query(Quotation).count() == 0
 
 
+def test_cost_of_the_work_sentence_on_an_unidentified_page_cannot_splice_either(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Same exploit shape as the test above, reproduced with the new
+    "cost of the work" net-value fallback (OCR Phase 4 round 3) instead
+    of a labeled "Net Amount:" line -- this is the exact real archive
+    shape found during real-archive validation: pages 10-11 (VN/QU/406/18
+    followed by an unrelated bleed-through page with no reference/date of
+    its own) produced a net_value from the bleed-through page's own
+    "cost of the work" sentence, not from 406's real total. The new
+    pattern must be caught by the same, pre-existing, unmodified
+    identity-corroboration check as any other financial value -- it gets
+    no special exemption for being a newer extraction path."""
+    path = _placeholder_scan(tmp_path)
+    text = (
+        "Reference: VN/QU/406/18\nDate: 19/11/2018\n"
+        "--- Page 2 ---\n"
+        "The cost of the work with labor and materials SR 18,000.00\n"
+    )
+    with patch(_PATCH_TARGET, return_value=_ocr_result(text)):
+        document = stage_document(db_session, path)
+
+    segments = list_segments(db_session, document)
+    assert len(segments) == 1  # no identity signal on page 2 -- correctly not split
+    for segment in segments:
+        accept_segment(db_session, document, segment)
+    lock_segments(db_session, document)
+
+    document = get_imported_document(db_session, document.id)
+    seg = list_segments(db_session, document)[0]
+    candidate = seg.quotation_candidate
+    assert candidate is not None
+    assert candidate.net_value == Decimal("18000.00")  # still visible for the reviewer to inspect/correct
+    confidence = json.loads(candidate.field_confidence)
+    assert confidence["net_value"] == "LOW"
+
+    client = client_service.create_client(db_session, name="Zamil Industrial Coating")
+    project = project_service.create_project(db_session, name="Concrete/Tile Floor", client_id=client.id)
+    with pytest.raises(ValidationError, match="cannot be confirmed yet"):
+        confirm_import(db_session, document, segment=seg, client_id=client.id, project_id=project.id)
+
+    from app.models import Quotation
+
+    assert db_session.query(Quotation).count() == 0
+
+
 def test_legitimate_long_quotation_total_is_not_split_but_requires_reviewer_sign_off(
     db_session: Session, tmp_path: Path
 ) -> None:

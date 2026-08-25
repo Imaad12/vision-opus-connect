@@ -205,6 +205,75 @@ def _find_vat_amount_without_separator(text: str | None, tables: list[ExtractedT
     return None
 
 
+# The real archive's own fixed boilerplate sentence for a document's net
+# cost -- not a "Label: Value" line at all, so `_FIELD_LABELS`/`_pattern_for`
+# can never reach it. Two wordings confirmed across multiple real,
+# independent quotations (never invented): "The cost of the work with
+# labor and materials SAR 22,500.00" (real: pages 15, 16, 17, 18) and "The
+# cost of the work labor charges only SAR 6,500.00" (real: page 20). Both
+# always end the sentence with the currency and the exact net figure, so
+# `search()` (not an anchored `match()`) from the fixed phrase "cost of
+# the work" onward, ending in a real decimal amount, is safe: that phrase
+# is specific, real business wording, not a word that could plausibly
+# appear elsewhere by coincidence, and a required trailing decimal amount
+# means a bare mention of the phrase with no amount can never match.
+#
+# Only ever used as a fallback when the normal label scan already found
+# nothing for `net_value` -- it never overrides an existing value, so it
+# can never itself create a conflict between two found totals.
+#
+# Confirmed NOT to fire on the real archive's page 5/page 9/page 21 --
+# on those pages this exact sentence (or the totals line) is split across
+# non-adjacent lines or lost to OCR noise entirely; that is a table/
+# layout reading-order problem, not a pattern gap, and is not addressed
+# here (see IMPORT_ARCHITECTURE.md).
+_NET_COST_OF_WORK_PATTERN = re.compile(
+    r"cost of the work.{0,50}?\b(?:SAR|SR)\s+([\d,]+\.\d{2})\s*$", re.IGNORECASE
+)
+
+
+def _find_net_value_from_cost_sentence(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    """The raw matched amount string for the real archive's "cost of the
+    work" boilerplate net-value sentence (see the pattern above), or
+    `None` if no line matches. First match wins, same rule as elsewhere."""
+    for line in _candidate_lines(text, tables):
+        match = _NET_COST_OF_WORK_PATTERN.search(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+# The real archive's "Total"/"Total Amount" label directly followed by a
+# currency token and the amount, with only whitespace between them -- no
+# separator character at all (real: "Total Amount SR 17,692.50", "Total
+# SAR 6,825.00"). `_pattern_for` deliberately never accepts bare
+# whitespace as a separator (that would match ordinary prose just as
+# readily as a real label:value line -- see its own docstring); this is
+# instead a narrow, line-anchored fallback that only ever matches this
+# exact label-then-currency-then-decimal-amount shape, used only when the
+# normal scan found nothing for `gross_value`. Still anchored at the line
+# start (unlike the VAT/net patterns above, which search anywhere) because
+# "total" alone is common enough prose that an anchor is worth keeping --
+# this means it deliberately does NOT reach a real line with leading OCR
+# noise before the label (e.g. "3 Total SAR 23,625.00"), the same already-
+# accepted leading-noise limitation as elsewhere in this module.
+_GROSS_TOTAL_NO_SEPARATOR_PATTERN = re.compile(
+    r"^\s*(?:total\s+amount|grand\s+total|total)\s+(?:SAR|SR|AED|USD)\s+([\d,]+\.\d{2})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _find_gross_value_without_separator(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    """The raw matched amount string for the real archive's separator-less
+    "Total"/"Total Amount" wording (see the pattern above), or `None` if
+    no line matches. First match wins, same rule as elsewhere."""
+    for line in _candidate_lines(text, tables):
+        match = _GROSS_TOTAL_NO_SEPARATOR_PATTERN.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _apply_vat_determination_when_undetermined(result: QuotationCandidateFields, text: str | None) -> None:
     """Called only when `tax_value` is still `None` after both the normal
     label scan and `reconcile_net_tax_gross`'s algebraic derivation --
@@ -324,6 +393,16 @@ def extract_quotation_candidate(text: str | None, tables: list[ExtractedTable]) 
         separator_less_amount = _find_vat_amount_without_separator(text, tables)
         if separator_less_amount is not None:
             _apply_field(result, "tax_value", separator_less_amount)
+
+    if result.net_value is None:
+        cost_sentence_amount = _find_net_value_from_cost_sentence(text, tables)
+        if cost_sentence_amount is not None:
+            _apply_field(result, "net_value", cost_sentence_amount)
+
+    if result.gross_value is None:
+        separator_less_total = _find_gross_value_without_separator(text, tables)
+        if separator_less_total is not None:
+            _apply_field(result, "gross_value", separator_less_total)
 
     net, tax, gross = result.net_value, result.tax_value, result.gross_value
     reconciled = reconcile_net_tax_gross(net, tax, gross)
