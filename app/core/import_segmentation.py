@@ -44,6 +44,46 @@ from app.importers.base import ExtractedTable, RawExtraction
 _PAGE_MARKER_RE = re.compile(r"--- Page (\d+) ---\n")
 _TABLE_PAGE_RE = re.compile(r"^page (\d+)\b", re.IGNORECASE)
 
+# A real, observed archive failure mode `app.core.import_extraction`'s
+# label matching cannot reach at all: the *entire* label word is lost to
+# OCR noise, not just its separator, leaving a bare leftover glyph
+# directly followed by the reference value and nothing else on the line
+# (real archive: "» VN/QU/412/18", "- Nov 27, 2018." on the same page --
+# both the reference and date labels vanished, only their trailing
+# separator survived). There is no label text left to match against, so
+# this is deliberately a separate, narrower, *segmentation-only* signal:
+# it recognizes the shape of a Vinco reference number itself (either
+# "<letters>/<code>/<digits>/<digits>" like "VN/QU/412/18", or "<digits>
+# (REV)?/<digits>" like "444 REV/18" or "444/18") on an otherwise-empty
+# line. It is never used to populate a candidate's actual
+# `quotation_number` field (only a real label match does that -- see
+# `import_extraction.py`), and per the conservative-boundary requirement
+# it can only ever produce a LOW-confidence, human-reviewed proposal,
+# never a silent merge or a silently-confirmable HIGH-confidence split.
+_BARE_REFERENCE_VALUE_PATTERN = re.compile(
+    r"^\s*[»\-:>=|—]\s*("
+    r"[A-Za-z]{2,5}(?:/[A-Za-z0-9]{1,8}){1,3}"
+    r"|\d{2,4}\s*REV\s*/\s*\d{2,4}"
+    r"|\d{2,4}\s*/\s*\d{2,4}"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def _bare_reference_hint(page_text: str | None) -> str | None:
+    """A weak, unlabeled hint that this page might start a new quotation
+    reference -- see `_BARE_REFERENCE_VALUE_PATTERN` above. Returns the
+    matched value, or `None`. Callers must only use this when a real
+    label match already found nothing (see `detect_segments`), and must
+    never treat it as equivalent to a confirmed reference."""
+    if not page_text:
+        return None
+    for line in page_text.splitlines():
+        match = _BARE_REFERENCE_VALUE_PATTERN.match(line)
+        if match:
+            return match.group(1).strip()
+    return None
+
 
 @dataclass
 class PageSegment:
@@ -209,6 +249,7 @@ def _classify_boundary(
     page_date: date | None,
     seg_reference: str | None,
     seg_date: date | None,
+    page_bare_reference_hint: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Decide whether the field values found on one page represent a new
     segment boundary against the currently open segment's own identity.
@@ -235,6 +276,13 @@ def _classify_boundary(
     decides. The same applies when the open segment's reference is
     confirmed but its *already-known* date conflicts outright -- also
     LOW, never silently resolved.
+
+    `page_bare_reference_hint` is the weaker, unlabeled signal from
+    `_bare_reference_hint` -- only ever passed when `page_reference` is
+    `None` (a real label match already takes priority). It can only ever
+    produce a LOW-confidence proposal, exactly like an unlabeled date:
+    losing the label word entirely is *less* certain than losing just its
+    separator, never more.
     """
     reference_changed = page_reference is not None and page_reference != seg_reference
     reference_confirmed = page_reference is not None and page_reference == seg_reference
@@ -275,6 +323,19 @@ def _classify_boundary(
             f"New quotation date on this page: '{page_date.isoformat()}' "
             f"(previous segment: '{seg_date.isoformat() if seg_date else 'unknown'}'), with no "
             "reference on this page to corroborate it.",
+            ConfidenceLevel.LOW.value,
+        )
+    if page_bare_reference_hint is not None and page_bare_reference_hint != seg_reference:
+        # No labeled reference or date was found at all on this page (both
+        # label words were lost to OCR, not just their separators), but
+        # the page's own text still shows a bare, reference-shaped value
+        # that differs from the open segment's own reference. Too weak to
+        # ever confirm a split outright -- only ever LOW confidence, for a
+        # reviewer to accept or reject.
+        return (
+            f"An unlabeled value shaped like a quotation reference ('{page_bare_reference_hint}') "
+            f"was found on this page, but the label itself could not be read -- this may be a new "
+            f"quotation (previous segment: '{seg_reference}').",
             ConfidenceLevel.LOW.value,
         )
     return None, None
@@ -330,8 +391,13 @@ def detect_segments(raw: RawExtraction) -> list[PageSegment]:
         fields = page_fields[page_number]
         page_reference = fields.quotation_number
         page_date = fields.quotation_date
+        # Only consulted when a real label match found nothing at all --
+        # see `_bare_reference_hint` and `_classify_boundary`.
+        bare_reference_hint = _bare_reference_hint(pages[page_number]) if page_reference is None else None
 
-        signal, confidence = _classify_boundary(page_reference, page_date, seg_reference, seg_date)
+        signal, confidence = _classify_boundary(
+            page_reference, page_date, seg_reference, seg_date, bare_reference_hint
+        )
 
         if signal is None:
             # Continuation: a first-seen reference/date for the still-open

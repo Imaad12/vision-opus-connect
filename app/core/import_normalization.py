@@ -241,18 +241,41 @@ _DATE_FORMATS = (
 )
 
 
+# A real, recurring real-archive OCR artifact: dates print with the
+# sentence-ending punctuation from the source line still attached (e.g.
+# "Nov 19, 2018.", "Date: November 20, 2018."), which `strptime`'s exact
+# matching rejects outright even though the date itself was read
+# perfectly -- the label was already found (HIGH/LOW confidence shows a
+# match), only the trailing character defeats the parse. This is narrow
+# by design: it only ever strips characters that can never appear inside
+# a real date value itself (a period, colon, or semicolon are never part
+# of a day/month/year token in any of `_DATE_FORMATS`), and only from the
+# very end of the string -- it does not touch a comma that is already
+# part of "Month DD, YYYY", since that comma is never trailing. It never
+# broadens which formats are accepted or guesses a date that doesn't
+# otherwise match one of them exactly.
+_TRAILING_HARMLESS_PUNCTUATION_RE = re.compile(r"[.:;]+$")
+
+
 def parse_date_maybe(text: str | None) -> date | None:
     """Try a fixed set of common date formats, day-first where ambiguous
     (this business operates in the UAE, where day/month/year is the norm).
-    Returns `None` — never a wrong guess — if nothing matches."""
+    Tolerates harmless trailing punctuation left over from OCR (see
+    `_TRAILING_HARMLESS_PUNCTUATION_RE`) without changing the parsed date
+    itself. Returns `None` — never a wrong guess — if nothing matches."""
     cleaned = normalize_whitespace(text)
     if not cleaned:
         return None
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(cleaned, fmt).date()
-        except ValueError:
-            continue
+    candidates = [cleaned]
+    stripped = _TRAILING_HARMLESS_PUNCTUATION_RE.sub("", cleaned).strip()
+    if stripped and stripped != cleaned:
+        candidates.append(stripped)
+    for candidate in candidates:
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     return None
 
 

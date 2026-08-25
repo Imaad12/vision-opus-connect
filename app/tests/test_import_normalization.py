@@ -197,6 +197,67 @@ def test_parse_date_maybe_unparseable_returns_none() -> None:
     assert parse_date_maybe(None) is None
 
 
+# --- Regression: real archive trailing OCR punctuation (OCR Phase 4 fix) --
+# The real Vinco archive's dates almost universally OCR with the source
+# line's own sentence-ending punctuation still attached -- confirmed via
+# the real saved OCR output ("Nov 19, 2018.", "November 20, 2018.",
+# "November 07, 2018.", "November 29,2018."). The date label itself was
+# already found and matched; only the trailing character defeated the
+# exact-format parse, silently discarding an otherwise-correct value.
+
+
+def test_parse_date_maybe_tolerates_trailing_period() -> None:
+    from datetime import date
+
+    assert parse_date_maybe("Nov 19, 2018.") == date(2018, 11, 19)
+    assert parse_date_maybe("November 20, 2018.") == date(2018, 11, 20)
+
+
+def test_parse_date_maybe_tolerates_trailing_colon() -> None:
+    from datetime import date
+
+    assert parse_date_maybe("Nov 19, 2018:") == date(2018, 11, 19)
+
+
+def test_parse_date_maybe_tolerates_trailing_semicolon() -> None:
+    from datetime import date
+
+    assert parse_date_maybe("Nov 19, 2018;") == date(2018, 11, 19)
+
+
+def test_parse_date_maybe_without_trailing_punctuation_still_works() -> None:
+    from datetime import date
+
+    assert parse_date_maybe("Nov 19, 2018") == date(2018, 11, 19)
+
+
+def test_parse_date_maybe_via_label_line_with_trailing_period() -> None:
+    # The label itself is already stripped by `_pattern_for` before this
+    # function ever sees the value -- this proves the exact real shape
+    # `extract_quotation_candidate` hands it: "Date: Nov 19, 2018." ->
+    # raw_value "Nov 19, 2018." after separator stripping.
+    from datetime import date
+
+    assert parse_date_maybe("Nov 19, 2018.") == date(2018, 11, 19)
+
+
+def test_parse_date_maybe_does_not_strip_a_meaningful_internal_comma() -> None:
+    from datetime import date
+
+    # The comma between day and year in "Month DD, YYYY" is never at the
+    # end of the string, so it must never be touched by the trailing-
+    # punctuation tolerance -- only genuinely harmless trailing characters
+    # are stripped.
+    assert parse_date_maybe("November 07, 2018.") == date(2018, 11, 7)
+
+
+def test_parse_date_maybe_trailing_punctuation_does_not_rescue_garbage() -> None:
+    # Stripping trailing punctuation must never turn genuinely unparseable
+    # text into a fabricated date.
+    assert parse_date_maybe("Nov 19, 2018abc.") is None
+    assert parse_date_maybe("not a date at all.") is None
+
+
 def test_normalize_unit_aliases() -> None:
     assert normalize_unit("SQM") == "m2"
     assert normalize_unit("Sq.M") == "m2"

@@ -346,6 +346,81 @@ def test_vat_derived_algebraically_from_net_and_gross_is_not_overridden_by_the_n
     assert "tax_value_basis" not in result.raw_values
 
 
+# --- Regression: real archive separator-less VAT wording (OCR Phase 4 fix) --
+# The business acceptance run against the real archive found that roughly
+# half of all explicit VAT figures were missed -- not because the rule is
+# wrong, but because the rate sits directly between the label and amount
+# with no separator character at all ("VAT 5% SAR __ 1,125.00", "VAT 5%
+# SAR 3,600.00"), or the rate is printed *before* the label ("5% Vat SAR
+# 325.00") -- confirmed against the real saved OCR output.
+
+
+def test_vat_label_then_rate_with_no_separator_is_extracted() -> None:
+    result = extract_quotation_candidate("VAT 5% SAR 1,125.00\n", [])
+    assert result.tax_value == Decimal("1125.00")
+    assert result.field_confidence["tax_value"] == ConfidenceLevel.HIGH.value
+    assert "tax_value_basis" not in result.raw_values
+
+
+def test_vat_label_then_rate_with_extra_ocr_noise_before_amount_is_extracted() -> None:
+    # Real archive shape: a double-underscore OCR artifact between the
+    # currency and the amount.
+    result = extract_quotation_candidate("VAT 5% SAR __ 1,125.00\n", [])
+    assert result.tax_value == Decimal("1125.00")
+
+
+def test_vat_rate_then_label_with_no_separator_is_extracted() -> None:
+    result = extract_quotation_candidate("5% Vat SAR 325.00\n", [])
+    assert result.tax_value == Decimal("325.00")
+    assert result.field_confidence["tax_value"] == ConfidenceLevel.HIGH.value
+
+
+def test_vat_rate_then_label_at_sign_variant_is_extracted() -> None:
+    result = extract_quotation_candidate("VAT@5% SAR 3,600.00\n", [])
+    assert result.tax_value == Decimal("3600.00")
+
+
+def test_separator_less_vat_amount_never_overrides_an_already_found_value() -> None:
+    # Explicit, already-labeled VAT (with a real separator) must always
+    # win -- the separator-less fallback only ever fires when nothing was
+    # found by the normal scan.
+    text = "VAT Amount: 62,500.00\nVAT 5% SAR 1,125.00\n"
+    result = extract_quotation_candidate(text, [])
+    assert result.tax_value == Decimal("62500.00")
+
+
+def test_separator_less_vat_pattern_never_fires_on_excluded_wording_with_no_amount() -> None:
+    # "VAT 5% not included in our offer" has a rate but no amount -- must
+    # never be treated as an accidental amount match, and must still fall
+    # through to the existing undetermined-zero business rule.
+    result = extract_quotation_candidate("Net Amount: 100,000.00\nVAT 5% not included in our offer\n", [])
+    assert result.tax_value == Decimal("0.00")
+    assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
+
+
+def test_separator_less_vat_pattern_never_fires_on_rate_only_extra_wording() -> None:
+    result = extract_quotation_candidate("Net Amount: 42,766.45\n5% VAT will be charged extra\n", [])
+    assert result.tax_value == Decimal("0.00")
+    assert result.raw_values["tax_value_basis"] == "undetermined_zero_applied"
+
+
+# --- Regression: real archive OCR colon-substitute separators (Phase 4) --
+# Beyond the previously confirmed `»`, `—`, and `|`, the real archive was
+# found to also misread a printed colon as `>` ("Reference > VN/QU/389/18",
+# "Reference > VN/QU/396B/18", "Reference > VN/QU/420/18") and as `=:`
+# ("Reference =: VN/QU/395/18", "Reference =: VN/QU/412/18").
+
+
+def test_greater_than_ocr_colon_substitution_is_recognized() -> None:
+    result = extract_quotation_candidate("Reference > VN/QU/389/18\n", [])
+    assert result.quotation_number == "VN/QU/389/18"
+
+
+def test_equals_colon_ocr_substitution_is_recognized() -> None:
+    result = extract_quotation_candidate("Reference =: VN/QU/395/18\n", [])
+    assert result.quotation_number == "VN/QU/395/18"
+
+
 # --- Regression: multi-quotation-per-file detection (OCR Phase 1 fix) --
 
 

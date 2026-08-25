@@ -91,3 +91,26 @@ def test_no_field_confidence_at_all_requires_review_not_high_confidence() -> Non
         field_confidence=None,
     )
     assert compute_ocr_confidence_status(candidate) == OcrConfidenceStatus.REVIEW_REQUIRED
+
+
+def test_needs_review_net_value_is_blocked_not_merely_review_required() -> None:
+    """OCR Phase 4 real-archive fix: a `net_value` that was algebraically
+    derived (`reconcile_net_tax_gross`, from tax + gross) rather than
+    directly read is flagged NEEDS_REVIEW, not LOW -- but it was never
+    independently found on any page, so the identity-corroboration check
+    can never run against it. Reproduced against the real archive: a
+    still-incorrectly-merged segment derived a net_value from one
+    document's tax figure and a different document's gross figure, and a
+    date-parsing fix elsewhere had incidentally been the only thing
+    keeping this BLOCKED. A derived value must always require explicit
+    human confirmation, the same as a LOW-flagged one."""
+    candidate = _FakeCandidate(
+        net_value=Decimal("744.77"),
+        quotation_date=date(2018, 11, 19),
+        field_confidence=_confidence_json(
+            net_value=ConfidenceLevel.NEEDS_REVIEW.value,
+            tax_value=ConfidenceLevel.HIGH.value,
+            gross_value=ConfidenceLevel.HIGH.value,
+        ),
+    )
+    assert compute_ocr_confidence_status(candidate) == OcrConfidenceStatus.BLOCKED

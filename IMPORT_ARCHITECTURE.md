@@ -866,3 +866,170 @@ DPI fix already shifted some real boundaries incidentally, which is
 enough segmentation-side change to observe in one pass). No PO import, no
 award-state changes, no invoice import, no dashboards. No change to
 `app/core/financial_engine.py`. No new AI/ML/network-based extraction.
+
+## 19. Targeted real-archive extraction improvements (OCR Phase 4, round 2)
+
+A business acceptance test run against the real archive (§18's fixes
+applied) found the pipeline safe but with too much manual work: only 4 of
+10 produced segments had correct boundaries, 6 bundled 2-3 real
+quotation documents together, and two confirmed real splices were
+observed (both correctly `BLOCKED`, never reaching a business record).
+This round fixes three specific, narrowly-scoped real-archive problems
+traced to exact OCR lines — no broad re-review, no new heuristics beyond
+what the evidence below required.
+
+### 19.1 Segmentation under-splitting — root-caused, not just described
+
+Directly inspecting the real OCR text at all 6 under-split boundaries
+found the actual cause was almost always upstream, in
+`import_extraction.py`'s label matching, not in `detect_segments`'s own
+decision logic:
+
+- **4 of 6 cases**: a real, additional OCR colon-substitution the
+  separator class didn't accept yet. Beyond the previously confirmed
+  `»`, `—`, `|`, the archive also prints `>` ("Reference > VN/QU/389/18",
+  "...VN/QU/396B/18", "...VN/QU/420/18") and `=:` ("Reference =:
+  VN/QU/395/18", "...VN/QU/412/18"). Adding both to `_pattern_for`'s
+  separator class (same narrow, single-character-class precedent as
+  every prior addition) let the existing, unmodified boundary logic
+  detect these references on its own — no segmentation-layer change was
+  needed for these four.
+- **1 of 6 cases** (pages 5–9: VN/QU/417/18, 2 drawing pages,
+  VN/QU/412/18): a harder failure — VN/QU/412/18's reference *and* date
+  labels are both **entirely** lost to OCR noise ("» VN/QU/412/18", "-
+  Nov 27, 2018." — not just the separator, the whole label word). No
+  label text survives to match against at all. `import_segmentation.py`
+  adds a narrow, segmentation-only fallback: `_bare_reference_hint`
+  recognizes a bare separator glyph directly followed by nothing but a
+  Vinco-reference-shaped value ("VN/QU/412/18", "444 REV/18") and
+  nothing else on the line. Per the explicit conservative requirement,
+  this can **only ever** produce a LOW-confidence proposal — never a
+  silent merge, never a silently-confirmable HIGH-confidence split — and
+  it never populates the resulting segment's own `quotation_number`
+  (only a real label match does that); a reviewer still confirms the
+  reference by hand. The 2 drawing pages in between stay attached to the
+  open segment (no identity signal of their own) — the already-approved,
+  conservative drawing-page policy, not a new gap.
+- **1 of 6 cases** (pages 10–11: VN/QU/406/18 + an unrelated
+  bleed-through page with no reference or date of its own at all): **not
+  fixed**. No narrow, safe signal was found that could catch this
+  without risking false splits elsewhere — a page with genuinely no
+  identity information cannot be safely told apart from a legitimate
+  continuation page using only reference/date signals, and inventing a
+  new signal class (e.g. "a second financial-summary block") on the
+  strength of one observed instance would be exactly the kind of
+  speculative heuristic this project avoids. Per the explicit
+  requirement that a false negative boundary is preferable to a silently
+  wrong split, this remains one segment — a known, deliberately
+  unresolved limitation, tracked here rather than silently accepted.
+
+All 6 real cases are directly reproduced as regression tests in
+`test_import_segmentation.py` (constructed from the actual real OCR
+text), including the one left deliberately unfixed.
+
+### 19.2 Date parsing tolerates harmless trailing OCR punctuation
+
+`parse_date_maybe` (`import_normalization.py`) used exact `strptime`
+matching with zero tolerance for anything after the expected pattern.
+The real archive's dates almost universally OCR with the source
+sentence's own trailing punctuation still attached ("Nov 19, 2018.",
+"November 20, 2018.", "November 29,2018."), so a date whose label was
+already correctly found and matched was silently discarded anyway.
+
+Fix: if the exact match fails, retry once with only a trailing `.`/`:`/
+`;` run stripped from the end (`_TRAILING_HARMLESS_PUNCTUATION_RE`) —
+never touching the internal "Month DD**,** YYYY" comma, since that comma
+is never at the end of the string. Never broadens which date *formats*
+are accepted, never rescues genuinely unparseable text (confirmed by a
+test: "Nov 19, 2018abc." still returns `None`).
+
+### 19.3 VAT extraction: two more real archive wording shapes
+
+The business acceptance test found roughly half of all explicit VAT
+figures were missed — not a business-rule problem, an upstream label-
+matching gap. Direct inspection of the real archive's VAT lines found
+two recurring shapes `_pattern_for`'s generic label mechanism cannot
+reach at all, because there is no separator character between the label
+and the rate:
+
+- `"VAT 5% SAR __ 1,125.00"`, `"VAT 5% SAR 3,600.00"` — rate directly
+  after the label, no separator.
+- `"5% Vat SAR 325.00"` — rate printed *before* the label.
+
+`_find_vat_amount_without_separator` (two new, narrow regexes,
+`import_extraction.py`) matches these shapes specifically, and only ever
+runs as a fallback when the normal label scan found nothing — it never
+overrides an already-found value, and both patterns require a real
+trailing decimal amount, so neither can ever fire on excluded/inclusive
+wording with no amount ("VAT 5% not included in our offer", "5% VAT will
+be charged extra" — confirmed by tests). This is pure pattern matching
+over what is already printed on the page; no rate is ever multiplied
+against `net_value` to invent a figure, and `financial_engine.py` is
+untouched.
+
+### 19.4 Safety tightening required by the date fix's own side effect
+
+Fixing dates (§19.2) had one real, concerning interaction: a `net_value`
+that `reconcile_net_tax_gross` derives algebraically (from `tax_value` +
+`gross_value`, because it was never independently read off any single
+page) is flagged `NEEDS_REVIEW`, not `LOW` — and because it was never
+found via a direct per-page label match at all,
+`_flag_financial_fields_without_identity_corroboration`'s page-comparison
+check has nothing to compare (it only inspects fields `find_field_pages`
+found directly). Before this phase, the real archive's one remaining
+un-split, genuinely-spliced segment (§19.1's pages 10–11 case: a
+`net_value` derived from one document's `tax_value` and a different,
+unrelated document's `gross_value`) happened to still be `BLOCKED` —
+but only because its date was *also* unparseable, a coincidence, not a
+real safety mechanism. Fixing that date correctly (§19.2) would have
+"unblocked" this specific wrong, spliced figure into `REVIEW_REQUIRED`,
+which — unlike `BLOCKED` — does not disable the Confirm button.
+
+Caught by re-running the real archive after implementing, not assumed.
+Fixed at the source of the actual gap: `app/core/ocr_confidence.py`'s
+`compute_ocr_confidence_status` now treats a `NEEDS_REVIEW` `net_value`
+exactly like a `LOW` one for the `BLOCKED` gate — a derived-not-read
+figure must always require explicit human confirmation, independent of
+why it wasn't independently found. Verified against the real archive:
+this segment is `BLOCKED` again after the fix. This is the smallest
+possible fix for the actual gap (one condition, one existing field), not
+a reversal of the date fix itself, which remains correct and necessary.
+
+### 19.5 Real-archive re-validation
+
+Re-running the full real archive (fresh Tesseract OCR, this session)
+after all of §19.1–19.4:
+
+| Metric | Before (§18 baseline) | After |
+|---|---|---|
+| Segments produced | 10 | 15 |
+| Correctly bounded | 4 | 13 |
+| Under-split segments | 6 / 10 | 2 / 15 |
+| Confirmed real splices | 2 | 1 (the pages 10–11 case, §19.1 — still correctly `BLOCKED`, not `REVIEW_REQUIRED`) |
+
+Cases fixed and verified against the real archive: VN/QU/412/18 (1st
+occurrence, pages 8–9) now has its own segment; VN/QU/389/18 (pages
+14–15) correctly separated from the delivery note (page 13);
+VN/QU/396B/18 (page 17) separated from VN/QU/403/18; VN/QU/395/18 (page
+20) separated from VN/QU/390/18; VN/QU/419/18 (page 21) separated from
+VN/QU/420/18. VAT figures newly extracted correctly on real pages:
+1,125.00 (VN/QU/403/18), 325.00 (VN/QU/395/18), 3,600.00
+(VN/QU/420/18) — all previously defaulted to the undetermined-zero
+business rule despite being explicitly printed.
+
+**Correction to this section's own first draft, caught by re-checking
+the real output rather than trusting the synthetic test alone**: pages
+22–24 (case 6) is only *partially* fixed. VN/QU/419/18 (page 21) is now
+correctly its own segment, but VN/QU/420/18 (page 22) and VN/QU/412/18's
+2nd occurrence (pages 23–24) are **still merged** — the constructed
+regression test for this case used clean text and passed, but the real
+line is `"ee Reference =: VN/QU/412/18"`: the same **leading OCR noise
+before the label** pattern already identified and deliberately left
+unfixed in §18.3 (`"eae Total (SAR) |__22,050.00"`), not a flaw in the
+`=` separator fix itself (confirmed working correctly on page 20's clean
+`"Reference =: VN/QU/395/18"`). Widening the line-start anchor to reach
+it carries the same over-broad-matching risk already declined once; not
+attempted again here for the same reason. This is now the second
+real-archive instance of that specific limitation (pages 10–11 was the
+first) — both remain correctly `BLOCKED`, both are genuine, tracked
+residual gaps, not silently accepted.

@@ -172,6 +172,38 @@ _VAT_EXCLUDED_NO_AMOUNT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# A real, recurring real-archive VAT wording shape that the normal
+# label-scan above can never match: the rate sits directly between the
+# label and the amount, with no separator character at all (real archive:
+# "VAT 5% SAR __ 1,125.00", "VAT 5% SAR 3,600.00") -- and its mirror,
+# where the rate is printed *before* the label ("5% Vat SAR 325.00").
+# `_pattern_for` only ever inserts a required separator character
+# immediately after a label; neither shape has one, so both are handled
+# here instead, as a narrow, line-shaped fallback used only when the
+# normal scan found no VAT amount at all -- it never overrides an
+# already-found value. Both require a real trailing decimal amount (never
+# just a bare rate) so this can never fire on excluded/inclusive wording
+# like "VAT 5% not included" or "5% VAT will be charged extra", which
+# have no amount to capture.
+_VAT_LABEL_THEN_RATE_PATTERN = re.compile(
+    r"^\s*vat\s*@?\s*\d{1,2}(?:\.\d+)?\s*%\s+.*?([\d,]+\.\d{2})\s*$", re.IGNORECASE
+)
+_VAT_RATE_THEN_LABEL_PATTERN = re.compile(
+    r"^\s*\d{1,2}(?:\.\d+)?\s*%\s*vat\s+.*?([\d,]+\.\d{2})\s*$", re.IGNORECASE
+)
+
+
+def _find_vat_amount_without_separator(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    """The raw matched amount string for the real archive's separator-less
+    VAT wording (see the patterns above), or `None` if no line matches.
+    Only the first match wins, same first-match-wins rule as the normal
+    label scan."""
+    for line in _candidate_lines(text, tables):
+        match = _VAT_LABEL_THEN_RATE_PATTERN.match(line) or _VAT_RATE_THEN_LABEL_PATTERN.match(line)
+        if match:
+            return match.group(1)
+    return None
+
 
 def _apply_vat_determination_when_undetermined(result: QuotationCandidateFields, text: str | None) -> None:
     """Called only when `tax_value` is still `None` after both the normal
@@ -233,20 +265,24 @@ def _pattern_for(label: str) -> re.Pattern[str]:
         # after the label itself, so it cannot let the separator check
         # below become any more permissive.
         #
-        # The separator itself may be one *or more* of `:`/`-`/`»`/`|`/`—`
-        # (an em dash is included alongside `-` for the same reason as
-        # `»`: a real, observed OCR misread), each optionally followed by
-        # whitespace -- because the real archive was found to sometimes
-        # print a doubled separator ("Kind Attn. — : Mr. Nelson,"). This
-        # still always requires at least one real separator character; it
-        # only tolerates more than one appearing together.
+        # The separator itself may be one *or more* of `:`/`-`/`»`/`|`/`—`/
+        # `>`/`=` (an em dash, `»`, `>`, and `=` are each included alongside
+        # `:`/`-` for the same reason: a real, observed OCR misread of a
+        # printed colon on this archive -- "Reference > VN/QU/389/18",
+        # "Reference > VN/QU/396B/18", "Reference > VN/QU/420/18" for `>`;
+        # "Reference =: VN/QU/395/18", "Reference =: VN/QU/412/18" for `=`),
+        # each optionally followed by whitespace -- because the real
+        # archive was found to sometimes print a doubled separator ("Kind
+        # Attn. — : Mr. Nelson,", "Reference =: VN/QU/395/18"). This still
+        # always requires at least one real separator character; it only
+        # tolerates more than one appearing together.
         #
         # Bare whitespace is deliberately NOT accepted as a separator: that
         # would match "Reference Section 3.2 discusses..." just as readily
         # as an actual label:value line, which is exactly the over-broad
         # matching this project's label-based extraction must avoid.
         _LINE_PATTERN_CACHE[label] = re.compile(
-            rf"^\s*{escaped}\.?\s*(?:\([^)]{{0,20}}\)\s*)?(?:[:\-»|—]\s*)+(.+?)\s*$", re.IGNORECASE
+            rf"^\s*{escaped}\.?\s*(?:\([^)]{{0,20}}\)\s*)?(?:[:\-»|—>=]\s*)+(.+?)\s*$", re.IGNORECASE
         )
     return _LINE_PATTERN_CACHE[label]
 
@@ -283,6 +319,11 @@ def extract_quotation_candidate(text: str | None, tables: list[ExtractedTable]) 
             _apply_field(result, field_name, raw_value)
             found.add(field_name)
             break
+
+    if result.tax_value is None:
+        separator_less_amount = _find_vat_amount_without_separator(text, tables)
+        if separator_less_amount is not None:
+            _apply_field(result, "tax_value", separator_less_amount)
 
     net, tax, gross = result.net_value, result.tax_value, result.gross_value
     reconciled = reconcile_net_tax_gross(net, tax, gross)

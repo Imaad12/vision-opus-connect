@@ -43,8 +43,7 @@ def compute_ocr_confidence_status(
     except (TypeError, ValueError):
         confidences = {}
 
-    # A mandatory field flagged LOW (as opposed to merely NEEDS_REVIEW, or
-    # simply absent from this dict) is not "needs a second look" -- it is
+    # A mandatory field flagged LOW is not "needs a second look" -- it is
     # exactly as untrustworthy as that field being missing outright. The
     # one producer of this specific state today is
     # `app.services.import_service._flag_financial_fields_without_
@@ -55,7 +54,23 @@ def compute_ocr_confidence_status(
     # structural gate rather than a cosmetic confidence label: it disables
     # Confirm in the UI *and* is enforced defensively inside
     # `confirm_import` itself, the same way a missing value already is.
-    if confidences.get("net_value") == ConfidenceLevel.LOW.value:
+    #
+    # NEEDS_REVIEW is treated exactly the same way (OCR Phase 4 real-
+    # archive fix). Its one producer is `reconcile_net_tax_gross`
+    # deriving net_value algebraically from tax + gross rather than
+    # reading it directly -- meaning it was never independently found on
+    # any single page at all, so the identity-corroboration check above
+    # can never run against it (nothing to compare pages to). Reproduced
+    # directly against the real archive: an incorrectly-merged segment
+    # (two different documents' pages bundled together, still a real,
+    # open extraction-boundary limitation) derived a net_value this way
+    # from one document's tax figure and a different, unrelated
+    # document's gross figure -- a genuinely wrong number that a fixed
+    # date-parsing bug had incidentally been leaving BLOCKED for the
+    # wrong reason. A derived-not-read net_value must never be
+    # confirmable without a human explicitly re-entering or verifying it,
+    # regardless of why it wasn't independently found.
+    if confidences.get("net_value") in (ConfidenceLevel.LOW.value, ConfidenceLevel.NEEDS_REVIEW.value):
         return OcrConfidenceStatus.BLOCKED
 
     if not confidences:
