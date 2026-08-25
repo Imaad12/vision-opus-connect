@@ -38,6 +38,7 @@ from app.core.enums import (
     DocumentSourceType,
     ExtractionStatus,
     ImportAuditEventType,
+    ImportDocumentKind,
     ImportReviewStatus,
     OcrConfidenceStatus,
     SegmentReviewStatus,
@@ -47,6 +48,7 @@ from app.core.import_extraction import QuotationCandidateFields, extract_candida
 from app.core.import_segmentation import detect_segments, find_field_pages, slice_raw_extraction_to_pages
 from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.core.ocr_extraction import extract_via_ocr
+from app.core.po_extraction import extract_purchase_order_candidate
 from app.importers.base import ExtractedTable, RawExtraction, build_default_registry
 from app.models import (
     BOQ,
@@ -55,12 +57,14 @@ from app.models import (
     ImportedBoqLineCandidate,
     ImportedDocument,
     ImportedDocumentSegment,
+    ImportedPurchaseOrderCandidate,
     ImportedQuotationCandidate,
     Quotation,
     Trade,
 )
 from app.services import client_service, project_service, quotation_service
 from app.services.errors import RevisionConflictError, ValidationError
+from app.services.po_matching import match_quotation_for_reference
 
 logger = logging.getLogger("app.services.import_service")
 
@@ -311,6 +315,175 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
         return
 
     _build_candidate_from_extraction(session, document, raw, segment=None)
+
+
+# --- Purchase Order staging (PO ingestion foundation) -------------------------
+#
+# Deliberately a second, explicit entry point rather than auto-detecting
+# "is this file a quotation or a PO" from content: per PO_ARCHITECTURE.md,
+# POs are uploaded as a separate, later, explicitly-chosen action, not
+# commingled with quotation batches that would need a content-sniffing
+# classifier. `document_kind` is therefore always known up front here,
+# never inferred. No sequential segmentation is attempted for PO
+# documents this round -- a PO scan is assumed to be one PO per file (see
+# `app.core.po_extraction`); multi-PO-per-file batches are an explicit,
+# named scope cut for this foundation, revisited once real PO archives
+# exist to design segmentation against (as quotation segmentation itself
+# was).
+
+
+def stage_purchase_order_document(
+    session: Session, path: Path, *, allow_duplicate: bool = False
+) -> ImportedDocument:
+    """Register one local PO file as a staged import and run PO
+    extraction on it immediately. Mirrors `stage_document` exactly (same
+    SHA-256 duplicate check, same guarantee that `path` is never copied,
+    moved, or modified) except `document_kind` is set to PURCHASE_ORDER
+    up front."""
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        raise ValidationError(f"File not found: {path}")
+
+    try:
+        file_size = path.stat().st_size
+        file_hash = compute_file_hash(path)
+    except OSError as exc:
+        raise ValidationError(f"Could not read '{path.name}': {exc}") from exc
+
+    if not allow_duplicate:
+        existing = find_existing_by_hash(session, file_hash)
+        if existing is not None:
+            raise ValidationError(
+                f"'{path.name}' was already imported on {existing.created_at:%d %b %Y} "
+                f"as '{existing.filename}' (staging record #{existing.id}). "
+                "Re-import deliberately if this is intentional."
+            )
+
+    document = ImportedDocument(
+        source_type=DocumentSourceType.LOCAL,
+        document_kind=ImportDocumentKind.PURCHASE_ORDER,
+        original_path=str(path),
+        filename=path.name,
+        extension=path.suffix.lower().lstrip("."),
+        file_size=file_size,
+        file_hash=file_hash,
+        extraction_status=ExtractionStatus.PENDING,
+        review_status=ImportReviewStatus.NEEDS_REVIEW,
+    )
+    session.add(document)
+    session.flush()
+    _log(session, document, ImportAuditEventType.IMPORTED, note=f"Imported from {path} (Purchase Order)")
+    session.flush()
+
+    run_po_extraction(session, document)
+    return document
+
+
+def run_po_extraction(session: Session, document: ImportedDocument) -> None:
+    """Run the deterministic/OCR extraction pipeline for one staged
+    PURCHASE_ORDER document, then immediately compute its
+    quotation-reference match (`app.services.po_matching.
+    match_quotation_for_reference`) so a candidate's match status is
+    always known the moment extraction finishes — matching is exact and
+    deterministic, not a judgment call, so there is no reason to defer it
+    to confirmation time the way quotation financial review is deferred.
+    Never raises, same guarantee `run_extraction` already makes: one bad
+    document must never take down a batch import."""
+    document.extraction_status = ExtractionStatus.EXTRACTING
+    document.extraction_error = None
+    session.flush()
+
+    path = Path(document.original_path)
+    if not path.exists():
+        document.extraction_status = ExtractionStatus.FAILED
+        document.extraction_error = "The source file could not be found — it may have been moved or deleted."
+        session.flush()
+        return
+
+    registry = build_default_registry()
+    importer = registry.find_for(path)
+    if importer is None:
+        document.extraction_status = ExtractionStatus.UNSUPPORTED
+        document.extraction_error = "Unsupported file type"
+        session.flush()
+        return
+
+    try:
+        raw = importer.extract(path)
+    except Exception as exc:  # noqa: BLE001 - a single bad document must never crash the app
+        logger.exception("PO extraction failed for imported document %s (%s)", document.id, document.filename)
+        document.extraction_status = ExtractionStatus.FAILED
+        document.extraction_error = f"Extraction failed: {exc}"
+        session.flush()
+        return
+
+    document.raw_extracted_data = _serialize_raw_extraction(raw)
+
+    if raw.unsupported:
+        document.extraction_status = ExtractionStatus.UNSUPPORTED
+        document.extraction_error = raw.unsupported_reason or "Unsupported file type"
+        session.flush()
+        return
+
+    if raw.requires_ocr:
+        try:
+            ocr_raw = extract_via_ocr(path)
+        except Exception as exc:  # noqa: BLE001 - matches run_extraction's own guarantee
+            logger.exception(
+                "OCR extraction failed for imported PO document %s (%s)", document.id, document.filename
+            )
+            document.extraction_status = ExtractionStatus.FAILED
+            document.extraction_error = f"OCR extraction failed: {exc}"
+            session.flush()
+            return
+        if ocr_raw.requires_ocr or ocr_raw.unsupported:
+            document.extraction_status = (
+                ExtractionStatus.UNSUPPORTED if ocr_raw.unsupported else ExtractionStatus.OCR_REQUIRED
+            )
+            document.extraction_error = ocr_raw.unsupported_reason
+            document.raw_extracted_data = _serialize_raw_extraction(ocr_raw)
+            session.flush()
+            return
+        raw = ocr_raw
+        document.raw_extracted_data = _serialize_raw_extraction(raw)
+        document.extraction_engine = "ocr"
+
+    _build_purchase_order_candidate(session, document, raw)
+
+
+def _build_purchase_order_candidate(session: Session, document: ImportedDocument, raw: RawExtraction) -> None:
+    fields = extract_purchase_order_candidate(raw.text, raw.tables)
+    outcome = match_quotation_for_reference(session, fields.po_reference_number)
+
+    candidate = ImportedPurchaseOrderCandidate(
+        imported_document_id=document.id,
+        po_reference_number=fields.po_reference_number,
+        po_date=fields.po_date,
+        currency=fields.currency,
+        net_value=fields.net_value,
+        tax_value=fields.tax_value,
+        gross_value=fields.gross_value,
+        match_status=outcome.status,
+        matched_quotation_id=outcome.quotation.id if outcome.quotation else None,
+        candidate_quotation_ids=(
+            json.dumps(outcome.candidate_quotation_ids) if outcome.candidate_quotation_ids else None
+        ),
+        raw_values=json.dumps(fields.raw_values),
+        field_confidence=json.dumps(fields.field_confidence),
+    )
+    session.add(candidate)
+
+    document.extraction_status = ExtractionStatus.EXTRACTION_COMPLETE
+    _log(
+        session,
+        document,
+        ImportAuditEventType.EXTRACTED,
+        note=(
+            f"PO reference '{fields.po_reference_number}' -> {outcome.status.value}"
+            + (f" (quotation #{outcome.quotation.id})" if outcome.quotation else "")
+        ),
+    )
+    session.flush()
 
 
 def _multi_signal_messages(result) -> list[str]:
@@ -1316,6 +1489,8 @@ __all__ = [
     "get_segment",
     "stage_document",
     "run_extraction",
+    "stage_purchase_order_document",
+    "run_po_extraction",
     "propose_segments",
     "list_segments",
     "accept_segment",

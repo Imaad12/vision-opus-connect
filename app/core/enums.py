@@ -125,6 +125,7 @@ class ImportDocumentKind(StrEnum):
 
     QUOTATION = "QUOTATION"
     BOQ = "BOQ"
+    PURCHASE_ORDER = "PURCHASE_ORDER"
     UNKNOWN = "UNKNOWN"
 
 
@@ -212,6 +213,28 @@ class SegmentReviewStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
     EXCLUDED_NOT_A_QUOTATION = "EXCLUDED_NOT_A_QUOTATION"
+
+
+class PurchaseOrderMatchStatus(StrEnum):
+    """How (or whether) a `PurchaseOrder`'s extracted reference number was
+    resolved to an existing `Quotation` — see
+    `app.services.purchase_order_service.match_quotation_for_reference`.
+
+    Matching is exact-string only, never fuzzy/similarity-based (see
+    PO_ARCHITECTURE.md): a quotation reference is an identifier, not free
+    text, and guessing which quotation a garbled or absent reference
+    "probably" means is exactly the false-award risk this enum exists to
+    make impossible to represent silently.
+
+    MATCHED is the only state from which award
+    (`quotation_service.mark_awarded`) is ever triggered. UNMATCHED and
+    AMBIGUOUS are both terminal until a human corrects the extracted
+    reference and the match is re-attempted — never auto-resolved.
+    """
+
+    MATCHED = "MATCHED"
+    UNMATCHED = "UNMATCHED"
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 class OcrConfidenceStatus(StrEnum):

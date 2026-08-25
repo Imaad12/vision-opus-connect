@@ -37,7 +37,15 @@ Company ──< Project >── Client
                 ├──< Invoice >── Client / Vendor
                 │             └──< Payment
                 └──< GoogleDriveDocument
+
+Quotation ──< PurchaseOrder >── QuotationVersion (awarded_quotation_version_id, snapshot)
 ```
+
+`PurchaseOrder` is evidence that a `Quotation` was awarded (see
+`PO_ARCHITECTURE.md`) — it always links to a `Quotation`, never carries
+its own `project_id`/`client_id` (both are reached via
+`purchase_order.quotation.project`), and is only ever created once an
+exact reference match confirms the linkage.
 
 `Vendor` unifies suppliers and subcontractors (see §3.9 for the reasoning).
 
@@ -488,6 +496,32 @@ they exist purely so extracted data is reviewable before it becomes a real
 **ImportedBoqLineCandidate** — many-to-one with `ImportedDocument`, one row per candidate BOQ line: `group_label` (sheet/table name), `item_number`, `description`, `category_label` (free text — matched to a `Trade` only at confirm time), `unit`, `quantity`, `unit_rate`, `extracted_amount` (what the source said) and `calculated_amount` (`quantity * unit_rate`, via `calculate_line_total` — never a second copy of that formula) kept side by side, `amount_flagged` (material mismatch between the two).
 
 **ImportAuditLogEntry** — immutable append-only log per `ImportedDocument`: `event_type` (`IMPORTED`, `EXTRACTED`, `EDITED`, `CONFIRMED`, `REJECTED`), `occurred_at`, and for `EDITED` events `field_name`/`old_value`/`new_value` (plain text, a historical record — not read back as typed data).
+
+### 3.18 PurchaseOrder / ImportedPurchaseOrderCandidate (PO ingestion foundation)
+
+See `PO_ARCHITECTURE.md` for the full pipeline and the exact-match award
+rule. Reuses the Phase 4 staging pattern (`ImportedDocument`,
+`ImportAuditLogEntry`) rather than a parallel import system —
+`document_kind = PURCHASE_ORDER` documents go through
+`app.services.import_service.stage_purchase_order_document` /
+`run_po_extraction` instead of the quotation path.
+
+**PurchaseOrder** — the confirmed business record; created only once
+(never merely proposed) since matching is exact and deterministic, not
+subject to the graded review a quotation's financial extraction needs.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | PK | |
+| quotation_id | FK -> quotations.id, **not nullable** | always set — there is no "orphan PO" business record; an unmatched/ambiguous PO never reaches this table at all |
+| awarded_quotation_version_id | FK -> quotation_versions.id, nullable | the version awarded (or, for a PO confirmed against an already-awarded quotation, the version that was actually awarded) — a snapshot, never recomputed |
+| po_reference_number | str(100), required, **unique** | per current business practice, the quotation's own reference number as printed on the PO; the unique constraint is the idempotency mechanism — re-confirming the same reference never creates a second row or a second award |
+| po_date, net_value, tax_value, gross_value, currency | nullable except currency | extracted PO fields, kept for analytics; `net_value` is what feeds `contract_value` (VAT-exclusive, matching that column's existing invariant) |
+| notes | text, nullable | |
+
+**ImportedPurchaseOrderCandidate** — one-to-one with `ImportedDocument` (unique FK), the staging layer: the same extracted fields as `PurchaseOrder` above, plus `match_status` (`PurchaseOrderMatchStatus`: `MATCHED`/`UNMATCHED`/`AMBIGUOUS`, computed immediately at extraction time — matching is exact-string, not a judgment call, so it is never deferred to confirmation), `matched_quotation_id` (set only when `MATCHED`), `candidate_quotation_ids` (JSON list, diagnostic only, set only when `AMBIGUOUS`), and `raw_values`/`field_confidence` (same JSON-dict convention as `ImportedQuotationCandidate`).
+
+`ImportedDocument.resulting_purchase_order_id` (nullable FK) is populated only once a PO candidate is confirmed — mirrors `resulting_quotation_id` etc.
 
 ## 4. Financial lifecycle
 

@@ -37,6 +37,7 @@ from app.core.enums import (
     ImportAuditEventType,
     ImportDocumentKind,
     ImportReviewStatus,
+    PurchaseOrderMatchStatus,
     SegmentReviewStatus,
 )
 from app.database.base import Base, TimestampMixin
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from app.models.boq import BOQ
     from app.models.client import Client
     from app.models.project import Project
+    from app.models.purchase_order import PurchaseOrder
     from app.models.quotation import Quotation, QuotationVersion
 
 
@@ -107,6 +109,12 @@ class ImportedDocument(Base, TimestampMixin):
         ForeignKey("quotation_versions.id")
     )
     resulting_boq_id: Mapped[int | None] = mapped_column(ForeignKey("boqs.id"))
+    # Populated only after a PURCHASE_ORDER-kind document is confirmed via
+    # `app.services.purchase_order_service.confirm_purchase_order_import`
+    # -- see that module and `ImportedPurchaseOrderCandidate` below. NULL
+    # for every quotation/BOQ document, unaffected by PO ingestion ever
+    # existing.
+    resulting_purchase_order_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_orders.id"))
 
     notes: Mapped[str | None] = mapped_column(Text)
 
@@ -147,6 +155,13 @@ class ImportedDocument(Base, TimestampMixin):
     audit_log: Mapped[list["ImportAuditLogEntry"]] = relationship(
         "ImportAuditLogEntry", back_populates="document", order_by="ImportAuditLogEntry.occurred_at"
     )
+    #: 1:1 -- a PURCHASE_ORDER-kind document has exactly one candidate, no
+    #: segmentation (a PO scan is one PO per file; see PO_ARCHITECTURE.md
+    #: on this being an explicit, named scope cut for this foundation
+    #: round). `None` for every non-PO document.
+    purchase_order_candidate: Mapped["ImportedPurchaseOrderCandidate | None"] = relationship(
+        "ImportedPurchaseOrderCandidate", back_populates="document", uselist=False
+    )
 
     resulting_client: Mapped["Client | None"] = relationship(
         "Client", foreign_keys=[resulting_client_id]
@@ -161,6 +176,9 @@ class ImportedDocument(Base, TimestampMixin):
         "QuotationVersion", foreign_keys=[resulting_quotation_version_id]
     )
     resulting_boq: Mapped["BOQ | None"] = relationship("BOQ", foreign_keys=[resulting_boq_id])
+    resulting_purchase_order: Mapped["PurchaseOrder | None"] = relationship(
+        "PurchaseOrder", foreign_keys=[resulting_purchase_order_id]
+    )
 
     def __repr__(self) -> str:
         return (
@@ -233,6 +251,69 @@ class ImportedQuotationCandidate(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"ImportedQuotationCandidate(imported_document_id={self.imported_document_id!r})"
+
+
+class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
+    """Normalized, human-reviewable PO fields extracted from one
+    PURCHASE_ORDER-kind document -- see `app.core.po_extraction` and
+    `app.services.purchase_order_service`. Mirrors
+    `ImportedQuotationCandidate`'s shape deliberately (raw_values/
+    field_confidence as small JSON dicts, everything nullable).
+
+    `po_reference_number` is the field the business calls "the PO
+    reference number" -- per current practice this is the *quotation's own
+    reference number* as printed on the PO (not a separate PO-internal
+    numbering scheme), and it is the sole key used to find the awarded
+    quotation (`match_status`/`matched_quotation_id`, computed
+    immediately at extraction time, before any human review). It is never
+    fuzzy-matched -- see `PurchaseOrderMatchStatus`.
+
+    `matched_quotation_id` is set only when `match_status == MATCHED`.
+    `candidate_quotation_ids` holds the JSON list of every quotation id
+    that shared the (normalized) reference when `match_status ==
+    AMBIGUOUS`, purely for reviewer diagnostics -- never used to pick one.
+    """
+
+    __tablename__ = "imported_purchase_order_candidates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    imported_document_id: Mapped[int] = mapped_column(
+        ForeignKey("imported_documents.id"), nullable=False, unique=True
+    )
+
+    po_reference_number: Mapped[str | None] = mapped_column(String(100))
+    po_date: Mapped[date | None] = mapped_column()
+    currency: Mapped[str | None] = mapped_column(String(10))
+    net_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    tax_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    gross_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    match_status: Mapped[PurchaseOrderMatchStatus] = mapped_column(
+        SAEnum(PurchaseOrderMatchStatus, native_enum=False),
+        default=PurchaseOrderMatchStatus.UNMATCHED,
+        nullable=False,
+    )
+    matched_quotation_id: Mapped[int | None] = mapped_column(ForeignKey("quotations.id"))
+    candidate_quotation_ids: Mapped[str | None] = mapped_column(Text)
+
+    raw_values: Mapped[str | None] = mapped_column(Text)
+    field_confidence: Mapped[str | None] = mapped_column(Text)
+
+    document: Mapped["ImportedDocument"] = relationship(
+        "ImportedDocument",
+        back_populates="purchase_order_candidate",
+        foreign_keys=[imported_document_id],
+    )
+    matched_quotation: Mapped["Quotation | None"] = relationship(
+        "Quotation", foreign_keys=[matched_quotation_id]
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"ImportedPurchaseOrderCandidate(imported_document_id={self.imported_document_id!r}, "
+            f"match_status={self.match_status!r})"
+        )
 
 
 class ImportedBoqLineCandidate(Base, TimestampMixin):
