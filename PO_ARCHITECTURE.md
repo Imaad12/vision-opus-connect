@@ -65,6 +65,26 @@ PO file (local, .pdf/.txt/.docx/scanned image/...)
        - REJECTED, no business record ever created
 ```
 
+### 3a. Ordering independence (PO-before-quotation reconciliation)
+
+A historical batch is not guaranteed to arrive quotation-first. When a PO
+is staged and its reference doesn't yet match any quotation, it is left
+`UNMATCHED` — but this is never a dead end. `app.services.
+purchase_order_service.reconcile_unmatched_purchase_orders` is called
+automatically by `app.services.import_service.confirm_import` whenever a
+**brand-new** `Quotation` (never a revision — a revision never changes
+`Quotation.reference_number`) is created, and re-runs
+`match_quotation_for_reference` for every currently `UNMATCHED`,
+not-yet-resolved PO candidate. A candidate that newly resolves to
+`MATCHED` is auto-confirmed via the same, unmodified
+`confirm_purchase_order_import` a human would otherwise click — same
+exact-match rule, same one-shot `mark_awarded` guard, same
+already-awarded-gets-evidence-only behavior. One that resolves to
+`AMBIGUOUS` is updated and left for manual review, never auto-confirmed.
+A `CONFIRMED`/`REJECTED` document is never touched again. This makes "PO
+arrives before its quotation" and "quotation arrives before its PO" both
+safe orderings for the same historical-ingestion pipeline.
+
 ## 4. The award rule
 
 Matching (`app.services.po_matching.match_quotation_for_reference`) is

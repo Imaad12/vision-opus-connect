@@ -26,23 +26,53 @@ directly.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.enums import DEFAULT_CURRENCY, Currency, ImportAuditEventType, ImportReviewStatus, PurchaseOrderMatchStatus
+from app.core.enums import (
+    DEFAULT_CURRENCY,
+    Currency,
+    ImportAuditEventType,
+    ImportReviewStatus,
+    PurchaseOrderMatchStatus,
+)
 from app.core.import_normalization import normalize_whitespace
-from app.models import ImportedDocument, PurchaseOrder, Quotation
+from app.models import ImportAuditLogEntry, ImportedDocument, ImportedPurchaseOrderCandidate, PurchaseOrder, Quotation
 from app.services import quotation_service
 from app.services.errors import ValidationError
-from app.services.import_service import _log
+from app.services.po_matching import match_quotation_for_reference
 
 __all__ = [
     "confirm_purchase_order_import",
     "reject_purchase_order_import",
+    "reconcile_unmatched_purchase_orders",
 ]
+
+
+def _log(
+    session: Session,
+    document: ImportedDocument,
+    event_type: ImportAuditEventType,
+    *,
+    note: str | None = None,
+) -> None:
+    # Duplicated from `app.services.import_service._log` (trivial, ~10
+    # lines) rather than imported, deliberately: `import_service.py` needs
+    # to call `reconcile_unmatched_purchase_orders` below after confirming
+    # a new quotation, and importing `_log` from there would make that a
+    # circular import (import_service -> purchase_order_service ->
+    # import_service). Behavior is identical.
+    session.add(
+        ImportAuditLogEntry(
+            imported_document_id=document.id,
+            event_type=event_type,
+            note=note,
+        )
+    )
 
 
 def _find_existing_purchase_order(session: Session, po_reference_number: str) -> PurchaseOrder | None:
@@ -199,3 +229,68 @@ def reject_purchase_order_import(session: Session, document: ImportedDocument, *
     _log(session, document, ImportAuditEventType.REJECTED, note=reason)
     session.flush()
     return document
+
+
+def reconcile_unmatched_purchase_orders(session: Session) -> list[PurchaseOrder]:
+    """Re-run exact-reference matching for every currently `UNMATCHED`,
+    not-yet-resolved PO candidate — call this after a brand-new
+    `Quotation` is created (never for a revision: a revision never
+    changes `Quotation.reference_number`, so it can never newly satisfy a
+    previously-unmatched PO's reference).
+
+    This is what makes "PO arrives before its quotation" safe for
+    historical batch ingestion: without it, a PO staged and left
+    `UNMATCHED` because its quotation hadn't been imported yet would stay
+    `UNMATCHED` forever, even after that exact quotation is imported
+    later. See `app.services.import_service.confirm_import`, the only
+    caller, invoked right after a new `Quotation` (not a revision) is
+    created there.
+
+    Reuses `match_quotation_for_reference` — identical exact,
+    whitespace-normalized matching rules as at extraction time, no
+    separate or looser logic — and `confirm_purchase_order_import` —
+    identical award rules as a manual confirmation, including its
+    one-shot `mark_awarded` guard and its "already-awarded quotation gets
+    evidence-only" behavior. A candidate that newly resolves to
+    `AMBIGUOUS` is updated and left for manual review, exactly as at
+    extraction time, and is never auto-confirmed. A candidate that
+    resolves to `MATCHED` but then fails to auto-confirm (e.g. neither
+    the PO nor the quotation has a usable positive value) is left
+    `MATCHED` for a human to complete manually — this never raises.
+    Never touches a `CONFIRMED` or `REJECTED` document.
+
+    Returns every `PurchaseOrder` created/awarded this way (empty if
+    nothing was reconciled).
+    """
+    stmt = (
+        select(ImportedPurchaseOrderCandidate)
+        .join(ImportedDocument, ImportedPurchaseOrderCandidate.imported_document_id == ImportedDocument.id)
+        .where(
+            ImportedPurchaseOrderCandidate.match_status == PurchaseOrderMatchStatus.UNMATCHED,
+            ImportedDocument.review_status == ImportReviewStatus.NEEDS_REVIEW,
+        )
+    )
+    candidates = session.execute(stmt).scalars().all()
+
+    reconciled: list[PurchaseOrder] = []
+    for candidate in candidates:
+        outcome = match_quotation_for_reference(session, candidate.po_reference_number)
+        if outcome.status == PurchaseOrderMatchStatus.UNMATCHED:
+            continue  # still nothing to link -- unchanged
+
+        candidate.match_status = outcome.status
+        candidate.matched_quotation_id = outcome.quotation.id if outcome.quotation else None
+        candidate.candidate_quotation_ids = (
+            json.dumps(outcome.candidate_quotation_ids) if outcome.candidate_quotation_ids else None
+        )
+        session.flush()
+
+        if outcome.status != PurchaseOrderMatchStatus.MATCHED:
+            continue  # AMBIGUOUS -- updated for review, never auto-confirmed
+
+        try:
+            reconciled.append(confirm_purchase_order_import(session, candidate.document))
+        except ValidationError:
+            continue  # matched, but not confirmable yet -- left MATCHED for manual review
+
+    return reconciled

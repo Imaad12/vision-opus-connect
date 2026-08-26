@@ -62,7 +62,7 @@ from app.models import (
     Quotation,
     Trade,
 )
-from app.services import client_service, project_service, quotation_service
+from app.services import client_service, project_service, purchase_order_service, quotation_service
 from app.services.errors import RevisionConflictError, ValidationError
 from app.services.po_matching import match_quotation_for_reference
 
@@ -1392,6 +1392,13 @@ def confirm_import(
             valid_until=candidate.valid_until,
             notes=candidate.notes,
         )
+        # A brand-new Quotation may be exactly what an already-staged,
+        # previously-UNMATCHED PO was waiting for (POs are frequently
+        # imported before the quotation they cite, for historical batch
+        # ingestion -- see PO_ARCHITECTURE.md). A revision never changes
+        # `Quotation.reference_number`, so this is only ever needed here,
+        # never in the revision branch above.
+        purchase_order_service.reconcile_unmatched_purchase_orders(session)
 
     boq = None
     if include_boq and boq_lines:
