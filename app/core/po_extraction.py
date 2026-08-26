@@ -24,6 +24,7 @@ that is future work once real PO scans exist to test against.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -65,10 +66,20 @@ _PO_FIELD_LABELS: dict[str, tuple[str, ...]] = {
     "po_reference_number": (
         "quotation reference number",
         "quotation reference",
+        # "Quotation Ref." -- the abbreviated form -- is real, demonstrated
+        # wording from an actual client PO template (Eastern Agriculture
+        # Company), distinct from the already-present unabbreviated
+        # "quotation reference" above.
+        "quotation ref",
         "quotation number",
         "quotation no",
         "against quotation no",
         "against quotation",
+        # Real wording from two independent client PO templates (Saudi
+        # Power Transformers Co., WAHAH Electric Supply Co.) -- both use
+        # this exact phrase, with a table-cell separator (":"/"|"), for
+        # the field that cites the quotation being ordered against.
+        "your/vendor ref",
         "our reference",
         "reference no",
         "reference number",
@@ -86,6 +97,90 @@ _PO_FIELD_ORDER = sorted(
     ((field_name, label) for field_name, labels in _PO_FIELD_LABELS.items() for label in labels),
     key=lambda pair: -len(pair[1]),
 )
+
+# Real client PO wording (confirmed against an actual client-issued PO,
+# not invented): a two-column PO header table gets flattened into single
+# OCR lines with the left column's leftover text still attached before
+# the right column's own label -- e.g. "PO. Box-105 Quotation Ref. :
+# PQ-SRF-2025-176" (the supplier address column bleeding into the
+# "Quotation Ref." column). `_pattern_for`'s patterns are anchored to the
+# start of the line by design (see its own docstring on why bare
+# proximity must never be trusted), so this can never match there. This
+# is a narrow, `search()`-based fallback used only when the normal
+# anchored scan found nothing for `po_reference_number` -- deliberately
+# scoped to specific multi-word phrases only (each containing "quotation",
+# or the exact "your/vendor ref" wording confirmed on two independent real
+# client PO templates), never a bare "reference"/"ref", to keep the
+# false-positive surface small: unlike a bare "reference", none of these
+# phrases is likely to occur as ordinary PO prose.
+#
+# Known, accepted limitation: this only recovers a label and value that
+# remain on the *same* OCR line (the left column's leftover text merely
+# prepended before the right column's label). A real client PO template
+# (Saudi Power Transformers Co., real archive) uses this same
+# "Your/Vendor Ref." label but its value ends up many lines away after
+# OCR -- a genuine table reading-order scramble, not a same-line bleed --
+# and is not recoverable by this or any other narrow, per-label fix; see
+# PO_ARCHITECTURE.md.
+_PO_REFERENCE_ANYWHERE_LABELS = (
+    "quotation reference number",
+    "quotation reference",
+    "quotation ref",
+    "quotation number",
+    "quotation no",
+    "against quotation no",
+    "against quotation",
+    "your/vendor ref",
+)
+_PO_REFERENCE_ANYWHERE_PATTERNS = [
+    re.compile(
+        rf"{re.escape(label)}\.?\s*(?:[:\-»|—>=]\s*)+(.+?)\s*$",
+        re.IGNORECASE,
+    )
+    for label in sorted(_PO_REFERENCE_ANYWHERE_LABELS, key=len, reverse=True)
+]
+
+
+def _find_po_reference_anywhere_on_line(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    for line in _candidate_lines(text, tables):
+        for pattern in _PO_REFERENCE_ANYWHERE_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                return match.group(1)
+    return None
+
+
+# Same real document: VAT and grand-total lines with no separator
+# character between the label and the amount at all -- "Vat 15%
+# 73500.00" and "Grand Total (SAR)} 563,500.00" (the "}" is a real OCR
+# misread of the closing parenthesis/table border). This is the identical
+# shape already handled on the quotation side
+# (`import_extraction._VAT_LABEL_THEN_RATE_PATTERN`) -- duplicated here
+# rather than imported, since it is PO-specific fallback wiring, not a
+# change to quotation extraction itself. Fallback-only: never overrides a
+# value already found by the normal labeled scan.
+_PO_VAT_LABEL_THEN_RATE_PATTERN = re.compile(
+    r"^\s*vat\s*@?\s*\d{1,2}(?:\.\d+)?\s*%\s+.*?([\d,]+\.\d{2})\s*$", re.IGNORECASE
+)
+_PO_GRAND_TOTAL_NO_SEPARATOR_PATTERN = re.compile(
+    r"^\s*grand\s+total\s*(?:\([^)]{0,10}\))?\s*[}\)]?\s*([\d,]+\.\d{2})\s*$", re.IGNORECASE
+)
+
+
+def _find_po_vat_amount_without_separator(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    for line in _candidate_lines(text, tables):
+        match = _PO_VAT_LABEL_THEN_RATE_PATTERN.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _find_po_grand_total_without_separator(text: str | None, tables: list[ExtractedTable]) -> str | None:
+    for line in _candidate_lines(text, tables):
+        match = _PO_GRAND_TOTAL_NO_SEPARATOR_PATTERN.match(line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _apply_field(result: PurchaseOrderCandidateFields, field_name: str, raw_value: str) -> None:
@@ -152,6 +247,23 @@ def extract_purchase_order_candidate(
             _apply_field(result, field_name, raw_value)
             found.add(field_name)
             break
+
+    if result.po_reference_number is None:
+        reference_anywhere = _find_po_reference_anywhere_on_line(text, tables)
+        if reference_anywhere is not None:
+            normalized = normalize_whitespace(reference_anywhere)
+            if normalized:
+                _apply_field(result, "po_reference_number", normalized)
+
+    if result.tax_value is None:
+        vat_anywhere = _find_po_vat_amount_without_separator(text, tables)
+        if vat_anywhere is not None:
+            _apply_field(result, "tax_value", vat_anywhere)
+
+    if result.gross_value is None:
+        grand_total_anywhere = _find_po_grand_total_without_separator(text, tables)
+        if grand_total_anywhere is not None:
+            _apply_field(result, "gross_value", grand_total_anywhere)
 
     net, tax, gross = result.net_value, result.tax_value, result.gross_value
     reconciled = reconcile_net_tax_gross(net, tax, gross)

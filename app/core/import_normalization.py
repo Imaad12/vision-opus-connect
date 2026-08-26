@@ -238,6 +238,14 @@ _DATE_FORMATS = (
     "%b %d, %Y",
     "%B %d, %Y",
     "%m/%d/%Y",
+    # Real client PO wording ("PO Date : 15-May-26") -- day, hyphen,
+    # abbreviated month, hyphen, 2-digit year. Not previously needed by
+    # any quotation in the real archive (which always prints a 4-digit
+    # year), but genuinely used by at least one real client's own PO
+    # template. `%y` follows Python's standard POSIX-style pivot
+    # (00-68 -> 2000-2068), which is correct for this business's date
+    # range and requires no extra logic.
+    "%d-%b-%y",
 )
 
 

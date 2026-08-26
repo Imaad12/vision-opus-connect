@@ -307,6 +307,16 @@ def test_parse_date_maybe_normal_comma_spacing_is_unaffected() -> None:
     assert parse_date_maybe("November 27, 2018") == date(2018, 11, 27)
 
 
+def test_parse_date_maybe_day_abbreviated_month_two_digit_year() -> None:
+    # Real client PO wording ("PO Date : 15-May-26") -- not previously
+    # supported; every quotation in the real archive prints a 4-digit
+    # year, but this real client's own PO template does not.
+    from datetime import date
+
+    assert parse_date_maybe("15-May-26") == date(2026, 5, 15)
+    assert parse_date_maybe("15-may-26") == date(2026, 5, 15)
+
+
 def test_normalize_unit_aliases() -> None:
     assert normalize_unit("SQM") == "m2"
     assert normalize_unit("Sq.M") == "m2"

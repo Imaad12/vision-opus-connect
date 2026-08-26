@@ -127,6 +127,42 @@ Same financial-integrity discipline as quotation import:
   `quotation_service.mark_awarded`.
 - Never sets `Project.contract_value` outside that single call.
 
+## 6a. Real-PO validation round 1
+
+Validated against four real uploaded documents (see git history for the
+session this ran in): three genuine client-issued POs and one Vision→vendor
+procurement PO (out of scope, excluded — see §2/§6 on cost-side POs not
+being built yet). Full field-by-field results, fixes, and before/after
+numbers are in that session's report; summarized here for future rounds:
+
+- **Confirmed real label variants** now in `app/core/po_extraction.py`:
+  `"quotation ref"` (abbreviated form) and `"your/vendor ref"` (used by two
+  independent real client PO templates), alongside the original
+  `"quotation reference"`.
+- **Confirmed real date format**: `DD-Mon-YY` (e.g. `15-May-26`), added to
+  the shared `_DATE_FORMATS` in `app/core/import_normalization.py`.
+- **Confirmed real no-separator VAT/Grand-Total wording**, ported from the
+  quotation side's already-proven pattern into a PO-specific fallback
+  (`app/core/po_extraction.py`, never touching `import_extraction.py`).
+- **New, narrow fallback mechanism**: `_find_po_reference_anywhere_on_line`
+  — a `search()`-based (not line-start-anchored) recovery for
+  `po_reference_number` specifically, scoped only to a fixed set of
+  specific multi-word label phrases (never a bare "reference"/"ref"), for
+  the real, recurring case of a two-column PO header table flattening two
+  columns onto one OCR line.
+- **Confirmed, accepted limitation**: a real client PO template (Saudi
+  Power Transformers Co.) uses the same `"your/vendor ref"` label, but its
+  value ends up many lines away from the label after OCR — a genuine
+  table/reading-order scramble, structurally different from the same-line
+  bleed case above, and not fixable by any narrow per-label pattern. This
+  mirrors the exact same category of limitation already accepted
+  throughout the quotation OCR work (see `IMPORT_ARCHITECTURE.md`) — it
+  is not new to POs, just now confirmed on real PO documents too.
+- Match/award/idempotency/rollback/immutability behavior all validated
+  against real documents with no code changes needed — only extraction
+  needed fixes; the matching and award logic behaved correctly from the
+  first real document onward.
+
 ## 7. What remains before analytics
 
 - No real PO archive has been ingested yet — the field-label vocabulary in
