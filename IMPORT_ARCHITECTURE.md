@@ -1437,3 +1437,115 @@ strictness is worth revisiting specifically for the "total on a later
 page of the same already-correctly-bounded segment" case, which is a
 materially different, much lower-risk claim than "trust a value found
 anywhere in the document."
+
+## 24. A failed corroboration-relaxation experiment (deliberate safety finding)
+
+§23.6 raised, as a future decision point, whether the
+identity-corroboration gate (§20.3/§23.3,
+`_flag_financial_fields_without_identity_corroboration`) could be
+narrowed for the common "total on a later page" case without losing its
+protection. This was investigated directly and rejected — recorded here
+because the negative result is itself load-bearing: the same relaxation
+should not be re-attempted later without the stronger evidence this
+section describes being available.
+
+### 24.1 The proposed rule
+
+Only relax the existing downgrade (financial field found on a page other
+than the identity page → confidence `LOW`) when the **identity page
+itself independently matched no financial field at all** (net, tax, or
+gross). The reasoning: if the identity page has nothing for a later
+page's value to disagree with, there is no competing signal to protect
+against. If the identity page *does* carry its own financial content,
+the existing downgrade would still apply unchanged.
+
+### 24.2 The three real cases it appeared to justify
+
+- `VN/QU/318/18` (pp1-2, §23.2's own worked example): page 1 is pure
+  header/scope-of-work, no financial content; page 2 carries the totals.
+- `VN/QU/389/18` (pp14-15): same shape — page 14 header/scope only, page
+  15 the "cost of the work ... SAR 16,850.00" sentence.
+- `VN/QU/254/18` (pp21-22): same shape — page 21 the numbered
+  scope-of-work, page 22 continuing the same numbered list into the
+  total.
+
+In all three, the identity page's own independent extraction (checked
+directly, single-page slice) produced no `net_value`/`gross_value`, and
+no genuine `tax_value` match either (specifically excluding
+`_apply_vat_determination_when_undetermined`'s "genuinely
+undeterminable, assume SAR 0.00" fallback from counting as financial
+content — that fallback fires on *any* page with no VAT information at
+all, which would otherwise make the check true on every identity-only
+header page and defeat its own purpose; this was caught during
+implementation, before any test was written, by checking
+`"tax_value" in raw_values` rather than trusting `tax_value`'s own
+parsed value or confidence).
+
+### 24.3 The existing regression tests that disproved it
+
+Implementing the rule (in `_flag_financial_fields_without_identity_
+corroboration`, `app/services/import_service.py`) and running it against
+the project's own pre-existing adversarial-exploit suite in
+`app/tests/test_import_service_ocr.py` broke two tests immediately:
+
+- `test_financial_value_on_an_unidentified_page_cannot_splice_into_a_confirmable_candidate`
+- `test_cost_of_the_work_sentence_on_an_unidentified_page_cannot_splice_either`
+
+Both construct the exact "reference A + unrelated total B" exploit this
+gate exists to catch: a reference/date on page 1 with **zero** financial
+content anywhere on that page, and a genuinely unrelated, unidentified
+document's total surviving later in the same file with nothing
+connecting it back to page 1's identity. Under the proposed rule, both
+values (999,999.00 and 18,000.00, neither belonging to the quotation
+they would attach to) were silently promoted to `HIGH` confidence and
+became confirmable — reintroducing the precise defect
+`_flag_financial_fields_without_identity_corroboration` was written to
+close.
+
+### 24.4 Why the real and unsafe cases are structurally indistinguishable
+
+The proposed signal — "identity page has no financial content" — is
+true of all three real safe cases *and* of both constructed exploit
+cases. The only reason the fourth real case checked in §23
+(`VN/QU/406/18`, correctly identified as a genuine splice risk) was
+correctly kept blocked is that *that specific document* happened to
+also print its own (OCR-garbled) totals table on its own identity page
+— a property of that one document, not a general distinguishing fact
+between "genuine continuation" and "unrelated spliced-in page." A page
+carrying a genuinely unrelated value can just as easily follow an
+identity page with no financial content of its own, exactly as the
+existing exploit tests already assumed when they were written. The real
+distinguishing property — whether the pages *between* the identity page
+and the value's page form one continuous, unbroken narrative (the same
+scope-of-work/item list actually continuing) rather than an unconnected
+insertion — is not something a narrow, page-local, pattern-based signal
+can check; it would require the kind of semantic/heuristic inference
+this project has consistently and deliberately declined to add anywhere
+in the pipeline (no fuzzy matching, no confidence scoring beyond the
+existing categorical levels, no guessing past genuine ambiguity).
+
+### 24.5 Outcome
+
+The change was reverted in full (`git checkout --
+app/services/import_service.py`) as soon as the regression was found,
+before writing the new tests the task had otherwise called for. No test
+file, migration, schema, or other production code was touched. The full
+suite was confirmed back to its unmodified passing state immediately
+after reverting. No real-OCR re-validation was run, since there was no
+surviving change to validate. **No production behavior changed as a
+result of this investigation.**
+
+### 24.6 Conclusion
+
+`_flag_financial_fields_without_identity_corroboration` remains exactly
+as conservative as before, and should stay that way: three of the four
+real "total on a later page" cases examined so far are safe, but the
+project's own test suite already proves a page-local signal cannot
+reliably tell them apart from a genuine cross-document splice. This gate
+must not be narrowed again on the strength of a handful of real examples
+alone — only a substantially stronger structural signal (one that can
+positively confirm narrative continuity between the identity page and
+the value's page, not merely the absence of a competing value) would
+justify revisiting this, and no such signal has been identified. Until
+then, `VN/QU/318/18`-shaped cases are accepted as human-review workload,
+per §23.6's original framing, not treated as a defect to keep chasing.
