@@ -26,6 +26,7 @@ from app.ui.clients.clients_page import ClientsPage
 from app.ui.costs.costs_page import CostsPage
 from app.ui.dashboard.dashboard_page import DashboardPage
 from app.ui.imports.imports_page import ImportsPage
+from app.ui.imports.review_queue_page import ReviewQueuePage
 from app.ui.projects.project_detail_page import ProjectDetailPage
 from app.ui.projects.projects_list_page import ProjectsListPage
 from app.ui.quotations.quotations_page import QuotationsPage
@@ -37,6 +38,7 @@ NAV_ITEMS = [
     ("quotations", "Quotations"),
     ("costs", "Costs"),
     ("imports", "Imports"),
+    ("review_queue", "Review Queue"),
     ("analytics", "Analytics"),
     ("settings", "Settings"),
 ]
@@ -103,6 +105,7 @@ class MainWindow(QMainWindow):
         self._pages["quotations"] = QuotationsPage()
         self._pages["costs"] = CostsPage()
         self._pages["imports"] = ImportsPage()
+        self._pages["review_queue"] = ReviewQueuePage()
         self._pages["analytics"] = AnalyticsPage()
 
         settings_page = SettingsPage()
