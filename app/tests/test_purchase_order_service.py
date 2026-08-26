@@ -84,6 +84,41 @@ def test_exact_match_attaches_po_and_awards_the_quotation(db_session: Session, t
     assert document.resulting_purchase_order_id == po.id
 
 
+def test_real_two_column_bleed_reference_matches_and_awards_end_to_end(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Full real-archive acceptance round: the exact real OCR line from a
+    genuine client PO (WAHAH Electric Supply Co., WES-PO29973) --
+    'Fax 966138674567 Your/Vendor Ref. | QQUTNO# 26-53', a two-column PO
+    header table bled onto one line -- run through the actual
+    `stage_purchase_order_document` -> `confirm_purchase_order_import`
+    pipeline end to end, not just the extraction unit (already covered
+    separately in test_po_extraction.py). Confirms the full MATCHED ->
+    award path holds for this exact real pattern, not merely that the
+    field gets extracted in isolation.
+    """
+    # The PO's own net_value is not recovered from this real line shape
+    # either (a separate, already-known limitation) -- award falls back to
+    # the quotation's own quoted_value, exactly as `confirm_purchase_order_import`
+    # is designed to when the PO carries no usable positive value of its own.
+    project, version = _create_quotation(db_session, reference="QQUTNO# 26-53", quoted_value=Decimal("8850.00"))
+    path = tmp_path / "wes_po.txt"
+    path.write_text("Fax 966138674567 Your/Vendor Ref. | QQUTNO# 26-53\n", encoding="utf-8")
+
+    document = stage_purchase_order_document(db_session, path)
+    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.MATCHED
+    assert document.purchase_order_candidate.matched_quotation_id == version.quotation_id
+
+    po = confirm_purchase_order_import(db_session, document)
+
+    assert po.quotation_id == version.quotation_id
+    db_session.refresh(project)
+    assert project.status == ProjectStatus.AWARDED
+    assert project.contract_value == Decimal("8850.00")
+    db_session.refresh(version)
+    assert version.status == QuotationStatus.WON
+
+
 def test_po_attaches_to_the_correct_quotation_among_several(db_session: Session, tmp_path: Path) -> None:
     _project_a, version_a = _create_quotation(db_session, reference="VN/QU/701/25")
     project_b, version_b = _create_quotation(db_session, reference="VN/QU/702/25")
