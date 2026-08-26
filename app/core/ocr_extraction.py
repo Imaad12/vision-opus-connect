@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pymupdf
 
+from app.core.document_preview import rasterize_page_to_png
 from app.core.ocr_engine import OcrEngine, OcrPageResult, get_default_ocr_engine
 from app.core.ocr_table_reconstruction import reconstruct_table_from_words
 from app.importers.base import RawExtraction
@@ -150,8 +151,7 @@ def extract_via_ocr(path: Path, *, engine: OcrEngine | None = None) -> RawExtrac
             try:
                 page = document.load_page(page_index)
                 render_dpi = _effective_render_dpi(document, page)
-                pixmap = page.get_pixmap(dpi=render_dpi)
-                image_bytes = pixmap.tobytes("png")
+                image_bytes = rasterize_page_to_png(page, dpi=render_dpi)
             except Exception as exc:  # noqa: BLE001 - one bad page must not abort the document
                 warnings.append(f"Page {page_number}: could not be rendered for OCR ({exc}).")
                 ocr_pages.append(
