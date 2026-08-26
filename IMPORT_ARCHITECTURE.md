@@ -1266,3 +1266,174 @@ the routine confirm click," reusing this document's own
 `Quotation`/`QuotationVersion` data — see `ANALYTICS_ARCHITECTURE.md`).
 None of the three write to a `Quotation`/`QuotationVersion`/`BOQ` row;
 `confirm_import` remains the only place that happens.
+
+## 23. Currency fallback fix + random-order historical-ingestion pilot #2
+
+### 23.1 Currency fallback now uses the project's own company, not a hardcoded constant
+
+`confirm_import`'s currency resolution previously fell back to the
+module-level `DEFAULT_CURRENCY` constant (`Currency.AED`) whenever no
+currency was extracted from the candidate — which is the common case,
+since most real Vinco quotations state their currency as a symbol
+attached to each amount ("SR 5,700.00"), not as a separately labeled
+field. This app is single-company (`Company` has exactly one row,
+`project_service.get_or_create_default_company`), and `Company` already
+had an unused `default_currency` field for exactly this purpose. The
+fallback now reads `session.get(Company, project.company_id)
+.default_currency`, falling back to the module constant only in the
+practically-unreachable case the company row is somehow missing (it is
+`NOT NULL` on `Project`). The module constant itself, and every other
+one of its ~16 call sites, is deliberately untouched — this is a narrow
+routing fix, not a change to what the default value *is*.
+
+Validated against real data from pilot #2 below: with
+`Company.default_currency` set to `SAR` (this archive's real business
+currency), both real quotations confirmed from the batch (`VN/QU/395/18`,
+`VN/QU/420/18`) received `currency=SAR`, not the hardcoded `AED`.
+
+### 23.2 Pilot #2: a second, larger real archive, deliberately random order
+
+A new 24-page real archive (`Quotations_20185.pdf`) was ingested via
+`ingest_quotation_batch` together with the three files from pilot #1 —
+by design, in whatever order the files were supplied, since the business
+process this pipeline serves receives scans in no guaranteed order.
+Nothing about `detect_segments`'s ordering independence changes: each
+file is still segmented and extracted entirely independently of any
+other file in the batch (§3a).
+
+Ground truth for all 24 pages was established by direct visual reading
+before running any extraction, confirming (among 19 real quotation
+segments plus one real invoice, `VN/QU/IN/004M/18`, correctly not
+recognized as a quotation) two more real, useful edge cases: a genuine
+duplicate page within one PDF (`VN/QU/270A/18`'s first copy, page 13,
+independently re-scanned with different OCR noise than its second copy
+on page 14), and a genuine revision pair (`VN/QU/280/18` →
+`VN/QU/280A/18`, same client/subject, different date and value).
+
+Three new, narrow, real-evidence-grounded fixes were made after this
+diagnosis (regression tests reference the exact real segment each is
+grounded in):
+
+- `_NET_COST_OF_WORK_PATTERN` (net-value fallback sentence) now accepts
+  "cost of work" as well as "cost of the work" (real: `VN/QU/251A/18`
+  genuinely drops "the"), and tolerates a run of underscores between the
+  currency token and the amount, not just whitespace (real:
+  `VN/QU/281/18`'s printed fill-in-the-blank line OCRs its underline as
+  literal underscores: `"SR _ 7,500.00"`).
+- `_TRAILING_HARMLESS_PUNCTUATION_RE` (date parsing) now also strips a
+  trailing `|` and lets whitespace mix into the same trailing run, so a
+  period-then-space-then-pipe artifact (`"Aug 28,2018. |"`,
+  `VN/QU/253A/18`) is stripped in one pass rather than leaving the period
+  behind after the pipe alone is removed.
+- A new, narrow, field-scoped strip removes a trailing bare separator
+  character from an extracted `quotation_number` specifically (real:
+  `VN/QU/253A/18`'s own reference line ends in a stray table artifact,
+  `"VN/QU/253A/18 :"`) — never applied to other fields, where trailing
+  punctuation can be meaningful.
+
+Before → after, across all 36 segments from all 4 files in this pilot
+(recomputed directly against the real stored OCR text, independent of
+any one document's segmentation):
+
+| Metric | Before | After |
+|---|---|---|
+| `HIGH_CONFIDENCE` | 2 | 2 (unchanged — both are single-page segments unaffected by this round's fixes) |
+| `REVIEW_REQUIRED` | 7 | 9 |
+| `BLOCKED` | 27 | 25 |
+| Missing `quotation_number` | 5 | 5 (unchanged — the fix cleans a dirty value, it doesn't recover a truly absent one) |
+| Missing `quotation_date` | 5 | 4 |
+| Missing `net_value` | 21 | 19 |
+| Missing `gross_value` | 25 | 24 |
+
+The two segments that moved out of `BLOCKED` are `VN/QU/251A/18` (a
+genuinely huge real quotation, SAR 20,986,042.00, now correctly
+extracted) and `VN/QU/281/18` (net now found directly, so `gross` is now
+correctly re-derived from net+tax). Neither reached `HIGH_CONFIDENCE`
+after the fix — `VN/QU/251A/18`'s VAT is explicitly not charged on this
+quotation ("VAT Pricing is not included in the offer"), which is
+correctly recorded as `tax_value=0.00` at `LOW` confidence (a business
+fact, not a gap) and that alone keeps it at `REVIEW_REQUIRED`.
+
+### 23.3 The dominant real cause of `BLOCKED`, confirmed, not a bug
+
+25 of 36 segments are `BLOCKED` after this round's fixes. The large
+majority of these are not a code defect: §20.3's pre-existing
+identity-corroboration check (`_flag_financial_fields_without_
+identity_corroboration`) downgrades `net_value` to `LOW` confidence —
+which `compute_ocr_confidence_status` treats as equivalent to
+`net_value` being missing outright — whenever the net figure and the
+reference/date live on different pages of the same segment. This is
+Vinco's own normal template for any 2-page-or-longer quotation (header
+on page 1, the "cost of the work ... SAR X" totals sentence on page 2),
+so it structurally, deliberately, and correctly blocks a large share of
+otherwise-perfectly-extracted real multi-page quotations from ever
+reaching `HIGH_CONFIDENCE` or even `REVIEW_REQUIRED` without a human
+explicitly confirming the total. Confirmed directly on `VN/QU/318/18`
+(pages 1-2): reference/date/client all `HIGH` confidence, net/tax/gross
+all correctly extracted and internally consistent (275,750.00 +
+13,787.50 = 289,537.50, matching the real printed total exactly) — and
+still `BLOCKED`, for exactly this reason. This is a known, accepted,
+safety-first trade-off already documented at §20.3, not a new finding to
+fix; it is named here because it is the single largest contributor to
+this pilot's `BLOCKED` count, and any future work on this pipeline
+should not mistake it for an extraction gap.
+
+### 23.4 Real, demonstrated OCR-quality limitations left unfixed
+
+Three further real defects were found, diagnosed to their exact root
+cause, and deliberately left unfixed — each is either already an
+accepted limitation category (documented elsewhere in this file) or
+would require a broad, false-positive-risking change to fix narrowly:
+
+- **Leading OCR noise before a label, on three independent real
+  pages, each with a different noise string** (`"i Reference..."` on
+  `VN/QU/319/18`, `": Currency: SAR"` on the invoice page, `"be
+  Reference..."`/`"= Date..."` both on `VN/QU/270A/18`'s first, noisier
+  copy). Already an accepted limitation (§19.1, §20.1's "leading-noise"
+  category) — the noise strings are not a small fixed set, so widening
+  the anchor would risk matching ordinary prose that happens to start
+  with a short word before a label-shaped phrase.
+- **A real, consequential mis-boundary caused by that same limitation
+  compounding**: `VN/QU/270A/18`'s first copy (page 13) lost *both* its
+  reference and date labels to leading noise simultaneously, so it
+  carried no identity signal at all and was silently absorbed as a
+  continuation of the still-open `VN/QU/283/18` segment (pages 11-13) —
+  exactly the "under-split, never mis-attribute silently" behavior this
+  module's own design accepts as the safe failure mode (never confirmed
+  without a human seeing the seam), but worth naming plainly: a `HIGH`
+  `boundary_confidence` describes only the page that *opened* the
+  segment, not a guarantee that every later page in its range truly
+  belongs.
+- **Complete OCR corruption of the numeric digits themselves**, not
+  just the label (`VN/QU/265A/18`'s and `VN/QU/283/18`'s totals tables;
+  `VN/QU/253A/18`'s `GRAND TOTAL` row) — the digits come out as
+  unrelated OCR garbage with no salvageable pattern, not a wrong-but-
+  parseable number. No safe fix exists short of re-scanning the source.
+
+### 23.5 Resumability and immutability re-confirmed at this larger scale
+
+`ingest_quotation_batch` was run a second time against the same 4 files
+and the same database: all 4 were reported `skipped_duplicate` (matched
+by `file_hash`, per `_RESUMABLE_EXTRACTION_STATUSES`), the second run
+completed in under a second (no OCR re-run), and document/segment counts
+were unchanged (36 segments both before and after). All 4 source files
+remained byte-identical and hash-identical after both runs.
+
+### 23.6 Verdict
+
+The evidence supports **(B): another targeted extraction-improvement
+round**, not yet (A) review UI/dashboard work or (C) an architectural
+change. Real, narrow, safely-fixable defects are still being found at a
+steady rate each time a new real file is examined (three more this
+round, on top of round 3's and round 4's), and none of them have
+required weakening a gate, guessing past genuine ambiguity, or touching
+`financial_engine.py`/award/matching/reconciliation logic. §23.3's
+finding is the one that most changes the picture for (A): the dominant
+`BLOCKED` cause across this larger sample is not a bug at all, so no
+amount of further narrow extraction fixing will move most of these
+segments past `REVIEW_REQUIRED` — a future decision point (out of scope
+for this round) is whether the identity-corroboration gate's page-level
+strictness is worth revisiting specifically for the "total on a later
+page of the same already-correctly-bounded segment" case, which is a
+materially different, much lower-risk claim than "trust a value found
+anywhere in the document."

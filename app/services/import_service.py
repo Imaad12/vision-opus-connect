@@ -54,6 +54,7 @@ from app.importers.base import ExtractedTable, RawExtraction, build_default_regi
 from app.models import (
     BOQ,
     BOQLineItem,
+    Company,
     ImportAuditLogEntry,
     ImportedBoqLineCandidate,
     ImportedDocument,
@@ -1357,9 +1358,27 @@ def confirm_import(
         raise ValidationError("Select an existing project or provide a name for a new one before confirming.")
 
     try:
-        currency_enum = Currency(candidate.currency) if candidate.currency else DEFAULT_CURRENCY
+        currency_enum = Currency(candidate.currency) if candidate.currency else None
     except ValueError:
-        currency_enum = DEFAULT_CURRENCY
+        currency_enum = None
+    if currency_enum is None:
+        # No currency was extracted (the common case -- most real
+        # quotations state their currency as a symbol attached to each
+        # amount, not as a separately labeled field) or what was
+        # extracted wasn't a recognized code. Falling back to the
+        # project's own company's configured currency
+        # (`Company.default_currency`) rather than the hardcoded
+        # module-level `DEFAULT_CURRENCY` -- this is a single-company
+        # desktop application (see `project_service.get_or_create_default_company`),
+        # so every project's company is the one real business operating
+        # it, and that company's own currency is the correct fallback,
+        # not a generic constant that has no knowledge of which country/
+        # currency this business actually operates in. `DEFAULT_CURRENCY`
+        # remains only as a last-resort guard for the (should-be-impossible,
+        # since `company_id` is NOT NULL) case the company row can't be
+        # found.
+        company = session.get(Company, project.company_id)
+        currency_enum = company.default_currency if company is not None else DEFAULT_CURRENCY
 
     conflict: RevisionConflictError | None = None
     if quotation_id is not None:

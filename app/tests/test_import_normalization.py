@@ -225,6 +225,18 @@ def test_parse_date_maybe_tolerates_trailing_semicolon() -> None:
     assert parse_date_maybe("Nov 19, 2018;") == date(2018, 11, 19)
 
 
+def test_parse_date_maybe_tolerates_trailing_pipe_after_period_and_space() -> None:
+    from datetime import date
+
+    # Real: VN/QU/253A/18's date line, "Date : Aug 28,2018. |" -- a stray
+    # table/box-drawing character lands after the sentence-ending period,
+    # separated from it by a space. Both the period and the pipe (and the
+    # space between them) must be stripped in one pass to reach a
+    # parseable date; stripping only a bare trailing "|" leaves a
+    # trailing period behind that alone still defeats every format.
+    assert parse_date_maybe("Aug 28,2018. |") == date(2018, 8, 28)
+
+
 def test_parse_date_maybe_without_trailing_punctuation_still_works() -> None:
     from datetime import date
 

@@ -190,6 +190,23 @@ def test_reference_label_still_requires_a_real_separator_not_bare_whitespace() -
     assert result.quotation_number is None
 
 
+def test_reference_with_trailing_table_artifact_is_stripped() -> None:
+    # Real: VN/QU/253A/18, "Reference : VN/QU/253A/18 :" -- a stray
+    # table/box-drawing character lands after the value on the same line
+    # (the real document's date line shows the same artifact: "Date : Aug
+    # 28,2018. |"). A real Vinco reference never legitimately ends in a
+    # bare separator character, so this is safe to strip.
+    result = extract_quotation_candidate("Reference : VN/QU/253A/18 :\n", [])
+    assert result.quotation_number == "VN/QU/253A/18"
+
+
+def test_reference_ending_in_a_real_separator_like_character_is_still_stripped_safely() -> None:
+    # The strip only ever removes a *trailing* run of separator
+    # characters; a reference containing one in the middle is untouched.
+    result = extract_quotation_candidate("Reference: VN/QU/412/18\n", [])
+    assert result.quotation_number == "VN/QU/412/18"
+
+
 # --- Regression: real archive "Kind Attn." client label (OCR Phase 4 fix) --
 # Every real Vinco archive document that labels its client contact prints
 # "Kind Attn." (with the period), never bare "Attn" at the start of a
@@ -487,6 +504,34 @@ def test_cost_of_the_work_sentence_split_across_lines_correctly_does_not_match()
     text = "h labor and materials SR 170,800.00\nsome unrelated line\nThe cost of the work wit\n"
     result = extract_quotation_candidate(text, [])
     assert result.net_value is None
+
+
+# --- Regression: real archive "cost of work" wording/OCR variants (random-order
+# historical-ingestion pilot round) --
+# A second real archive (Quotations_20185.pdf) confirmed two further real
+# variants of the same boilerplate sentence, neither reachable by the
+# pattern above.
+
+
+def test_cost_of_work_without_the_is_extracted_as_net_value() -> None:
+    # Real: VN/QU/251A/18, "The cost of work with material and Labor is
+    # SAR 20,986,042.00" -- "the" is genuinely dropped from this
+    # quotation's own wording, not an OCR artifact.
+    result = extract_quotation_candidate(
+        "The cost of work with material and Labor is SAR 20,986,042.00\n", []
+    )
+    assert result.net_value == Decimal("20986042.00")
+
+
+def test_cost_of_the_work_with_underscore_filled_blank_is_extracted() -> None:
+    # Real: VN/QU/281/18, "The cost of the work with labor and materials
+    # SR _ 7,500.00" -- the printed line is a fill-in-the-blank template
+    # whose underline OCRs as literal underscores between the currency
+    # token and the amount.
+    result = extract_quotation_candidate(
+        "The cost of the work with labor and materials SR _ 7,500.00\n", []
+    )
+    assert result.net_value == Decimal("7500.00")
 
 
 # --- Regression: real archive separator-less "Total" wording (Phase 4 round 3) --

@@ -283,6 +283,34 @@ def test_confirm_import_creates_new_client_project_and_quotation(db_session: Ses
     assert document.confirmed_at is not None
 
 
+def test_confirm_import_currency_fallback_uses_the_projects_company_not_the_hardcoded_default(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """QUOTATION_TEXT states no currency (the common real-archive case --
+    most quotations print a currency symbol attached to each amount, not
+    a separately labeled 'Currency:' field). The fallback must come from
+    the project's own company's configured `default_currency`
+    (a single-company desktop app -- see
+    `project_service.get_or_create_default_company`), never the generic
+    hardcoded `DEFAULT_CURRENCY` module constant, which has no knowledge
+    of which real business/country this data belongs to."""
+    from app.core.enums import DEFAULT_CURRENCY, Currency
+    from app.models import Company
+
+    assert Currency.SAR != DEFAULT_CURRENCY  # sanity: this test is only meaningful if they differ
+
+    document = stage_document(db_session, _write_quotation_txt(tmp_path))
+    client = client_service.create_client(db_session, name="ABC Holdings")
+    project = project_service.create_project(db_session, name="Villa ABC Renovation", client_id=client.id)
+    company = db_session.get(Company, project.company_id)
+    company.default_currency = Currency.SAR
+    db_session.flush()
+
+    version = confirm_import(db_session, document, client_id=client.id, project_id=project.id)
+
+    assert version.currency == Currency.SAR
+
+
 def test_confirm_import_with_boq_creates_boq_line_items(db_session: Session, tmp_path: Path) -> None:
     document = stage_document(db_session, _write_boq_csv(tmp_path))
     # This document has no quotation-shaped fields — supply the minimum

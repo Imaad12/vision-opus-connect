@@ -262,7 +262,16 @@ _DATE_FORMATS = (
 # part of "Month DD, YYYY", since that comma is never trailing. It never
 # broadens which formats are accepted or guesses a date that doesn't
 # otherwise match one of them exactly.
-_TRAILING_HARMLESS_PUNCTUATION_RE = re.compile(r"[.:;]+$")
+#
+# `|` is included alongside them for the same reason -- a real, observed
+# table/box-drawing artifact landing right after the date (real:
+# "Date : Aug 28,2018. |") -- and whitespace is included in the class
+# itself (not just trimmed by the `.strip()` below) so a run mixing
+# harmless punctuation *and* whitespace before the true end (here, the
+# period, then a space, then the stray "|") is stripped in one pass
+# rather than leaving an inner character the single non-iterative pass
+# could not reach.
+_TRAILING_HARMLESS_PUNCTUATION_RE = re.compile(r"[\s.:;|]+$")
 
 # Two more real, recurring archive OCR artifacts around the comma in
 # "Month DD, YYYY" -- confirmed directly against the real archive's date

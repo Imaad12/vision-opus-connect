@@ -227,8 +227,22 @@ def _find_vat_amount_without_separator(text: str | None, tables: list[ExtractedT
 # non-adjacent lines or lost to OCR noise entirely; that is a table/
 # layout reading-order problem, not a pattern gap, and is not addressed
 # here (see IMPORT_ARCHITECTURE.md).
+#
+# Two further real, narrow wording/OCR variants confirmed directly
+# against a second real quotation archive:
+#   - "the" is sometimes dropped ("The cost of work with material and
+#     Labor is SAR 20,986,042.00", real: VN/QU/251A/18) -- made optional
+#     rather than required.
+#   - The printed line is a fill-in-the-blank template whose underline
+#     OCRs as literal underscores between the currency token and the
+#     amount ("...materials SR _ 7,500.00", real: VN/QU/281/18) -- the
+#     required separator after the currency token now accepts a run of
+#     whitespace and/or underscores, not whitespace alone. Both changes
+#     only affect this one narrow fallback sentence (never overrides an
+#     already-found value) and still require a real trailing decimal
+#     amount, so neither can match a bare mention of the phrase.
 _NET_COST_OF_WORK_PATTERN = re.compile(
-    r"cost of the work.{0,50}?\b(?:SAR|SR)\s+([\d,]+\.\d{2})\s*$", re.IGNORECASE
+    r"cost of (?:the )?work.{0,50}?\b(?:SAR|SR)[\s_]+([\d,]+\.\d{2})\s*$", re.IGNORECASE
 )
 
 
@@ -261,6 +275,24 @@ _GROSS_TOTAL_NO_SEPARATOR_PATTERN = re.compile(
     r"^\s*(?:total\s+amount|grand\s+total|total)\s+(?:SAR|SR|AED|USD)\s+([\d,]+\.\d{2})\s*$",
     re.IGNORECASE,
 )
+
+# A real, observed archive artifact on the `quotation_number` field
+# specifically: a stray table/box-drawing character (misread by OCR as one
+# of the same separator characters `_pattern_for` already tolerates
+# *before* a label) instead lands *after* the reference value, on the
+# same line (real: "Reference : VN/QU/253A/18 :" -- the trailing " :" is
+# not part of the reference). A real Vinco reference never legitimately
+# ends in one of these characters (always digits, e.g. ".../18"), so
+# stripping a trailing run of them is safe and narrow -- scoped to this
+# one field only (never applied to free-text fields like `description`,
+# where trailing punctuation can be meaningful). Left as-is if stripping
+# would leave nothing.
+_TRAILING_REFERENCE_NOISE_RE = re.compile(r"\s*[:\-»|—>=]+\s*$")
+
+
+def _strip_trailing_reference_noise(raw_value: str) -> str:
+    stripped = _TRAILING_REFERENCE_NOISE_RE.sub("", raw_value).strip()
+    return stripped or raw_value
 
 
 def _find_gross_value_without_separator(text: str | None, tables: list[ExtractedTable]) -> str | None:
@@ -454,6 +486,9 @@ def _apply_field(result: QuotationCandidateFields, field_name: str, raw_value: s
             ConfidenceLevel.HIGH.value if token else ConfidenceLevel.NEEDS_REVIEW.value
         )
         return
+
+    if field_name == "quotation_number":
+        raw_value = _strip_trailing_reference_noise(raw_value)
 
     setattr(result, field_name, raw_value)
     result.field_confidence[field_name] = ConfidenceLevel.HIGH.value
