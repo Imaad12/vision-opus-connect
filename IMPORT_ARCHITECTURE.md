@@ -1251,3 +1251,18 @@ is meaningfully more usable than at the start of this fix sequence, and
 every remaining blocker is now named and explained rather than mysterious
 — but "practically usable at scale with only light review" is not yet
 true for a majority of real documents in this archive.
+
+## 22. Historical batch ingestion, review triage, and analytics
+
+Three layers were added on top of this pipeline, unchanged by any of
+them: `app.services.import_service.ingest_quotation_batch`/
+`ingest_purchase_order_batch` (resumable batch drivers — see that
+module's own "Batch / historical ingestion" section for the exact
+resumability rule), `app.services.review_service` (splits
+`NEEDS_REVIEW` documents into "needs a human's judgment" vs. "just needs
+the routine confirm click," reusing this document's own
+`compute_ocr_confidence_status` unchanged), and
+`app.services.analytics_service` (read-only reporting over confirmed
+`Quotation`/`QuotationVersion` data — see `ANALYTICS_ARCHITECTURE.md`).
+None of the three write to a `Quotation`/`QuotationVersion`/`BOQ` row;
+`confirm_import` remains the only place that happens.

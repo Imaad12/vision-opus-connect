@@ -24,6 +24,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -1487,6 +1488,134 @@ def reject_import(
     return document
 
 
+# --- Batch / historical ingestion ---------------------------------------------
+#
+# For ingesting thousands of historical files at once, arriving in no
+# particular relational order. Reuses `stage_document`/`run_extraction`
+# and `stage_purchase_order_document`/`run_po_extraction` unchanged --
+# this is an orchestration layer over the existing per-document state
+# machine, not a new one. No new table or persisted "batch" concept is
+# introduced: each `ImportedDocument`'s own `file_hash` + `extraction_status`
+# is already durable, resumable state, so simply re-running a batch over
+# the same file list (or a superset of it) is itself the resume mechanism.
+
+#: A document left in one of these states never reached a real outcome --
+#: most commonly because the process ingesting it was interrupted
+#: mid-file (killed, crashed, container recycled) before extraction could
+#: finish, or because OCR wasn't available *yet* at the time it was first
+#: attempted. Re-running extraction for a document in one of these states
+#: is always safe and never re-does completed work, since `run_extraction`/
+#: `run_po_extraction` only ever read the original, untouched source file
+#: and overwrite this same row's own extraction columns.
+#:
+#: `FAILED` is deliberately NOT included: a failure already ran to
+#: completion once (unlike an interrupted PENDING/EXTRACTING row) and may
+#: be a permanent, deterministic problem (a corrupt file, an unsupported
+#: internal structure) -- automatically retrying it on every batch re-run
+#: would violate "avoid re-processing identical documents" for the exact
+#: files least likely to ever succeed. A human can still explicitly force
+#: a retry (stage_document/stage_purchase_order_document with
+#: allow_duplicate=True) if a FAILED document's underlying cause was
+#: fixed (e.g. the file was replaced).
+_RESUMABLE_EXTRACTION_STATUSES = frozenset(
+    {ExtractionStatus.PENDING, ExtractionStatus.EXTRACTING, ExtractionStatus.OCR_REQUIRED}
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class FileIngestionOutcome:
+    """What happened to one file in a batch run.
+
+    `action` is one of: "staged" (a genuinely new file), "resumed" (an
+    existing row that was left in an interrupted/retryable state and was
+    re-extracted), "skipped_duplicate" (already reached a terminal
+    extraction outcome -- not re-processed, per the "avoid re-OCRing
+    identical documents" requirement), or "failed" (this specific file
+    could not be staged/resumed at all -- `error` explains why; never
+    raised out of the batch call itself).
+    """
+
+    path: Path
+    action: str
+    document_id: int | None
+    error: str | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class BatchIngestionSummary:
+    outcomes: list[FileIngestionOutcome]
+
+    @property
+    def staged_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.action == "staged")
+
+    @property
+    def resumed_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.action == "resumed")
+
+    @property
+    def skipped_duplicate_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.action == "skipped_duplicate")
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.action == "failed")
+
+
+def _ingest_batch(session: Session, paths: Iterable[Path | str], *, stage_fn, run_fn) -> BatchIngestionSummary:
+    outcomes: list[FileIngestionOutcome] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            if not path.exists() or not path.is_file():
+                outcomes.append(
+                    FileIngestionOutcome(path=path, action="failed", document_id=None, error="File not found")
+                )
+                continue
+
+            file_hash = compute_file_hash(path)
+            existing = find_existing_by_hash(session, file_hash)
+
+            if existing is not None:
+                if existing.extraction_status in _RESUMABLE_EXTRACTION_STATUSES:
+                    run_fn(session, existing)
+                    outcomes.append(FileIngestionOutcome(path=path, action="resumed", document_id=existing.id))
+                else:
+                    outcomes.append(
+                        FileIngestionOutcome(path=path, action="skipped_duplicate", document_id=existing.id)
+                    )
+                continue
+
+            document = stage_fn(session, path)
+            outcomes.append(FileIngestionOutcome(path=path, action="staged", document_id=document.id))
+        except Exception as exc:  # noqa: BLE001 - one bad file must never abort a historical batch
+            logger.exception("Batch ingestion failed for %s", path)
+            outcomes.append(FileIngestionOutcome(path=path, action="failed", document_id=None, error=str(exc)))
+
+    return BatchIngestionSummary(outcomes=outcomes)
+
+
+def ingest_quotation_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
+    """Stage/resume every quotation file in `paths`, in order, committing
+    nothing beyond what `stage_document`/`run_extraction` already persist
+    per file. Safe to call repeatedly over the same (or a growing) file
+    list — see module-level docstring on why that alone is the resume
+    mechanism. Human review/confirmation is unaffected: this only reaches
+    up to extraction, never confirms anything."""
+    return _ingest_batch(session, paths, stage_fn=stage_document, run_fn=run_extraction)
+
+
+def ingest_purchase_order_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
+    """PO-side equivalent of `ingest_quotation_batch`. Matching against
+    existing quotations happens per file exactly as it already does via
+    `run_po_extraction` (immediate exact-match check); a PO staged before
+    its quotation exists simply stays `UNMATCHED` until
+    `purchase_order_service.reconcile_unmatched_purchase_orders` is
+    triggered by that quotation's own later import — unchanged from the
+    prior round, not re-implemented here."""
+    return _ingest_batch(session, paths, stage_fn=stage_purchase_order_document, run_fn=run_po_extraction)
+
+
 __all__ = [
     "compute_file_hash",
     "find_existing_by_hash",
@@ -1510,4 +1639,8 @@ __all__ = [
     "update_boq_line_candidate",
     "confirm_import",
     "reject_import",
+    "FileIngestionOutcome",
+    "BatchIngestionSummary",
+    "ingest_quotation_batch",
+    "ingest_purchase_order_batch",
 ]
