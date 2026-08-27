@@ -1,6 +1,18 @@
-# Purchase Order Ingestion — Foundation
+# Client Award Evidence Ingestion — Foundation (formerly "Purchase Order")
 
-This documents the PO ingestion foundation actually built (not the full
+**Naming note:** the business record this document describes was
+originally modeled as a class called `PurchaseOrder`, since it represents
+a client's PO document confirming a quotation was awarded. Once the
+VINCO ERP introduced its own, unrelated *outbound supplier* purchase
+order concept, that name became a collision, so the class/table/service
+here were renamed to `ClientAwardEvidence` (see
+`app/models/client_award_evidence.py`; migration
+`e0f5a430387f_rename_purchase_order_award_evidence_to_.py`). "PO"
+throughout the prose below still means the real-world client PO
+document — that terminology is unchanged and unambiguous; only the
+internal class name changed.
+
+This documents the ingestion foundation actually built (not the full
 earlier design proposal — see git history for that discussion; this file
 reflects what shipped and supersedes it wherever they differ). See
 `IMPORT_ARCHITECTURE.md` for the quotation-side pipeline this reuses, and
@@ -27,7 +39,7 @@ Deliberately small, per the task that introduced it:
   business practice this **is** the quotation's own reference number as
   printed on the PO, not a separate PO-internal numbering scheme. This is
   also the sole matching key.
-- No PO line items, no PO revision/version history — a `PurchaseOrder` is
+- No PO line items, no PO revision/version history — a `ClientAwardEvidence` is
   a single confirmed record per reference number. Revisiting this (a
   `PurchaseOrderVersion` table, mirroring `QuotationVersion`) is future
   work once real PO documents show revisions/cancellations happening in
@@ -55,13 +67,13 @@ PO file (local, .pdf/.txt/.docx/scanned image/...)
        - match_quotation_for_reference()      [app.services.po_matching]
          computed immediately — matching is exact and deterministic, not
          a judgment call, so it's never deferred to confirmation time
-       - ImportedPurchaseOrderCandidate persisted with match_status
-  -> confirm_purchase_order_import()   [app.services.purchase_order_service]
+       - ImportedClientAwardEvidenceCandidate persisted with match_status
+  -> confirm_client_award_evidence_import()   [app.services.client_award_evidence_service]
        - only callable when match_status == MATCHED
-       - creates PurchaseOrder, then calls the existing, unmodified
+       - creates ClientAwardEvidence, then calls the existing, unmodified
          quotation_service.mark_awarded() — the only way a project is
          awarded from a PO
-  -> reject_purchase_order_import()    [same module]
+  -> reject_client_award_evidence_import()    [same module]
        - REJECTED, no business record ever created
 ```
 
@@ -70,14 +82,14 @@ PO file (local, .pdf/.txt/.docx/scanned image/...)
 A historical batch is not guaranteed to arrive quotation-first. When a PO
 is staged and its reference doesn't yet match any quotation, it is left
 `UNMATCHED` — but this is never a dead end. `app.services.
-purchase_order_service.reconcile_unmatched_purchase_orders` is called
+purchase_order_service.reconcile_unmatched_client_award_evidence` is called
 automatically by `app.services.import_service.confirm_import` whenever a
 **brand-new** `Quotation` (never a revision — a revision never changes
 `Quotation.reference_number`) is created, and re-runs
 `match_quotation_for_reference` for every currently `UNMATCHED`,
 not-yet-resolved PO candidate. A candidate that newly resolves to
 `MATCHED` is auto-confirmed via the same, unmodified
-`confirm_purchase_order_import` a human would otherwise click — same
+`confirm_client_award_evidence_import` a human would otherwise click — same
 exact-match rule, same one-shot `mark_awarded` guard, same
 already-awarded-gets-evidence-only behavior. One that resolves to
 `AMBIGUOUS` is updated and left for manual review, never auto-confirmed.
@@ -93,8 +105,8 @@ never by project/client name, never by value/date proximity.
 
 | Outcome | Result |
 |---|---|
-| Exactly one quotation matches | `MATCHED` — confirming creates the `PurchaseOrder` and awards the quotation |
-| No quotation matches | `UNMATCHED` — no `PurchaseOrder` is ever created; confirming raises |
+| Exactly one quotation matches | `MATCHED` — confirming creates the `ClientAwardEvidence` and awards the quotation |
+| No quotation matches | `UNMATCHED` — no `ClientAwardEvidence` is ever created; confirming raises |
 | More than one quotation matches (a real possibility despite `Quotation.reference_number`'s DB uniqueness — see below) | `AMBIGUOUS` — confirming raises; never guesses |
 | PO has no reference at all | `UNMATCHED` (same bucket as "no match found") |
 
@@ -112,10 +124,10 @@ Two independent layers, because they catch different duplicates:
 
 1. **SHA-256 file hash** (`stage_purchase_order_document`, same mechanism
    quotations use) — catches re-importing the exact same bytes.
-2. **`PurchaseOrder.po_reference_number` uniqueness** — catches a
+2. **`ClientAwardEvidence.po_reference_number` uniqueness** — catches a
    *rescanned* copy of the same physical PO (different bytes, same
-   reference). `confirm_purchase_order_import` checks for an existing
-   `PurchaseOrder` with the same reference first; if found, the new
+   reference). `confirm_client_award_evidence_import` checks for an existing
+   `ClientAwardEvidence` with the same reference first; if found, the new
    document is attached to it and neither a new record nor a second award
    is created.
 
@@ -130,7 +142,7 @@ yet (see §2).
 
 A PO confirmed against a quotation that is **already awarded** (by any
 means — a prior PO, or a manual award from the Quotations screen) is still
-recorded as a `PurchaseOrder` row (evidence), but never re-triggers
+recorded as a `ClientAwardEvidence` row (evidence), but never re-triggers
 `mark_awarded` and never changes `Project.contract_value`.
 
 ## 6. What this never does
@@ -239,7 +251,7 @@ whitespace/case-normalized but never fuzzy or similarity-based — the
 same discipline `po_matching.py` already established for PO-to-quotation
 matching. An exact match against more than one `Vendor` is `AMBIGUOUS`
 and is never resolved by falling through to a weaker signal. Reuses
-`PurchaseOrderMatchStatus`'s existing three values rather than
+`ClientAwardEvidenceMatchStatus`'s existing three values rather than
 introducing a near-duplicate enum — its values carry no PO-specific
 meaning, only its class name does.
 
@@ -247,11 +259,11 @@ meaning, only its class name does.
 
 This is the one deliberate asymmetry from the existing PO↔quotation
 matching rule: an `UNMATCHED`/`AMBIGUOUS` `match_status` blocks
-`confirm_purchase_order_import` outright (no PO can exist without an
+`confirm_client_award_evidence_import` outright (no PO can exist without an
 exact quotation match), but an `UNMATCHED`/`AMBIGUOUS`
 `vendor_match_status` never blocks it. Most real client POs will never
 name a vendor at all, and that must never be treated as a defect in the
-PO itself. `PurchaseOrder.vendor_id` is therefore always nullable and
+PO itself. `ClientAwardEvidence.vendor_id` is therefore always nullable and
 independent of `quotation_id` — populated only when a vendor was both
 named on the document and deterministically matched, exactly mirroring
 "PO before quotation"/"quotation before PO" reconciliation's own

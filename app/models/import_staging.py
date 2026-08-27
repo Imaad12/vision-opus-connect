@@ -37,7 +37,7 @@ from app.core.enums import (
     ImportAuditEventType,
     ImportDocumentKind,
     ImportReviewStatus,
-    PurchaseOrderMatchStatus,
+    ClientAwardEvidenceMatchStatus,
     SegmentReviewStatus,
 )
 from app.database.base import Base, TimestampMixin
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from app.models.boq import BOQ
     from app.models.client import Client
     from app.models.project import Project
-    from app.models.purchase_order import PurchaseOrder
+    from app.models.client_award_evidence import ClientAwardEvidence
     from app.models.quotation import Quotation, QuotationVersion
     from app.models.vendor import Vendor
 
@@ -111,11 +111,11 @@ class ImportedDocument(Base, TimestampMixin):
     )
     resulting_boq_id: Mapped[int | None] = mapped_column(ForeignKey("boqs.id"))
     # Populated only after a PURCHASE_ORDER-kind document is confirmed via
-    # `app.services.purchase_order_service.confirm_purchase_order_import`
-    # -- see that module and `ImportedPurchaseOrderCandidate` below. NULL
+    # `app.services.client_award_evidence_service.confirm_client_award_evidence_import`
+    # -- see that module and `ImportedClientAwardEvidenceCandidate` below. NULL
     # for every quotation/BOQ document, unaffected by PO ingestion ever
     # existing.
-    resulting_purchase_order_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_orders.id"))
+    resulting_client_award_evidence_id: Mapped[int | None] = mapped_column(ForeignKey("client_award_evidence.id"))
 
     notes: Mapped[str | None] = mapped_column(Text)
 
@@ -160,8 +160,8 @@ class ImportedDocument(Base, TimestampMixin):
     #: segmentation (a PO scan is one PO per file; see PO_ARCHITECTURE.md
     #: on this being an explicit, named scope cut for this foundation
     #: round). `None` for every non-PO document.
-    purchase_order_candidate: Mapped["ImportedPurchaseOrderCandidate | None"] = relationship(
-        "ImportedPurchaseOrderCandidate", back_populates="document", uselist=False
+    client_award_evidence_candidate: Mapped["ImportedClientAwardEvidenceCandidate | None"] = relationship(
+        "ImportedClientAwardEvidenceCandidate", back_populates="document", uselist=False
     )
 
     resulting_client: Mapped["Client | None"] = relationship(
@@ -177,8 +177,8 @@ class ImportedDocument(Base, TimestampMixin):
         "QuotationVersion", foreign_keys=[resulting_quotation_version_id]
     )
     resulting_boq: Mapped["BOQ | None"] = relationship("BOQ", foreign_keys=[resulting_boq_id])
-    resulting_purchase_order: Mapped["PurchaseOrder | None"] = relationship(
-        "PurchaseOrder", foreign_keys=[resulting_purchase_order_id]
+    resulting_client_award_evidence: Mapped["ClientAwardEvidence | None"] = relationship(
+        "ClientAwardEvidence", foreign_keys=[resulting_client_award_evidence_id]
     )
 
     def __repr__(self) -> str:
@@ -254,10 +254,10 @@ class ImportedQuotationCandidate(Base, TimestampMixin):
         return f"ImportedQuotationCandidate(imported_document_id={self.imported_document_id!r})"
 
 
-class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
+class ImportedClientAwardEvidenceCandidate(Base, TimestampMixin):
     """Normalized, human-reviewable PO fields extracted from one
     PURCHASE_ORDER-kind document -- see `app.core.po_extraction` and
-    `app.services.purchase_order_service`. Mirrors
+    `app.services.client_award_evidence_service`. Mirrors
     `ImportedQuotationCandidate`'s shape deliberately (raw_values/
     field_confidence as small JSON dicts, everything nullable).
 
@@ -267,7 +267,7 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     numbering scheme), and it is the sole key used to find the awarded
     quotation (`match_status`/`matched_quotation_id`, computed
     immediately at extraction time, before any human review). It is never
-    fuzzy-matched -- see `PurchaseOrderMatchStatus`.
+    fuzzy-matched -- see `ClientAwardEvidenceMatchStatus`.
 
     `matched_quotation_id` is set only when `match_status == MATCHED`.
     `candidate_quotation_ids` holds the JSON list of every quotation id
@@ -282,16 +282,16 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     quotation the PO awards. `vendor_match_status`/`matched_vendor_id`/
     `candidate_vendor_ids` mirror the quotation-matching columns' own
     shape exactly (see `app.services.vendor_matching.match_vendor`) and
-    reuse `PurchaseOrderMatchStatus` for the same reason that type is
+    reuse `ClientAwardEvidenceMatchStatus` for the same reason that type is
     reused there: its three values carry no PO-specific meaning. Like the
     quotation match, this is computed at extraction time and never
     fuzzy-matched; unlike the quotation match, a vendor match is never
-    required for `confirm_purchase_order_import` to succeed -- most real
+    required for `confirm_client_award_evidence_import` to succeed -- most real
     client POs will never name a vendor at all, and that must never block
     confirming the PO itself.
     """
 
-    __tablename__ = "imported_purchase_order_candidates"
+    __tablename__ = "imported_client_award_evidence_candidates"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     imported_document_id: Mapped[int] = mapped_column(
@@ -306,9 +306,9 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     gross_value: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     notes: Mapped[str | None] = mapped_column(Text)
 
-    match_status: Mapped[PurchaseOrderMatchStatus] = mapped_column(
-        SAEnum(PurchaseOrderMatchStatus, native_enum=False),
-        default=PurchaseOrderMatchStatus.UNMATCHED,
+    match_status: Mapped[ClientAwardEvidenceMatchStatus] = mapped_column(
+        SAEnum(ClientAwardEvidenceMatchStatus, native_enum=False),
+        default=ClientAwardEvidenceMatchStatus.UNMATCHED,
         nullable=False,
     )
     matched_quotation_id: Mapped[int | None] = mapped_column(ForeignKey("quotations.id"))
@@ -316,9 +316,9 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
 
     vendor_name: Mapped[str | None] = mapped_column(String(255))
     vendor_tax_number: Mapped[str | None] = mapped_column(String(50))
-    vendor_match_status: Mapped[PurchaseOrderMatchStatus] = mapped_column(
-        SAEnum(PurchaseOrderMatchStatus, native_enum=False),
-        default=PurchaseOrderMatchStatus.UNMATCHED,
+    vendor_match_status: Mapped[ClientAwardEvidenceMatchStatus] = mapped_column(
+        SAEnum(ClientAwardEvidenceMatchStatus, native_enum=False),
+        default=ClientAwardEvidenceMatchStatus.UNMATCHED,
         nullable=False,
     )
     matched_vendor_id: Mapped[int | None] = mapped_column(ForeignKey("vendors.id"))
@@ -329,7 +329,7 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
 
     document: Mapped["ImportedDocument"] = relationship(
         "ImportedDocument",
-        back_populates="purchase_order_candidate",
+        back_populates="client_award_evidence_candidate",
         foreign_keys=[imported_document_id],
     )
     matched_quotation: Mapped["Quotation | None"] = relationship(
@@ -339,7 +339,7 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return (
-            f"ImportedPurchaseOrderCandidate(imported_document_id={self.imported_document_id!r}, "
+            f"ImportedClientAwardEvidenceCandidate(imported_document_id={self.imported_document_id!r}, "
             f"match_status={self.match_status!r})"
         )
 

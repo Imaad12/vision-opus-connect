@@ -15,13 +15,13 @@ from app.models.import_staging import (
     ImportedBoqLineCandidate,
     ImportedDocument,
     ImportedDocumentSegment,
-    ImportedPurchaseOrderCandidate,
+    ImportedClientAwardEvidenceCandidate,
     ImportedQuotationCandidate,
 )
 from app.models.invoice import Invoice, Payment
 from app.models.lookups import CostCategory, Trade
 from app.models.project import Project, ProjectStatusHistory
-from app.models.purchase_order import PurchaseOrder
+from app.models.client_award_evidence import ClientAwardEvidence
 from app.models.quotation import Quotation, QuotationVersion
 from app.models.variation import ProjectVariation
 from app.models.vendor import Vendor
@@ -40,7 +40,7 @@ __all__ = [
     "ImportedBoqLineCandidate",
     "ImportedDocument",
     "ImportedDocumentSegment",
-    "ImportedPurchaseOrderCandidate",
+    "ImportedClientAwardEvidenceCandidate",
     "ImportedQuotationCandidate",
     "Invoice",
     "Payment",
@@ -48,7 +48,7 @@ __all__ = [
     "Trade",
     "Project",
     "ProjectStatusHistory",
-    "PurchaseOrder",
+    "ClientAwardEvidence",
     "Quotation",
     "QuotationVersion",
     "ProjectVariation",

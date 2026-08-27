@@ -1,7 +1,7 @@
 """Generic Review Queue: the human operating layer for document ingestion.
 
 This page is built entirely on top of `app.services.review_service`'s
-existing `ReviewItem`/`QuotationReviewQueue`/`PurchaseOrderReviewQueue`
+existing `ReviewItem`/`QuotationReviewQueue`/`ClientAwardEvidenceReviewQueue`
 triage — it never recomputes a confidence status, a match status, or any
 other review outcome itself. Its only two jobs are: render what
 `review_service.py` already decided (split into "Needs Attention" and
@@ -39,7 +39,7 @@ from app.database.session import session_scope
 from app.services.import_service import get_imported_document
 from app.services.review_service import (
     ReviewItem,
-    list_purchase_order_review_queue,
+    list_client_award_evidence_review_queue,
     list_quotation_review_queue,
 )
 from app.ui.imports.import_review_dialog import ImportReviewDialog
@@ -82,7 +82,7 @@ def _open_quotation_review_item(parent: QWidget, item: ReviewItem) -> None:
         ImportReviewDialog(item.document_id, parent, segment_id=item.segment_id).exec()
 
 
-def _open_purchase_order_review_item(parent: QWidget, item: ReviewItem) -> None:
+def _open_client_award_evidence_review_item(parent: QWidget, item: ReviewItem) -> None:
     """Routing placeholder only. The Purchase Order review dialog does not
     exist yet — this deliberately does not open, fake, or partially
     implement a PO review workflow (no confirm/reject action is offered
@@ -107,7 +107,7 @@ class _QueueSource:
 _QUEUE_SOURCES: list[_QueueSource] = [
     _QueueSource("quotation", "Quotation", list_quotation_review_queue, _open_quotation_review_item),
     _QueueSource(
-        "purchase_order", "Purchase Order", list_purchase_order_review_queue, _open_purchase_order_review_item
+        "client_award_evidence", "Purchase Order", list_client_award_evidence_review_queue, _open_client_award_evidence_review_item
     ),
 ]
 

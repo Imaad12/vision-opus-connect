@@ -49,7 +49,7 @@ from app.core.import_extraction import QuotationCandidateFields, extract_candida
 from app.core.import_segmentation import detect_segments, find_field_pages, slice_raw_extraction_to_pages
 from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.core.ocr_extraction import extract_via_ocr
-from app.core.po_extraction import extract_purchase_order_candidate
+from app.core.po_extraction import extract_client_award_evidence_candidate
 from app.core.vendor_extraction import extract_vendor_candidate
 from app.importers.base import ExtractedTable, RawExtraction, build_default_registry
 from app.models import (
@@ -60,12 +60,12 @@ from app.models import (
     ImportedBoqLineCandidate,
     ImportedDocument,
     ImportedDocumentSegment,
-    ImportedPurchaseOrderCandidate,
+    ImportedClientAwardEvidenceCandidate,
     ImportedQuotationCandidate,
     Quotation,
     Trade,
 )
-from app.services import client_service, project_service, purchase_order_service, quotation_service
+from app.services import client_service, project_service, client_award_evidence_service, quotation_service
 from app.services.errors import RevisionConflictError, ValidationError
 from app.services.po_matching import match_quotation_for_reference
 from app.services.vendor_matching import match_vendor
@@ -336,7 +336,7 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
 # was).
 
 
-def stage_purchase_order_document(
+def stage_client_award_evidence_document(
     session: Session, path: Path, *, allow_duplicate: bool = False
 ) -> ImportedDocument:
     """Register one local PO file as a staged import and run PO
@@ -452,17 +452,17 @@ def run_po_extraction(session: Session, document: ImportedDocument) -> None:
         document.raw_extracted_data = _serialize_raw_extraction(raw)
         document.extraction_engine = "ocr"
 
-    _build_purchase_order_candidate(session, document, raw)
+    _build_client_award_evidence_candidate(session, document, raw)
 
 
-def _build_purchase_order_candidate(session: Session, document: ImportedDocument, raw: RawExtraction) -> None:
-    fields = extract_purchase_order_candidate(raw.text, raw.tables)
+def _build_client_award_evidence_candidate(session: Session, document: ImportedDocument, raw: RawExtraction) -> None:
+    fields = extract_client_award_evidence_candidate(raw.text, raw.tables)
     outcome = match_quotation_for_reference(session, fields.po_reference_number)
 
     # Supplier/Vendor intelligence foundation: a completely independent
     # identity axis from the quotation-reference match above -- see
     # `app.core.vendor_extraction`/`app.services.vendor_matching` and
-    # `ImportedPurchaseOrderCandidate`'s own docstring. Always attempted
+    # `ImportedClientAwardEvidenceCandidate`'s own docstring. Always attempted
     # (harmless no-op when the PO names no vendor at all, the common
     # case), never required for the PO itself to be confirmable.
     vendor_fields = extract_vendor_candidate(raw.text, raw.tables)
@@ -470,7 +470,7 @@ def _build_purchase_order_candidate(session: Session, document: ImportedDocument
         session, vendor_name=vendor_fields.vendor_name, vendor_tax_number=vendor_fields.vendor_tax_number
     )
 
-    candidate = ImportedPurchaseOrderCandidate(
+    candidate = ImportedClientAwardEvidenceCandidate(
         imported_document_id=document.id,
         po_reference_number=fields.po_reference_number,
         po_date=fields.po_date,
@@ -1438,7 +1438,7 @@ def confirm_import(
         # ingestion -- see PO_ARCHITECTURE.md). A revision never changes
         # `Quotation.reference_number`, so this is only ever needed here,
         # never in the revision branch above.
-        purchase_order_service.reconcile_unmatched_purchase_orders(session)
+        client_award_evidence_service.reconcile_unmatched_client_award_evidence(session)
 
     boq = None
     if include_boq and boq_lines:
@@ -1531,7 +1531,7 @@ def reject_import(
 #
 # For ingesting thousands of historical files at once, arriving in no
 # particular relational order. Reuses `stage_document`/`run_extraction`
-# and `stage_purchase_order_document`/`run_po_extraction` unchanged --
+# and `stage_client_award_evidence_document`/`run_po_extraction` unchanged --
 # this is an orchestration layer over the existing per-document state
 # machine, not a new one. No new table or persisted "batch" concept is
 # introduced: each `ImportedDocument`'s own `file_hash` + `extraction_status`
@@ -1553,7 +1553,7 @@ def reject_import(
 #: internal structure) -- automatically retrying it on every batch re-run
 #: would violate "avoid re-processing identical documents" for the exact
 #: files least likely to ever succeed. A human can still explicitly force
-#: a retry (stage_document/stage_purchase_order_document with
+#: a retry (stage_document/stage_client_award_evidence_document with
 #: allow_duplicate=True) if a FAILED document's underlying cause was
 #: fixed (e.g. the file was replaced).
 _RESUMABLE_EXTRACTION_STATUSES = frozenset(
@@ -1644,15 +1644,15 @@ def ingest_quotation_batch(session: Session, paths: Iterable[Path | str]) -> Bat
     return _ingest_batch(session, paths, stage_fn=stage_document, run_fn=run_extraction)
 
 
-def ingest_purchase_order_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
+def ingest_client_award_evidence_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
     """PO-side equivalent of `ingest_quotation_batch`. Matching against
     existing quotations happens per file exactly as it already does via
     `run_po_extraction` (immediate exact-match check); a PO staged before
     its quotation exists simply stays `UNMATCHED` until
-    `purchase_order_service.reconcile_unmatched_purchase_orders` is
+    `client_award_evidence_service.reconcile_unmatched_client_award_evidence` is
     triggered by that quotation's own later import — unchanged from the
     prior round, not re-implemented here."""
-    return _ingest_batch(session, paths, stage_fn=stage_purchase_order_document, run_fn=run_po_extraction)
+    return _ingest_batch(session, paths, stage_fn=stage_client_award_evidence_document, run_fn=run_po_extraction)
 
 
 __all__ = [
@@ -1664,7 +1664,7 @@ __all__ = [
     "get_segment",
     "stage_document",
     "run_extraction",
-    "stage_purchase_order_document",
+    "stage_client_award_evidence_document",
     "run_po_extraction",
     "propose_segments",
     "list_segments",
@@ -1681,5 +1681,5 @@ __all__ = [
     "FileIngestionOutcome",
     "BatchIngestionSummary",
     "ingest_quotation_batch",
-    "ingest_purchase_order_batch",
+    "ingest_client_award_evidence_batch",
 ]

@@ -6,8 +6,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.services.import_service import stage_document, stage_purchase_order_document
-from app.services.review_service import list_purchase_order_review_queue, list_quotation_review_queue
+from app.services.import_service import stage_document, stage_client_award_evidence_document
+from app.services.review_service import list_client_award_evidence_review_queue, list_quotation_review_queue
 
 
 def _write_quotation(tmp_path: Path, name: str, *, reference: str, net: str | None = "1,000.00") -> Path:
@@ -69,9 +69,9 @@ def test_a_matched_po_is_ready_to_confirm_without_further_extraction_review(
     )
 
     path = _write_po(tmp_path, "po.txt", reference="VN/QU/700/25")
-    stage_purchase_order_document(db_session, path)
+    stage_client_award_evidence_document(db_session, path)
 
-    queue = list_purchase_order_review_queue(db_session)
+    queue = list_client_award_evidence_review_queue(db_session)
 
     assert len(queue.ready_to_confirm) == 1
     assert queue.needs_attention == []
@@ -79,9 +79,9 @@ def test_a_matched_po_is_ready_to_confirm_without_further_extraction_review(
 
 def test_an_unmatched_po_needs_attention(db_session: Session, tmp_path: Path) -> None:
     path = _write_po(tmp_path, "po.txt", reference="VN/QU/NO-MATCH/25")
-    stage_purchase_order_document(db_session, path)
+    stage_client_award_evidence_document(db_session, path)
 
-    queue = list_purchase_order_review_queue(db_session)
+    queue = list_client_award_evidence_review_queue(db_session)
 
     assert len(queue.needs_attention) == 1
     assert queue.ready_to_confirm == []
@@ -90,9 +90,9 @@ def test_an_unmatched_po_needs_attention(db_session: Session, tmp_path: Path) ->
 
 def test_a_po_with_no_reference_at_all_needs_attention(db_session: Session, tmp_path: Path) -> None:
     path = _write_po(tmp_path, "po.txt", reference=None)
-    stage_purchase_order_document(db_session, path)
+    stage_client_award_evidence_document(db_session, path)
 
-    queue = list_purchase_order_review_queue(db_session)
+    queue = list_client_award_evidence_review_queue(db_session)
 
     assert len(queue.needs_attention) == 1
 

@@ -85,7 +85,7 @@ def extract_vendor_candidate(text: str | None, tables: list[ExtractedTable]) -> 
     """Scan `text`/`tables` for a vendor's name and/or VAT/tax registration
     number, using the same first-match-wins, longer-label-first line
     scanning as `import_extraction.extract_quotation_candidate` and
-    `po_extraction.extract_purchase_order_candidate`. Purely deterministic
+    `po_extraction.extract_client_award_evidence_candidate`. Purely deterministic
     pattern matching -- no AI/ML model, no fuzzy matching. Returns a
     `VendorCandidateFields` with both fields `None` when nothing matches;
     callers (see `app.services.vendor_matching.match_vendor`) must treat

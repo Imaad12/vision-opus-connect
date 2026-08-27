@@ -4,11 +4,11 @@ A standalone module (mirrors `app.services.import_matching`'s own
 separation from `import_service.py`) so it can be imported both by the
 staging pipeline (`app.services.import_service.run_po_extraction`, to
 compute a match preview immediately at extraction time) and by the
-confirmation step (`app.services.purchase_order_service`) without either
+confirmation step (`app.services.client_award_evidence_service`) without either
 of those two importing each other.
 
 Matching is exact, whitespace-normalized string comparison only — never
-fuzzy/similarity-based. See `app.core.enums.PurchaseOrderMatchStatus` and
+fuzzy/similarity-based. See `app.core.enums.ClientAwardEvidenceMatchStatus` and
 PO_ARCHITECTURE.md for the full rationale.
 """
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.enums import PurchaseOrderMatchStatus
+from app.core.enums import ClientAwardEvidenceMatchStatus
 from app.core.import_normalization import normalize_whitespace
 from app.models import Quotation
 
@@ -31,7 +31,7 @@ class MatchOutcome:
     """Result of resolving a PO's extracted reference number against
     existing quotations — see `match_quotation_for_reference`."""
 
-    status: PurchaseOrderMatchStatus
+    status: ClientAwardEvidenceMatchStatus
     quotation: Quotation | None = None
     candidate_quotation_ids: list[int] = field(default_factory=list)
 
@@ -60,17 +60,17 @@ def match_quotation_for_reference(session: Session, po_reference_number: str | N
     """
     normalized = normalize_whitespace(po_reference_number)
     if not normalized:
-        return MatchOutcome(status=PurchaseOrderMatchStatus.UNMATCHED)
+        return MatchOutcome(status=ClientAwardEvidenceMatchStatus.UNMATCHED)
 
     stmt = select(Quotation).where(Quotation.is_deleted.is_(False), Quotation.reference_number.is_not(None))
     quotations = session.execute(stmt).scalars().all()
     matches = [q for q in quotations if normalize_whitespace(q.reference_number) == normalized]
 
     if not matches:
-        return MatchOutcome(status=PurchaseOrderMatchStatus.UNMATCHED)
+        return MatchOutcome(status=ClientAwardEvidenceMatchStatus.UNMATCHED)
     if len(matches) > 1:
         return MatchOutcome(
-            status=PurchaseOrderMatchStatus.AMBIGUOUS,
+            status=ClientAwardEvidenceMatchStatus.AMBIGUOUS,
             candidate_quotation_ids=[q.id for q in matches],
         )
-    return MatchOutcome(status=PurchaseOrderMatchStatus.MATCHED, quotation=matches[0])
+    return MatchOutcome(status=ClientAwardEvidenceMatchStatus.MATCHED, quotation=matches[0])

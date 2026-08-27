@@ -4,8 +4,8 @@ Every figure here is either a direct read or a sum/count/average over
 fields that already exist and are already correct:
 `Quotation`/`QuotationVersion`/`Project`/`Client` (quotation and award
 data — unchanged, uses `quotation_service.mark_awarded`'s own output,
-never a second award computation) and `PurchaseOrder`/
-`ImportedPurchaseOrderCandidate` (PO/matching data). No new arithmetic is
+never a second award computation) and `ClientAwardEvidence`/
+`ImportedClientAwardEvidenceCandidate` (PO/matching data). No new arithmetic is
 introduced beyond summing/counting/averaging (the same style
 `app.services.dashboard_service`/`app.services.financial_service` already
 use); `app.core.financial_engine` is not touched or duplicated, since
@@ -28,12 +28,12 @@ from typing import Callable, Final
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.enums import Currency, ImportReviewStatus, ProjectStatus, PurchaseOrderMatchStatus, QuotationStatus
+from app.core.enums import Currency, ImportReviewStatus, ProjectStatus, ClientAwardEvidenceMatchStatus, QuotationStatus
 from app.models import (
     ImportedDocument,
-    ImportedPurchaseOrderCandidate,
+    ImportedClientAwardEvidenceCandidate,
     Project,
-    PurchaseOrder,
+    ClientAwardEvidence,
     Quotation,
     QuotationVersion,
 )
@@ -44,7 +44,7 @@ __all__ = [
     "ProjectPerformance",
     "PeriodTrend",
     "QuotationToPoTimingSummary",
-    "PendingPurchaseOrderSummary",
+    "PendingClientAwardEvidenceSummary",
     "PoFinancialAnalysis",
     "CurrencyBreakdown",
     "compute_quotation_pipeline_summary",
@@ -54,8 +54,8 @@ __all__ = [
     "compute_yearly_trends",
     "compute_average_time_to_po",
     "list_quotations_without_po",
-    "list_unmatched_purchase_order_candidates",
-    "compute_pending_purchase_order_summary",
+    "list_unmatched_client_award_evidence_candidates",
+    "compute_pending_client_award_evidence_summary",
     "compute_po_financial_analysis",
     "compute_quotation_currency_breakdown",
     "compute_po_currency_breakdown",
@@ -121,7 +121,7 @@ class QuotationPipelineSummary:
     #: `quotations_with_po_count / quotation_count`, or `None` if there are
     #: no quotations at all yet. See ANALYTICS_ARCHITECTURE.md for why this
     #: is distinct from "awarded" (a quotation can be awarded manually,
-    #: with no PurchaseOrder ever recorded).
+    #: with no ClientAwardEvidence ever recorded).
     quotation_to_po_conversion_rate: Decimal | None
 
 
@@ -153,7 +153,7 @@ def compute_quotation_pipeline_summary(session: Session) -> QuotationPipelineSum
     if quotation_ids:
         with_po_ids = set(
             session.execute(
-                select(PurchaseOrder.quotation_id).where(PurchaseOrder.quotation_id.in_(quotation_ids)).distinct()
+                select(ClientAwardEvidence.quotation_id).where(ClientAwardEvidence.quotation_id.in_(quotation_ids)).distinct()
             )
             .scalars()
             .all()
@@ -344,19 +344,19 @@ class QuotationToPoTimingSummary:
 
 
 def compute_average_time_to_po(session: Session) -> QuotationToPoTimingSummary:
-    """Average of (`PurchaseOrder.po_date` - the awarded quotation
+    """Average of (`ClientAwardEvidence.po_date` - the awarded quotation
     version's `issued_date`) in days.
 
-    Deliberately narrow: only a `PurchaseOrder` that itself recorded
+    Deliberately narrow: only a `ClientAwardEvidence` that itself recorded
     `awarded_quotation_version_id` (set only when *that* PO triggered the
-    award — see `purchase_order_service.confirm_purchase_order_import`;
+    award — see `client_award_evidence_service.confirm_client_award_evidence_import`;
     a later, evidence-only PO against an already-awarded quotation never
     sets it) and where both dates are actually known is included. Never
     backfilled from a different version or estimated when a date is
     missing.
     """
-    purchase_orders = session.execute(select(PurchaseOrder).where(PurchaseOrder.is_deleted.is_(False))).scalars().all()
-    version_ids = {po.awarded_quotation_version_id for po in purchase_orders if po.awarded_quotation_version_id}
+    client_award_evidence = session.execute(select(ClientAwardEvidence).where(ClientAwardEvidence.is_deleted.is_(False))).scalars().all()
+    version_ids = {po.awarded_quotation_version_id for po in client_award_evidence if po.awarded_quotation_version_id}
     versions_by_id: dict[int, QuotationVersion] = {}
     if version_ids:
         versions_by_id = {
@@ -365,7 +365,7 @@ def compute_average_time_to_po(session: Session) -> QuotationToPoTimingSummary:
         }
 
     deltas: list[int] = []
-    for po in purchase_orders:
+    for po in client_award_evidence:
         if po.po_date is None or po.awarded_quotation_version_id is None:
             continue
         version = versions_by_id.get(po.awarded_quotation_version_id)
@@ -387,24 +387,24 @@ def list_quotations_without_po(session: Session) -> list[Quotation]:
         return []
     quotation_ids = [q.id for q in quotations]
     with_po_ids = set(
-        session.execute(select(PurchaseOrder.quotation_id).where(PurchaseOrder.quotation_id.in_(quotation_ids)).distinct())
+        session.execute(select(ClientAwardEvidence.quotation_id).where(ClientAwardEvidence.quotation_id.in_(quotation_ids)).distinct())
         .scalars()
         .all()
     )
     return [q for q in quotations if q.id not in with_po_ids]
 
 
-def list_unmatched_purchase_order_candidates(session: Session) -> list[ImportedPurchaseOrderCandidate]:
+def list_unmatched_client_award_evidence_candidates(session: Session) -> list[ImportedClientAwardEvidenceCandidate]:
     """Every currently `UNMATCHED`, not-yet-resolved PO candidate — see
-    `purchase_order_service.reconcile_unmatched_purchase_orders`, which is
+    `client_award_evidence_service.reconcile_unmatched_client_award_evidence`, which is
     what can move one of these to `MATCHED` once its quotation is later
     imported. A `REJECTED`/`CONFIRMED` document is excluded: it has
     already reached a final human decision."""
     stmt = (
-        select(ImportedPurchaseOrderCandidate)
-        .join(ImportedDocument, ImportedPurchaseOrderCandidate.imported_document_id == ImportedDocument.id)
+        select(ImportedClientAwardEvidenceCandidate)
+        .join(ImportedDocument, ImportedClientAwardEvidenceCandidate.imported_document_id == ImportedDocument.id)
         .where(
-            ImportedPurchaseOrderCandidate.match_status == PurchaseOrderMatchStatus.UNMATCHED,
+            ImportedClientAwardEvidenceCandidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED,
             ImportedDocument.review_status == ImportReviewStatus.NEEDS_REVIEW,
         )
     )
@@ -412,21 +412,21 @@ def list_unmatched_purchase_order_candidates(session: Session) -> list[ImportedP
 
 
 @dataclass(frozen=True, slots=True)
-class PendingPurchaseOrderSummary:
+class PendingClientAwardEvidenceSummary:
     unmatched_count: int
     ambiguous_count: int
 
 
-def compute_pending_purchase_order_summary(session: Session) -> PendingPurchaseOrderSummary:
+def compute_pending_client_award_evidence_summary(session: Session) -> PendingClientAwardEvidenceSummary:
     stmt = (
-        select(ImportedPurchaseOrderCandidate.match_status)
-        .join(ImportedDocument, ImportedPurchaseOrderCandidate.imported_document_id == ImportedDocument.id)
+        select(ImportedClientAwardEvidenceCandidate.match_status)
+        .join(ImportedDocument, ImportedClientAwardEvidenceCandidate.imported_document_id == ImportedDocument.id)
         .where(ImportedDocument.review_status == ImportReviewStatus.NEEDS_REVIEW)
     )
     statuses = session.execute(stmt).scalars().all()
-    return PendingPurchaseOrderSummary(
-        unmatched_count=sum(1 for s in statuses if s == PurchaseOrderMatchStatus.UNMATCHED),
-        ambiguous_count=sum(1 for s in statuses if s == PurchaseOrderMatchStatus.AMBIGUOUS),
+    return PendingClientAwardEvidenceSummary(
+        unmatched_count=sum(1 for s in statuses if s == ClientAwardEvidenceMatchStatus.UNMATCHED),
+        ambiguous_count=sum(1 for s in statuses if s == ClientAwardEvidenceMatchStatus.AMBIGUOUS),
     )
 
 
@@ -435,9 +435,9 @@ def compute_pending_purchase_order_summary(session: Session) -> PendingPurchaseO
 
 @dataclass(frozen=True, slots=True)
 class PoFinancialAnalysis:
-    purchase_order_count: int
+    client_award_evidence_count: int
     #: Each `*_sample_size` may legitimately be smaller than
-    #: `purchase_order_count` -- not every real PO document carries a
+    #: `client_award_evidence_count` -- not every real PO document carries a
     #: readable net/tax/gross figure (see PO_ARCHITECTURE.md's known
     #: table-reading-order limitations). Never estimated or backfilled.
     net_value_sample_size: int
@@ -449,12 +449,12 @@ class PoFinancialAnalysis:
 
 
 def compute_po_financial_analysis(session: Session) -> PoFinancialAnalysis:
-    purchase_orders = session.execute(select(PurchaseOrder).where(PurchaseOrder.is_deleted.is_(False))).scalars().all()
-    net_values = [po.net_value for po in purchase_orders if po.net_value is not None]
-    tax_values = [po.tax_value for po in purchase_orders if po.tax_value is not None]
-    gross_values = [po.gross_value for po in purchase_orders if po.gross_value is not None]
+    client_award_evidence = session.execute(select(ClientAwardEvidence).where(ClientAwardEvidence.is_deleted.is_(False))).scalars().all()
+    net_values = [po.net_value for po in client_award_evidence if po.net_value is not None]
+    tax_values = [po.tax_value for po in client_award_evidence if po.tax_value is not None]
+    gross_values = [po.gross_value for po in client_award_evidence if po.gross_value is not None]
     return PoFinancialAnalysis(
-        purchase_order_count=len(purchase_orders),
+        client_award_evidence_count=len(client_award_evidence),
         net_value_sample_size=len(net_values),
         net_value_total=sum(net_values, ZERO),
         tax_value_sample_size=len(tax_values),
@@ -492,10 +492,10 @@ def compute_quotation_currency_breakdown(session: Session) -> list[CurrencyBreak
 
 
 def compute_po_currency_breakdown(session: Session) -> list[CurrencyBreakdown]:
-    purchase_orders = session.execute(select(PurchaseOrder).where(PurchaseOrder.is_deleted.is_(False))).scalars().all()
+    client_award_evidence = session.execute(select(ClientAwardEvidence).where(ClientAwardEvidence.is_deleted.is_(False))).scalars().all()
 
     buckets: dict[Currency, dict] = {}
-    for po in purchase_orders:
+    for po in client_award_evidence:
         bucket = buckets.setdefault(po.currency, {"count": 0, "total": ZERO})
         bucket["count"] += 1
         if po.net_value is not None:

@@ -38,10 +38,10 @@ Company ──< Project >── Client
                 │             └──< Payment
                 └──< GoogleDriveDocument
 
-Quotation ──< PurchaseOrder >── QuotationVersion (awarded_quotation_version_id, snapshot)
+Quotation ──< ClientAwardEvidence >── QuotationVersion (awarded_quotation_version_id, snapshot)
 ```
 
-`PurchaseOrder` is evidence that a `Quotation` was awarded (see
+`ClientAwardEvidence` is evidence that a `Quotation` was awarded (see
 `PO_ARCHITECTURE.md`) — it always links to a `Quotation`, never carries
 its own `project_id`/`client_id` (both are reached via
 `purchase_order.quotation.project`), and is only ever created once an
@@ -286,13 +286,13 @@ additive migration on this table, not a schema redesign.
 spend"/"outstanding payable" column — those are computed, never stored,
 the same rule already followed everywhere else in this schema (§2): they
 are derivable on demand from `ActualCost.vendor_id`, `Invoice.vendor_id`
-(+ `Payment`), and (once matched) `PurchaseOrder.vendor_id` below, so no
+(+ `Payment`), and (once matched) `ClientAwardEvidence.vendor_id` below, so no
 new relationship was needed to "reach" a vendor's documents, projects, or
 transactions — they were already reachable transitively before this
 round.
 
 What this round actually adds is the extraction/matching path that
-*populates* `PurchaseOrder.vendor_id` in the first place, mirroring the
+*populates* `ClientAwardEvidence.vendor_id` in the first place, mirroring the
 existing PO → Quotation matching discipline exactly (see §3.18 and
 PO_ARCHITECTURE.md):
 
@@ -304,7 +304,7 @@ PO_ARCHITECTURE.md):
   normalized matching only, never fuzzy, tried strongest-signal-first
   (tax number, then name); an exact match against more than one `Vendor`
   is `AMBIGUOUS` and never falls through to a weaker signal to break the
-  tie. Reuses `PurchaseOrderMatchStatus`'s existing three values rather
+  tie. Reuses `ClientAwardEvidenceMatchStatus`'s existing three values rather
   than introducing a near-duplicate enum.
 - A vendor match is always optional and never blocks anything: most real
   client POs will never name a vendor at all, and `confirm_purchase_
@@ -531,7 +531,7 @@ they exist purely so extracted data is reviewable before it becomes a real
 
 **ImportAuditLogEntry** — immutable append-only log per `ImportedDocument`: `event_type` (`IMPORTED`, `EXTRACTED`, `EDITED`, `CONFIRMED`, `REJECTED`), `occurred_at`, and for `EDITED` events `field_name`/`old_value`/`new_value` (plain text, a historical record — not read back as typed data).
 
-### 3.18 PurchaseOrder / ImportedPurchaseOrderCandidate (PO ingestion foundation)
+### 3.18 ClientAwardEvidence / ImportedClientAwardEvidenceCandidate (PO ingestion foundation)
 
 See `PO_ARCHITECTURE.md` for the full pipeline and the exact-match award
 rule. Reuses the Phase 4 staging pattern (`ImportedDocument`,
@@ -540,7 +540,7 @@ rule. Reuses the Phase 4 staging pattern (`ImportedDocument`,
 `app.services.import_service.stage_purchase_order_document` /
 `run_po_extraction` instead of the quotation path.
 
-**PurchaseOrder** — the confirmed business record; created only once
+**ClientAwardEvidence** — the confirmed business record; created only once
 (never merely proposed) since matching is exact and deterministic, not
 subject to the graded review a quotation's financial extraction needs.
 
@@ -554,16 +554,16 @@ subject to the graded review a quotation's financial extraction needs.
 | vendor_id | FK -> vendors.id, **nullable** | Supplier/Vendor intelligence foundation (§3.9.1) — set only when a vendor named on the PO document was deterministically matched; completely independent of, and never required by, `quotation_id`/the award relationship above |
 | notes | text, nullable | |
 
-**ImportedPurchaseOrderCandidate** — one-to-one with `ImportedDocument` (unique FK), the staging layer: the same extracted fields as `PurchaseOrder` above, plus `match_status` (`PurchaseOrderMatchStatus`: `MATCHED`/`UNMATCHED`/`AMBIGUOUS`, computed immediately at extraction time — matching is exact-string, not a judgment call, so it is never deferred to confirmation), `matched_quotation_id` (set only when `MATCHED`), `candidate_quotation_ids` (JSON list, diagnostic only, set only when `AMBIGUOUS`), and `raw_values`/`field_confidence` (same JSON-dict convention as `ImportedQuotationCandidate`).
+**ImportedClientAwardEvidenceCandidate** — one-to-one with `ImportedDocument` (unique FK), the staging layer: the same extracted fields as `ClientAwardEvidence` above, plus `match_status` (`ClientAwardEvidenceMatchStatus`: `MATCHED`/`UNMATCHED`/`AMBIGUOUS`, computed immediately at extraction time — matching is exact-string, not a judgment call, so it is never deferred to confirmation), `matched_quotation_id` (set only when `MATCHED`), `candidate_quotation_ids` (JSON list, diagnostic only, set only when `AMBIGUOUS`), and `raw_values`/`field_confidence` (same JSON-dict convention as `ImportedQuotationCandidate`).
 
 `vendor_name`/`vendor_tax_number` (extracted, nullable free text) and
 `vendor_match_status`/`matched_vendor_id`/`candidate_vendor_ids` mirror
 the quotation-matching columns' own shape, on the same independent
-identity axis as `PurchaseOrder.vendor_id` above — see §3.9.1. Unlike
+identity axis as `ClientAwardEvidence.vendor_id` above — see §3.9.1. Unlike
 `match_status`, an `UNMATCHED`/`AMBIGUOUS` `vendor_match_status` never
-blocks `confirm_purchase_order_import`.
+blocks `confirm_client_award_evidence_import`.
 
-`ImportedDocument.resulting_purchase_order_id` (nullable FK) is populated only once a PO candidate is confirmed — mirrors `resulting_quotation_id` etc.
+`ImportedDocument.resulting_client_award_evidence_id` (nullable FK) is populated only once a PO candidate is confirmed — mirrors `resulting_quotation_id` etc.
 
 ## 4. Financial lifecycle
 

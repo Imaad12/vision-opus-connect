@@ -13,8 +13,8 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import Currency, PurchaseOrderMatchStatus
-from app.models import ImportedDocument, ImportedPurchaseOrderCandidate, PurchaseOrder
+from app.core.enums import Currency, ClientAwardEvidenceMatchStatus
+from app.models import ImportedDocument, ImportedClientAwardEvidenceCandidate, ClientAwardEvidence
 from app.services import analytics_service as a
 from app.services import client_service, project_service, quotation_service
 
@@ -56,16 +56,16 @@ def _build_fixture(session: Session):
     )
     quotation_service.mark_awarded(session, v5, contract_value=Decimal("20000.00"))
 
-    # PurchaseOrder rows constructed directly (not via confirm_purchase_order_import
+    # ClientAwardEvidence rows constructed directly (not via confirm_client_award_evidence_import
     # -- that flow is covered elsewhere; here the fixture needs full control
     # over independent field values to test the analytics arithmetic).
-    po1 = PurchaseOrder(
+    po1 = ClientAwardEvidence(
         quotation_id=v1.quotation_id, awarded_quotation_version_id=v1.id,
         po_reference_number="Q-A1", po_date=date(2024, 1, 25),
         net_value=Decimal("9000.00"), tax_value=Decimal("450.00"), gross_value=Decimal("9450.00"),
         currency=Currency.AED,
     )
-    po2 = PurchaseOrder(
+    po2 = ClientAwardEvidence(
         quotation_id=v5.quotation_id, awarded_quotation_version_id=v5.id,
         po_reference_number="Q-B2", po_date=date(2023, 12, 16),
         net_value=None, tax_value=None, gross_value=None,
@@ -81,10 +81,10 @@ def _build_fixture(session: Session):
     session.add(document)
     session.flush()
     session.add(
-        ImportedPurchaseOrderCandidate(
+        ImportedClientAwardEvidenceCandidate(
             imported_document_id=document.id,
             po_reference_number="Q-NO-MATCH",
-            match_status=PurchaseOrderMatchStatus.UNMATCHED,
+            match_status=ClientAwardEvidenceMatchStatus.UNMATCHED,
         )
     )
     session.flush()
@@ -169,14 +169,14 @@ def test_quotations_without_po(db_session: Session) -> None:
     assert without_po == {"Q-A2", "Q-B1"}
 
 
-def test_unmatched_purchase_orders(db_session: Session) -> None:
+def test_unmatched_client_award_evidence(db_session: Session) -> None:
     _build_fixture(db_session)
 
-    unmatched = a.list_unmatched_purchase_order_candidates(db_session)
+    unmatched = a.list_unmatched_client_award_evidence_candidates(db_session)
     assert len(unmatched) == 1
     assert unmatched[0].po_reference_number == "Q-NO-MATCH"
 
-    pending = a.compute_pending_purchase_order_summary(db_session)
+    pending = a.compute_pending_client_award_evidence_summary(db_session)
     assert pending.unmatched_count == 1
     assert pending.ambiguous_count == 0
 
@@ -186,7 +186,7 @@ def test_po_financial_analysis(db_session: Session) -> None:
 
     analysis = a.compute_po_financial_analysis(db_session)
 
-    assert analysis.purchase_order_count == 2
+    assert analysis.client_award_evidence_count == 2
     assert analysis.net_value_sample_size == 1  # only PO1 has a net_value
     assert analysis.net_value_total == Decimal("9000.00")
     assert analysis.tax_value_sample_size == 1

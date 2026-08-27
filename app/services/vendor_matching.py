@@ -9,7 +9,7 @@ scope where it would risk a cycle) so it can be called both at extraction
 time (a preview, computed immediately) and reused by any future
 reconciliation step, the same way `po_matching.match_quotation_for_reference`
 is reused by both `import_service.run_po_extraction` and
-`purchase_order_service.reconcile_unmatched_purchase_orders`.
+`client_award_evidence_service.reconcile_unmatched_client_award_evidence`.
 
 Matching hierarchy, strongest signal first, never combined: a VAT/tax
 registration number is the more authoritative identifier (two vendors
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.enums import PurchaseOrderMatchStatus
+from app.core.enums import ClientAwardEvidenceMatchStatus
 from app.core.import_normalization import normalize_whitespace
 from app.models import Vendor
 
@@ -46,14 +46,14 @@ class VendorMatchOutcome:
     """Result of resolving an extracted vendor name/tax number against
     existing `Vendor` records -- see `match_vendor`.
 
-    Reuses `PurchaseOrderMatchStatus` for its `status` values (`MATCHED`/
+    Reuses `ClientAwardEvidenceMatchStatus` for its `status` values (`MATCHED`/
     `UNMATCHED`/`AMBIGUOUS`) rather than introducing a near-duplicate
     enum: those three outcomes already mean exactly the same thing here
     as they do for PO-to-quotation matching, and the enum's own value
     strings carry no PO-specific meaning -- only its class name does.
     """
 
-    status: PurchaseOrderMatchStatus
+    status: ClientAwardEvidenceMatchStatus
     vendor: Vendor | None = None
     matched_on: str | None = None  # "tax_number" | "name" | None
     candidate_vendor_ids: list[int] = field(default_factory=list)
@@ -98,10 +98,10 @@ def match_vendor(
             continue
         if len(matches) > 1:
             return VendorMatchOutcome(
-                status=PurchaseOrderMatchStatus.AMBIGUOUS,
+                status=ClientAwardEvidenceMatchStatus.AMBIGUOUS,
                 matched_on=signal_name,
                 candidate_vendor_ids=[v.id for v in matches],
             )
-        return VendorMatchOutcome(status=PurchaseOrderMatchStatus.MATCHED, vendor=matches[0], matched_on=signal_name)
+        return VendorMatchOutcome(status=ClientAwardEvidenceMatchStatus.MATCHED, vendor=matches[0], matched_on=signal_name)
 
-    return VendorMatchOutcome(status=PurchaseOrderMatchStatus.UNMATCHED)
+    return VendorMatchOutcome(status=ClientAwardEvidenceMatchStatus.UNMATCHED)

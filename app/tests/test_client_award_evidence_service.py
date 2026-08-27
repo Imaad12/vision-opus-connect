@@ -19,12 +19,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session
 
-from app.core.enums import ImportReviewStatus, ProjectStatus, PurchaseOrderMatchStatus, QuotationStatus
-from app.models import Project, PurchaseOrder, Quotation, QuotationVersion
+from app.core.enums import ImportReviewStatus, ProjectStatus, ClientAwardEvidenceMatchStatus, QuotationStatus
+from app.models import Project, ClientAwardEvidence, Quotation, QuotationVersion
 from app.services import client_service, project_service, quotation_service
 from app.services.errors import ValidationError
-from app.services.import_service import compute_file_hash, stage_purchase_order_document
-from app.services.purchase_order_service import confirm_purchase_order_import, reject_purchase_order_import
+from app.services.import_service import compute_file_hash, stage_client_award_evidence_document
+from app.services.client_award_evidence_service import confirm_client_award_evidence_import, reject_client_award_evidence_import
 
 
 def _write_po_txt(
@@ -62,10 +62,10 @@ def test_exact_match_attaches_po_and_awards_the_quotation(db_session: Session, t
     project, version = _create_quotation(db_session, reference="VN/QU/500/25")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/500/25", net="55,000.00")
 
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.MATCHED
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.MATCHED
 
-    po = confirm_purchase_order_import(db_session, document)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.quotation_id == version.quotation_id
     assert po.awarded_quotation_version_id == version.id
@@ -81,7 +81,7 @@ def test_exact_match_attaches_po_and_awards_the_quotation(db_session: Session, t
 
     db_session.refresh(document)
     assert document.review_status == ImportReviewStatus.CONFIRMED
-    assert document.resulting_purchase_order_id == po.id
+    assert document.resulting_client_award_evidence_id == po.id
 
 
 def test_real_two_column_bleed_reference_matches_and_awards_end_to_end(
@@ -91,7 +91,7 @@ def test_real_two_column_bleed_reference_matches_and_awards_end_to_end(
     genuine client PO (WAHAH Electric Supply Co., WES-PO29973) --
     'Fax 966138674567 Your/Vendor Ref. | QQUTNO# 26-53', a two-column PO
     header table bled onto one line -- run through the actual
-    `stage_purchase_order_document` -> `confirm_purchase_order_import`
+    `stage_client_award_evidence_document` -> `confirm_client_award_evidence_import`
     pipeline end to end, not just the extraction unit (already covered
     separately in test_po_extraction.py). Confirms the full MATCHED ->
     award path holds for this exact real pattern, not merely that the
@@ -99,17 +99,17 @@ def test_real_two_column_bleed_reference_matches_and_awards_end_to_end(
     """
     # The PO's own net_value is not recovered from this real line shape
     # either (a separate, already-known limitation) -- award falls back to
-    # the quotation's own quoted_value, exactly as `confirm_purchase_order_import`
+    # the quotation's own quoted_value, exactly as `confirm_client_award_evidence_import`
     # is designed to when the PO carries no usable positive value of its own.
     project, version = _create_quotation(db_session, reference="QQUTNO# 26-53", quoted_value=Decimal("8850.00"))
     path = tmp_path / "wes_po.txt"
     path.write_text("Fax 966138674567 Your/Vendor Ref. | QQUTNO# 26-53\n", encoding="utf-8")
 
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.MATCHED
-    assert document.purchase_order_candidate.matched_quotation_id == version.quotation_id
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.MATCHED
+    assert document.client_award_evidence_candidate.matched_quotation_id == version.quotation_id
 
-    po = confirm_purchase_order_import(db_session, document)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.quotation_id == version.quotation_id
     db_session.refresh(project)
@@ -124,8 +124,8 @@ def test_po_attaches_to_the_correct_quotation_among_several(db_session: Session,
     project_b, version_b = _create_quotation(db_session, reference="VN/QU/702/25")
 
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/702/25", net="90,000.00")
-    document = stage_purchase_order_document(db_session, path)
-    po = confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.quotation_id == version_b.quotation_id
     assert po.quotation_id != version_a.quotation_id
@@ -138,23 +138,23 @@ def test_po_attaches_to_the_correct_quotation_among_several(db_session: Session,
 
 def test_unmatched_reference_is_flagged_and_cannot_be_confirmed(db_session: Session, tmp_path: Path) -> None:
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/NO-SUCH-QUOTATION/25")
-    document = stage_purchase_order_document(db_session, path)
+    document = stage_client_award_evidence_document(db_session, path)
 
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.UNMATCHED
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED
 
     with pytest.raises(ValidationError, match="did not match"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
 
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(ClientAwardEvidence).count() == 0
     assert document.review_status == ImportReviewStatus.NEEDS_REVIEW
 
 
 def test_po_with_no_reference_at_all_is_unmatched(db_session: Session, tmp_path: Path) -> None:
     path = _write_po_txt(tmp_path, "po.txt", reference=None)
-    document = stage_purchase_order_document(db_session, path)
+    document = stage_client_award_evidence_document(db_session, path)
 
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.UNMATCHED
-    assert document.purchase_order_candidate.po_reference_number is None
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED
+    assert document.client_award_evidence_candidate.po_reference_number is None
 
 
 # --- 3. Ambiguous match ---------------------------------------------------------
@@ -175,16 +175,16 @@ def test_ambiguous_match_is_flagged_and_cannot_be_confirmed(db_session: Session,
     db_session.flush()
 
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/777/25")
-    document = stage_purchase_order_document(db_session, path)
+    document = stage_client_award_evidence_document(db_session, path)
 
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.AMBIGUOUS
-    candidate_ids = json.loads(document.purchase_order_candidate.candidate_quotation_ids)
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.AMBIGUOUS
+    candidate_ids = json.loads(document.client_award_evidence_candidate.candidate_quotation_ids)
     assert len(candidate_ids) == 2
 
     with pytest.raises(ValidationError, match="more than one quotation"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
 
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(ClientAwardEvidence).count() == 0
 
 
 # --- 4. Duplicate PO import is idempotent ---------------------------------------
@@ -194,18 +194,18 @@ def test_reimporting_the_same_po_reference_does_not_duplicate_or_reaward(db_sess
     project, _version = _create_quotation(db_session, reference="VN/QU/600/25")
 
     path_a = _write_po_txt(tmp_path, "po_a.txt", reference="VN/QU/600/25", net="70,000.00")
-    doc_a = stage_purchase_order_document(db_session, path_a)
-    po_a = confirm_purchase_order_import(db_session, doc_a)
+    doc_a = stage_client_award_evidence_document(db_session, path_a)
+    po_a = confirm_client_award_evidence_import(db_session, doc_a)
 
     # A rescanned copy of the exact same physical PO -- different bytes/
     # hash from path_a, but the same reference number. This is the
     # realistic duplicate scenario file-hash dedup alone cannot catch.
     path_b = _write_po_txt(tmp_path, "po_b_rescanned.txt", reference="VN/QU/600/25", net="70,000.00")
-    doc_b = stage_purchase_order_document(db_session, path_b, allow_duplicate=True)
-    po_b = confirm_purchase_order_import(db_session, doc_b)
+    doc_b = stage_client_award_evidence_document(db_session, path_b, allow_duplicate=True)
+    po_b = confirm_client_award_evidence_import(db_session, doc_b)
 
     assert po_b.id == po_a.id
-    assert db_session.query(PurchaseOrder).count() == 1
+    assert db_session.query(ClientAwardEvidence).count() == 1
     db_session.refresh(project)
     assert project.contract_value == Decimal("70000.00")
 
@@ -213,11 +213,11 @@ def test_reimporting_the_same_po_reference_does_not_duplicate_or_reaward(db_sess
 def test_confirming_the_same_document_twice_is_rejected(db_session: Session, tmp_path: Path) -> None:
     _create_quotation(db_session, reference="VN/QU/970/25")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/970/25")
-    document = stage_purchase_order_document(db_session, path)
-    confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    confirm_client_award_evidence_import(db_session, document)
 
     with pytest.raises(ValidationError, match="already been confirmed"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
 
 
 # --- 5/7. Quotation history preserved; award created correctly -----------------
@@ -232,8 +232,8 @@ def test_confirming_po_does_not_alter_quotation_version_history(db_session: Sess
     original_version_number = version.version_number
 
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/800/25", net="45,000.00")
-    document = stage_purchase_order_document(db_session, path)
-    confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    confirm_client_award_evidence_import(db_session, document)
 
     versions = quotation_service.list_versions_for_quotation(db_session, version.quotation_id)
     assert len(versions) == 1
@@ -256,8 +256,8 @@ def test_po_confirmed_after_quotation_already_manually_awarded_is_evidence_only(
     quotation_service.mark_awarded(db_session, version, contract_value=Decimal("60000.00"))
 
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/980/25", net="65,000.00")
-    document = stage_purchase_order_document(db_session, path)
-    po = confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.quotation_id == version.quotation_id
     assert po.net_value == Decimal("65000.00")
@@ -278,13 +278,13 @@ def test_confirm_rolls_back_when_matched_quotation_has_no_version(db_session: Se
     db_session.flush()  # deliberately no QuotationVersion created
 
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/900/25")
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.MATCHED
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.MATCHED
 
     with pytest.raises(ValidationError, match="no version to award"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
 
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(ClientAwardEvidence).count() == 0
     assert document.review_status == ImportReviewStatus.NEEDS_REVIEW
     db_session.refresh(project)
     assert project.contract_value is None
@@ -294,13 +294,13 @@ def test_confirm_rolls_back_when_no_positive_value_is_available(db_session: Sess
     project, _version = _create_quotation(db_session, reference="VN/QU/901/25", quoted_value=None)
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/901/25", net=None)
 
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.MATCHED
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.MATCHED
 
     with pytest.raises(ValidationError, match="usable positive value"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
 
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(ClientAwardEvidence).count() == 0
     db_session.refresh(project)
     assert project.contract_value is None
 
@@ -314,8 +314,8 @@ def test_source_po_file_remains_byte_identical_after_confirmation(db_session: Se
     original_bytes = path.read_bytes()
     original_hash = compute_file_hash(path)
 
-    document = stage_purchase_order_document(db_session, path)
-    confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    confirm_client_award_evidence_import(db_session, document)
 
     assert path.read_bytes() == original_bytes
     assert compute_file_hash(path) == original_hash
@@ -327,13 +327,13 @@ def test_source_po_file_remains_byte_identical_after_confirmation(db_session: Se
 def test_rejecting_po_import_creates_no_business_records(db_session: Session, tmp_path: Path) -> None:
     project, _version = _create_quotation(db_session, reference="VN/QU/960/25")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/960/25")
-    document = stage_purchase_order_document(db_session, path)
+    document = stage_client_award_evidence_document(db_session, path)
 
-    reject_purchase_order_import(db_session, document, reason="test rejection")
+    reject_client_award_evidence_import(db_session, document, reason="test rejection")
 
     assert document.review_status == ImportReviewStatus.REJECTED
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(ClientAwardEvidence).count() == 0
     with pytest.raises(ValidationError, match="rejected"):
-        confirm_purchase_order_import(db_session, document)
+        confirm_client_award_evidence_import(db_session, document)
     db_session.refresh(project)
     assert project.contract_value is None

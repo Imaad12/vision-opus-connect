@@ -1,13 +1,13 @@
 """Business-correctness tests for the Supplier/Vendor intelligence
 foundation's one wired integration point: a client PO document that also
 names a vendor/subcontractor gets that vendor deterministically matched
-and, only when matched, recorded on the confirmed `PurchaseOrder.vendor_id`
+and, only when matched, recorded on the confirmed `ClientAwardEvidence.vendor_id`
 -- entirely independent of, and never blocking, the existing PO ->
-quotation award relationship (`test_purchase_order_service.py`).
+quotation award relationship (`test_client_award_evidence_service.py`).
 
 Deliberately not an adversarial OCR test suite -- plain `.txt` fixtures
 via the deterministic text importer, same discipline as
-`test_purchase_order_service.py`. No real supplier/vendor document
+`test_client_award_evidence_service.py`. No real supplier/vendor document
 archive has been ingested yet (see PO_ARCHITECTURE.md); these prove the
 relationships, matching hierarchy, idempotency, and safety gates, not
 real-world OCR accuracy.
@@ -23,11 +23,11 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.enums import PurchaseOrderMatchStatus, VendorType
-from app.models import PurchaseOrder, Vendor
+from app.core.enums import ClientAwardEvidenceMatchStatus, VendorType
+from app.models import ClientAwardEvidence, Vendor
 from app.services import client_service, project_service, quotation_service
-from app.services.import_service import compute_file_hash, stage_purchase_order_document
-from app.services.purchase_order_service import confirm_purchase_order_import
+from app.services.import_service import compute_file_hash, stage_client_award_evidence_document
+from app.services.client_award_evidence_service import confirm_client_award_evidence_import
 
 
 def _write_po_txt(
@@ -67,17 +67,17 @@ def _make_vendor(session: Session, *, name: str, tax_number: str | None = None) 
 # --- 1. Deterministic supplier identification -------------------------------
 
 
-def test_matched_vendor_is_recorded_on_the_confirmed_purchase_order(db_session: Session, tmp_path: Path) -> None:
+def test_matched_vendor_is_recorded_on_the_confirmed_client_award_evidence(db_session: Session, tmp_path: Path) -> None:
     _create_quotation(db_session, reference="VN/QU/600/25")
     vendor = _make_vendor(db_session, name="Gulf Steel Trading LLC")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/600/25", vendor_name="Gulf Steel Trading LLC")
 
-    document = stage_purchase_order_document(db_session, path)
-    candidate = document.purchase_order_candidate
-    assert candidate.vendor_match_status == PurchaseOrderMatchStatus.MATCHED
+    document = stage_client_award_evidence_document(db_session, path)
+    candidate = document.client_award_evidence_candidate
+    assert candidate.vendor_match_status == ClientAwardEvidenceMatchStatus.MATCHED
     assert candidate.matched_vendor_id == vendor.id
 
-    po = confirm_purchase_order_import(db_session, document)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.vendor_id == vendor.id
     # The award relationship this whole PO pipeline exists for is
@@ -92,8 +92,8 @@ def test_tax_number_match_is_recorded_the_same_way(db_session: Session, tmp_path
         tmp_path, "po.txt", reference="VN/QU/601/25", vendor_tax_number="100234567800003"
     )
 
-    document = stage_purchase_order_document(db_session, path)
-    po = confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.vendor_id == vendor.id
 
@@ -105,10 +105,10 @@ def test_po_naming_no_vendor_confirms_normally_with_no_vendor_link(db_session: S
     _create_quotation(db_session, reference="VN/QU/602/25")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/602/25")
 
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.vendor_match_status == PurchaseOrderMatchStatus.UNMATCHED
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.vendor_match_status == ClientAwardEvidenceMatchStatus.UNMATCHED
 
-    po = confirm_purchase_order_import(db_session, document)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.vendor_id is None
     assert po.quotation_id is not None  # the award itself is entirely unaffected
@@ -120,11 +120,11 @@ def test_vendor_named_but_not_on_file_confirms_normally_with_no_vendor_link(
     _create_quotation(db_session, reference="VN/QU/603/25")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/603/25", vendor_name="Unknown Vendor Co")
 
-    document = stage_purchase_order_document(db_session, path)
-    assert document.purchase_order_candidate.vendor_match_status == PurchaseOrderMatchStatus.UNMATCHED
-    assert document.purchase_order_candidate.vendor_name == "Unknown Vendor Co"
+    document = stage_client_award_evidence_document(db_session, path)
+    assert document.client_award_evidence_candidate.vendor_match_status == ClientAwardEvidenceMatchStatus.UNMATCHED
+    assert document.client_award_evidence_candidate.vendor_name == "Unknown Vendor Co"
 
-    po = confirm_purchase_order_import(db_session, document)
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.vendor_id is None
 
@@ -140,16 +140,16 @@ def test_ambiguous_vendor_name_confirms_the_po_but_never_guesses_the_vendor(
     v2 = _make_vendor(db_session, name="Shared Name Trading")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/604/25", vendor_name="Shared Name Trading")
 
-    document = stage_purchase_order_document(db_session, path)
-    candidate = document.purchase_order_candidate
-    assert candidate.vendor_match_status == PurchaseOrderMatchStatus.AMBIGUOUS
+    document = stage_client_award_evidence_document(db_session, path)
+    candidate = document.client_award_evidence_candidate
+    assert candidate.vendor_match_status == ClientAwardEvidenceMatchStatus.AMBIGUOUS
     assert candidate.matched_vendor_id is None
     assert set(json.loads(candidate.candidate_vendor_ids)) == {v1.id, v2.id}
 
     # The PO's own award relationship must never be blocked by an
     # unresolved *vendor* ambiguity -- only an unresolved *quotation*
-    # match blocks confirmation (see test_purchase_order_service.py).
-    po = confirm_purchase_order_import(db_session, document)
+    # match blocks confirmation (see test_client_award_evidence_service.py).
+    po = confirm_client_award_evidence_import(db_session, document)
 
     assert po.vendor_id is None
     assert po.quotation_id is not None
@@ -165,8 +165,8 @@ def test_confirming_never_creates_a_new_vendor_record(db_session: Session, tmp_p
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/605/25", vendor_name="Brand New Vendor Never Seen")
 
     before_count = db_session.execute(select(Vendor)).scalars().all()
-    document = stage_purchase_order_document(db_session, path)
-    confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    confirm_client_award_evidence_import(db_session, document)
     after_count = db_session.execute(select(Vendor)).scalars().all()
 
     assert len(after_count) == len(before_count)
@@ -182,8 +182,8 @@ def test_two_different_pos_naming_the_same_vendor_both_link_to_the_one_record(
     path_a = _write_po_txt(tmp_path, "po_a.txt", reference="VN/QU/606/25", vendor_name="Repeat Vendor Co")
     path_b = _write_po_txt(tmp_path, "po_b.txt", reference="VN/QU/607/25", vendor_name="Repeat Vendor Co")
 
-    po_a = confirm_purchase_order_import(db_session, stage_purchase_order_document(db_session, path_a))
-    po_b = confirm_purchase_order_import(db_session, stage_purchase_order_document(db_session, path_b))
+    po_a = confirm_client_award_evidence_import(db_session, stage_client_award_evidence_document(db_session, path_a))
+    po_b = confirm_client_award_evidence_import(db_session, stage_client_award_evidence_document(db_session, path_b))
 
     assert po_a.vendor_id == vendor.id
     assert po_b.vendor_id == vendor.id
@@ -203,12 +203,12 @@ def test_reprocessing_extraction_recomputes_the_same_match_deterministically(
     vendor = _make_vendor(db_session, name="Deterministic Vendor Co")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/608/25", vendor_name="Deterministic Vendor Co")
 
-    document_1 = stage_purchase_order_document(db_session, path)
-    first_match = document_1.purchase_order_candidate.matched_vendor_id
+    document_1 = stage_client_award_evidence_document(db_session, path)
+    first_match = document_1.client_award_evidence_candidate.matched_vendor_id
 
     # Simulate reprocessing by staging a second, byte-identical copy under
     # a different filename (the existing SHA-256 dedup path is exercised
-    # separately in test_purchase_order_service.py/test_po_reconciliation.py;
+    # separately in test_client_award_evidence_service.py/test_po_reconciliation.py;
     # this test is specifically about the vendor match being stable).
     path_2 = tmp_path / "po_copy.txt"
     path_2.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -217,8 +217,8 @@ def test_reprocessing_extraction_recomputes_the_same_match_deterministically(
     # deliberately, since this test is specifically about the vendor
     # match itself being stable across repeated extraction, not about
     # dedup behavior.
-    document_2 = stage_purchase_order_document(db_session, path_2, allow_duplicate=True)
-    second_match = document_2.purchase_order_candidate.matched_vendor_id
+    document_2 = stage_client_award_evidence_document(db_session, path_2, allow_duplicate=True)
+    second_match = document_2.client_award_evidence_candidate.matched_vendor_id
 
     assert first_match == vendor.id
     assert second_match == vendor.id
@@ -231,15 +231,15 @@ def test_confirming_the_same_po_twice_does_not_change_its_vendor_link(
     vendor = _make_vendor(db_session, name="Idempotent Vendor Co")
     path = _write_po_txt(tmp_path, "po.txt", reference="VN/QU/609/25", vendor_name="Idempotent Vendor Co")
 
-    document = stage_purchase_order_document(db_session, path)
-    po_first = confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    po_first = confirm_client_award_evidence_import(db_session, document)
     # A second confirmation attempt against the same po_reference_number
     # (e.g. a duplicate scan re-confirmed) is the existing idempotency
     # path -- it must return the *same* record, vendor link included, not
     # create a second one or drop the link.
-    document_reference = document.purchase_order_candidate.po_reference_number
+    document_reference = document.client_award_evidence_candidate.po_reference_number
     existing = db_session.execute(
-        select(PurchaseOrder).where(PurchaseOrder.po_reference_number == document_reference)
+        select(ClientAwardEvidence).where(ClientAwardEvidence.po_reference_number == document_reference)
     ).scalars().all()
 
     assert len(existing) == 1
@@ -259,8 +259,8 @@ def test_source_file_remains_byte_identical_after_vendor_extraction_and_confirma
     original_hash = compute_file_hash(path)
     original_bytes = path.read_bytes()
 
-    document = stage_purchase_order_document(db_session, path)
-    confirm_purchase_order_import(db_session, document)
+    document = stage_client_award_evidence_document(db_session, path)
+    confirm_client_award_evidence_import(db_session, document)
 
     assert compute_file_hash(path) == original_hash
     assert path.read_bytes() == original_bytes

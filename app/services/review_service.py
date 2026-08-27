@@ -14,7 +14,7 @@ already work:
   or OCR-derived, purely for triage classification; it does not change
   which documents `confirm_import` allows through (that gate remains
   OCR-only, unchanged).
-- PO-side "confident enough" is exactly `PurchaseOrderMatchStatus.MATCHED`
+- PO-side "confident enough" is exactly `ClientAwardEvidenceMatchStatus.MATCHED`
   — matching is already exact and deterministic, so a `MATCHED` PO has
   nothing left to inspect; `UNMATCHED`/`AMBIGUOUS` always need a human.
 
@@ -34,7 +34,7 @@ from app.core.enums import (
     ImportDocumentKind,
     ImportReviewStatus,
     OcrConfidenceStatus,
-    PurchaseOrderMatchStatus,
+    ClientAwardEvidenceMatchStatus,
     SegmentReviewStatus,
 )
 from app.core.ocr_confidence import compute_ocr_confidence_status
@@ -43,9 +43,9 @@ from app.models import ImportedDocument, ImportedDocumentSegment
 __all__ = [
     "ReviewItem",
     "QuotationReviewQueue",
-    "PurchaseOrderReviewQueue",
+    "ClientAwardEvidenceReviewQueue",
     "list_quotation_review_queue",
-    "list_purchase_order_review_queue",
+    "list_client_award_evidence_review_queue",
 ]
 
 #: Extraction outcomes that are not "extraction is done, go judge the
@@ -83,7 +83,7 @@ class QuotationReviewQueue:
 
 
 @dataclass(frozen=True, slots=True)
-class PurchaseOrderReviewQueue:
+class ClientAwardEvidenceReviewQueue:
     needs_attention: list[ReviewItem]
     ready_to_confirm: list[ReviewItem]
 
@@ -92,7 +92,7 @@ def _quotation_documents(session: Session) -> list[ImportedDocument]:
     """Every not-yet-resolved document that belongs to the quotation/BOQ
     pipeline, not the PO one. `document_kind` is reliably `PURCHASE_ORDER`
     for every PO document (set explicitly at stage time — see
-    `app.services.import_service.stage_purchase_order_document`); it is
+    `app.services.import_service.stage_client_award_evidence_document`); it is
     only reliably set to `QUOTATION`/`BOQ` for a *non-segmented* quotation
     document (a segmented one never gets its own `document_kind` set —
     see `app.services.import_service.propose_segments` — since the
@@ -179,14 +179,14 @@ def list_quotation_review_queue(session: Session) -> QuotationReviewQueue:
     return QuotationReviewQueue(needs_attention=needs_attention, ready_to_confirm=ready_to_confirm)
 
 
-def list_purchase_order_review_queue(session: Session) -> PurchaseOrderReviewQueue:
+def list_client_award_evidence_review_queue(session: Session) -> ClientAwardEvidenceReviewQueue:
     """Split every not-yet-confirmed PO document into `needs_attention`
     (extraction incomplete, or `UNMATCHED`/`AMBIGUOUS`) vs.
     `ready_to_confirm` (`MATCHED` — matching is already exact and
     deterministic, so there is nothing left to inspect)."""
     stmt = (
         select(ImportedDocument)
-        .options(joinedload(ImportedDocument.purchase_order_candidate))
+        .options(joinedload(ImportedDocument.client_award_evidence_candidate))
         .where(
             ImportedDocument.review_status == ImportReviewStatus.NEEDS_REVIEW,
             ImportedDocument.document_kind == ImportDocumentKind.PURCHASE_ORDER,
@@ -198,7 +198,7 @@ def list_purchase_order_review_queue(session: Session) -> PurchaseOrderReviewQue
     ready_to_confirm: list[ReviewItem] = []
 
     for document in documents:
-        if document.extraction_status in _INCOMPLETE_EXTRACTION_STATUSES or document.purchase_order_candidate is None:
+        if document.extraction_status in _INCOMPLETE_EXTRACTION_STATUSES or document.client_award_evidence_candidate is None:
             needs_attention.append(
                 ReviewItem(
                     document_id=document.id,
@@ -210,7 +210,7 @@ def list_purchase_order_review_queue(session: Session) -> PurchaseOrderReviewQue
             )
             continue
 
-        candidate = document.purchase_order_candidate
+        candidate = document.client_award_evidence_candidate
         item = ReviewItem(
             document_id=document.id,
             filename=document.filename,
@@ -218,9 +218,9 @@ def list_purchase_order_review_queue(session: Session) -> PurchaseOrderReviewQue
             segment_pages=None,
             reason=f"Match status: {candidate.match_status.value}.",
         )
-        if candidate.match_status == PurchaseOrderMatchStatus.MATCHED:
+        if candidate.match_status == ClientAwardEvidenceMatchStatus.MATCHED:
             ready_to_confirm.append(item)
         else:
             needs_attention.append(item)
 
-    return PurchaseOrderReviewQueue(needs_attention=needs_attention, ready_to_confirm=ready_to_confirm)
+    return ClientAwardEvidenceReviewQueue(needs_attention=needs_attention, ready_to_confirm=ready_to_confirm)

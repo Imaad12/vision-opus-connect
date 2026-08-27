@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from app.core.po_extraction import extract_purchase_order_candidate
+from app.core.po_extraction import extract_client_award_evidence_candidate
 
 PO_TEXT = """\
 PO Date: 15/03/2025
@@ -15,7 +15,7 @@ Total Including VAT: 57,750.00
 
 
 def test_extracts_the_reference_date_and_amounts() -> None:
-    result = extract_purchase_order_candidate(PO_TEXT, [])
+    result = extract_client_award_evidence_candidate(PO_TEXT, [])
 
     assert result.po_reference_number == "VN/QU/500/25"
     assert result.po_date == date(2025, 3, 15)
@@ -26,13 +26,13 @@ def test_extracts_the_reference_date_and_amounts() -> None:
 
 def test_missing_gross_is_derived_from_net_and_tax() -> None:
     text = "Quotation Reference: VN/QU/501/25\nNet Amount: 10,000.00\nVAT Amount: 500.00\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.gross_value == Decimal("10500.00")
 
 
 def test_no_recognizable_fields_returns_all_none() -> None:
-    result = extract_purchase_order_candidate("This is an unrelated cover letter.\n", [])
+    result = extract_client_award_evidence_candidate("This is an unrelated cover letter.\n", [])
 
     assert result.po_reference_number is None
     assert result.po_date is None
@@ -47,7 +47,7 @@ def test_bare_reference_label_is_recognized() -> None:
     (no 'quotation' qualifier) must still be recognized, mirroring the
     same bare-label tolerance already accepted for quotation extraction."""
     text = "Reference: VN/QU/502/25\nDate: 01/04/2025\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number == "VN/QU/502/25"
     assert result.po_date == date(2025, 4, 1)
@@ -66,7 +66,7 @@ def test_quotation_ref_abbreviation_is_recognized() -> None:
     (abbreviated), never the unabbreviated 'Quotation Reference' the base
     label list already covered."""
     text = "Quotation Ref. : PQ-SRF-2025-176\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number == "PQ-SRF-2025-176"
 
@@ -81,7 +81,7 @@ def test_two_column_header_bleed_reference_is_still_recovered() -> None:
     trusted); the `search()`-based fallback, scoped only to labels
     containing the word 'quotation', recovers it."""
     text = "PO. Box-105 Quotation Ref. : PQ-SRF-2025-176\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number == "PQ-SRF-2025-176"
 
@@ -93,7 +93,7 @@ def test_two_column_bleed_fallback_does_not_fire_for_a_bare_reference_label() ->
     'reference' is common enough prose that an unanchored match on it
     would risk false positives elsewhere in a document."""
     text = "See attached drawing package. Reference: DWG-100\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number is None
 
@@ -104,7 +104,7 @@ def test_real_po_date_format_day_abbreviated_month_two_digit_year() -> None:
     quotation in the real archive has ever used (which always prints a
     4-digit year)."""
     text = "PO Date : 15-May-26\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_date == date(2026, 5, 15)
 
@@ -119,7 +119,7 @@ def test_real_vat_and_grand_total_with_no_separator_derive_net_for_free() -> Non
     the existing net/tax/gross reconciliation once tax and gross are
     both found here, exactly as already happens on the quotation side."""
     text = "Vat 15% 73500.00\nGrand Total (SAR)} 563,500.00\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.tax_value == Decimal("73500.00")
     assert result.gross_value == Decimal("563500.00")
@@ -134,7 +134,7 @@ def test_your_vendor_ref_label_recovers_across_a_column_bleed() -> None:
     Eastern Agriculture Company PO's 'Quotation Ref.' case above, using a
     completely different label wording."""
     text = "Fax 966138674567 Your/Vendor Ref. | QQUTNO# 26-53\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number == "QQUTNO# 26-53"
 
@@ -146,7 +146,7 @@ def test_your_vendor_ref_label_alone_on_a_line_is_not_a_false_positive() -> None
     unrelated lines (a genuine table-reconstruction problem, not a
     same-line bleed) -- this must not fabricate a value from nothing."""
     text = "+966138674567 Your/Vendor Ref.\n"
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number is None
 
@@ -165,7 +165,7 @@ def test_real_client_po_full_header_and_totals_block() -> None:
         "Vat 15% 73500.00\n"
         "Grand Total (SAR)} 563,500.00\n"
     )
-    result = extract_purchase_order_candidate(text, [])
+    result = extract_client_award_evidence_candidate(text, [])
 
     assert result.po_reference_number == "PQ-SRF-2025-176"
     assert result.po_date == date(2026, 5, 15)

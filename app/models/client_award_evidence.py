@@ -1,12 +1,12 @@
 """Purchase Order business record (PO ingestion foundation).
 
-A `PurchaseOrder` is the authoritative *evidence* that a `Quotation` was
+A `ClientAwardEvidence` is the authoritative *evidence* that a `Quotation` was
 awarded — see PO_ARCHITECTURE.md. It is created by
-`app.services.purchase_order_service.confirm_purchase_order_import` and
+`app.services.client_award_evidence_service.confirm_client_award_evidence_import` and
 ONLY when the PO's extracted reference number matched exactly one
-existing `Quotation` (see `app.core.enums.PurchaseOrderMatchStatus`); an
+existing `Quotation` (see `app.core.enums.ClientAwardEvidenceMatchStatus`); an
 unmatched or ambiguous PO never produces a row here at all — it stays
-visible only in the staging layer (`ImportedPurchaseOrderCandidate`),
+visible only in the staging layer (`ImportedClientAwardEvidenceCandidate`),
 exactly like an unconfirmed quotation import never produces a
 `Quotation` row.
 
@@ -14,7 +14,7 @@ exactly like an unconfirmed quotation import never produces a
 "orphan PO" business record with no quotation link in this schema. This
 removes an entire class of "PO says project X, quotation says project Y"
 inconsistency by construction — a PO never carries its own project/client
-link; both are always reached via `purchase_order.quotation.project`.
+link; both are always reached via `client_award_evidence.quotation.project`.
 
 `po_reference_number` carries a database-wide unique constraint, the same
 idempotency mechanism `Quotation.reference_number` already uses: it is
@@ -56,13 +56,13 @@ if TYPE_CHECKING:
     from app.models.vendor import Vendor
 
 
-class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
+class ClientAwardEvidence(Base, TimestampMixin, SoftDeleteMixin):
     """A client Purchase Order confirmed as evidence that `quotation` was
     awarded. See module docstring for why `quotation_id` is never null and
     why there is no separate project/client link here."""
 
-    __tablename__ = "purchase_orders"
-    __table_args__ = (UniqueConstraint("po_reference_number", name="uq_purchase_orders_po_reference_number"),)
+    __tablename__ = "client_award_evidence"
+    __table_args__ = (UniqueConstraint("po_reference_number", name="uq_client_award_evidence_po_reference_number"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     quotation_id: Mapped[int] = mapped_column(ForeignKey("quotations.id"), nullable=False)
@@ -70,12 +70,12 @@ class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
     # The specific quotation revision that was current at the moment this
     # PO triggered award (or, for a later PO confirmed against an
     # already-awarded quotation, the version that was actually awarded —
-    # see `purchase_order_service.confirm_purchase_order_import`). A
+    # see `client_award_evidence_service.confirm_client_award_evidence_import`). A
     # snapshot, never recomputed later, matching
     # `Project.winning_quotation_version_id`'s own "fixed at award time"
     # convention.
     awarded_quotation_version_id: Mapped[int | None] = mapped_column(
-        ForeignKey("quotation_versions.id", use_alter=True, name="fk_purchase_orders_awarded_quotation_version")
+        ForeignKey("quotation_versions.id", use_alter=True, name="fk_client_award_evidence_awarded_quotation_version")
     )
 
     po_reference_number: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -96,6 +96,6 @@ class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
 
     def __repr__(self) -> str:
         return (
-            f"PurchaseOrder(id={self.id!r}, po_reference_number={self.po_reference_number!r}, "
+            f"ClientAwardEvidence(id={self.id!r}, po_reference_number={self.po_reference_number!r}, "
             f"quotation_id={self.quotation_id!r})"
         )

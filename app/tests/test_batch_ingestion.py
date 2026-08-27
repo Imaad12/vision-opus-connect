@@ -10,11 +10,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.core.enums import DocumentSourceType, ExtractionStatus, ImportReviewStatus, PurchaseOrderMatchStatus
+from app.core.enums import DocumentSourceType, ExtractionStatus, ImportReviewStatus, ClientAwardEvidenceMatchStatus
 from app.models import ImportedDocument
 from app.services.import_service import (
     compute_file_hash,
-    ingest_purchase_order_batch,
+    ingest_client_award_evidence_batch,
     ingest_quotation_batch,
     list_imported_documents,
 )
@@ -50,12 +50,12 @@ def test_large_batch_stages_every_new_quotation_file(db_session: Session, tmp_pa
 def test_large_po_batch_stages_every_file_including_unmatched(db_session: Session, tmp_path: Path) -> None:
     paths = [_write_po(tmp_path, f"po_{i}.txt", reference=f"VN/QU/{i:04d}/25") for i in range(30)]
 
-    summary = ingest_purchase_order_batch(db_session, paths)
+    summary = ingest_client_award_evidence_batch(db_session, paths)
 
     assert summary.staged_count == 30
     documents = list_imported_documents(db_session)
     assert len(documents) == 30
-    assert all(d.purchase_order_candidate.match_status == PurchaseOrderMatchStatus.UNMATCHED for d in documents)
+    assert all(d.client_award_evidence_candidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED for d in documents)
 
 
 # --- Duplicate files ---------------------------------------------------------------
@@ -155,13 +155,13 @@ def test_batch_resumes_a_po_document_interrupted_mid_extraction(db_session: Sess
     db_session.add(document)
     db_session.flush()
 
-    summary = ingest_purchase_order_batch(db_session, [path])
+    summary = ingest_client_award_evidence_batch(db_session, [path])
 
     assert summary.resumed_count == 1
     db_session.refresh(document)
     assert document.extraction_status == ExtractionStatus.EXTRACTION_COMPLETE
-    assert document.purchase_order_candidate is not None
-    assert document.purchase_order_candidate.po_reference_number == "VN/QU/500/25"
+    assert document.client_award_evidence_candidate is not None
+    assert document.client_award_evidence_candidate.po_reference_number == "VN/QU/500/25"
     assert len(list_imported_documents(db_session)) == 1
 
 

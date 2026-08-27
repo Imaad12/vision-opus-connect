@@ -42,7 +42,7 @@ from app.importers.base import ExtractedTable
 
 
 @dataclass
-class PurchaseOrderCandidateFields:
+class ClientAwardEvidenceCandidateFields:
     po_reference_number: str | None = None
     po_date: date | None = None
     currency: str | None = None
@@ -183,7 +183,7 @@ def _find_po_grand_total_without_separator(text: str | None, tables: list[Extrac
     return None
 
 
-def _apply_field(result: PurchaseOrderCandidateFields, field_name: str, raw_value: str) -> None:
+def _apply_field(result: ClientAwardEvidenceCandidateFields, field_name: str, raw_value: str) -> None:
     result.raw_values[field_name] = raw_value
 
     if field_name == "po_date":
@@ -220,16 +220,16 @@ def _apply_field(result: PurchaseOrderCandidateFields, field_name: str, raw_valu
     result.field_confidence[field_name] = ConfidenceLevel.HIGH.value
 
 
-def extract_purchase_order_candidate(
+def extract_client_award_evidence_candidate(
     text: str | None, tables: list[ExtractedTable]
-) -> PurchaseOrderCandidateFields:
+) -> ClientAwardEvidenceCandidateFields:
     """Scan `text`/`tables` for PO-shaped fields using the same
     first-match-wins, longer-label-first discipline as
     `import_extraction.extract_quotation_candidate`. Purely deterministic
     pattern matching and arithmetic -- no AI/ML model, matching this
     project's project-wide rule that no financial figure is ever
     determined by a language model."""
-    result = PurchaseOrderCandidateFields()
+    result = ClientAwardEvidenceCandidateFields()
     lines = _candidate_lines(text, tables)
     found: set[str] = set()
 
@@ -280,4 +280,4 @@ def extract_purchase_order_candidate(
     return result
 
 
-__all__ = ["PurchaseOrderCandidateFields", "extract_purchase_order_candidate"]
+__all__ = ["ClientAwardEvidenceCandidateFields", "extract_client_award_evidence_candidate"]

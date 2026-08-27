@@ -1,23 +1,23 @@
 """Purchase Order matching, confirmation, and award (PO ingestion foundation).
 
 This is the PO-side counterpart to `quotation_service.py`: the only place
-a `PurchaseOrder` business record is created, and the only caller of
+a `ClientAwardEvidence` business record is created, and the only caller of
 `quotation_service.mark_awarded` that is triggered by something other than
 an explicit "Award" click on the Quotations screen. See
 PO_ARCHITECTURE.md for the full design and `app.services.import_service`
 for the staging/OCR pipeline this sits downstream of
-(`stage_purchase_order_document` / `run_po_extraction`).
+(`stage_client_award_evidence_document` / `run_po_extraction`).
 
 The authoritative linkage rule, unchanged from the design: a PO's
 extracted `po_reference_number` must match exactly one existing
 `Quotation.reference_number` (whitespace-normalized comparison only — no
 fuzzy/similarity matching). Anything else (no match, more than one match)
-is recorded as `PurchaseOrderMatchStatus.UNMATCHED`/`AMBIGUOUS` on the
-staging candidate and can never produce a `PurchaseOrder` row or an
+is recorded as `ClientAwardEvidenceMatchStatus.UNMATCHED`/`AMBIGUOUS` on the
+staging candidate and can never produce a `ClientAwardEvidence` row or an
 award — see `app.services.po_matching.match_quotation_for_reference`,
 which computes this at extraction time.
 
-Quotation history is never touched here: `confirm_purchase_order_import`
+Quotation history is never touched here: `confirm_client_award_evidence_import`
 only ever calls the existing, unmodified `quotation_service.mark_awarded`
 (itself a one-shot, non-re-editable transition) — it never creates a
 `QuotationVersion`, never edits one, and never writes to `Quotation`
@@ -38,18 +38,18 @@ from app.core.enums import (
     Currency,
     ImportAuditEventType,
     ImportReviewStatus,
-    PurchaseOrderMatchStatus,
+    ClientAwardEvidenceMatchStatus,
 )
 from app.core.import_normalization import normalize_whitespace
-from app.models import ImportAuditLogEntry, ImportedDocument, ImportedPurchaseOrderCandidate, PurchaseOrder, Quotation
+from app.models import ImportAuditLogEntry, ImportedDocument, ImportedClientAwardEvidenceCandidate, ClientAwardEvidence, Quotation
 from app.services import quotation_service
 from app.services.errors import ValidationError
 from app.services.po_matching import match_quotation_for_reference
 
 __all__ = [
-    "confirm_purchase_order_import",
-    "reject_purchase_order_import",
-    "reconcile_unmatched_purchase_orders",
+    "confirm_client_award_evidence_import",
+    "reject_client_award_evidence_import",
+    "reconcile_unmatched_client_award_evidence",
 ]
 
 
@@ -62,9 +62,9 @@ def _log(
 ) -> None:
     # Duplicated from `app.services.import_service._log` (trivial, ~10
     # lines) rather than imported, deliberately: `import_service.py` needs
-    # to call `reconcile_unmatched_purchase_orders` below after confirming
+    # to call `reconcile_unmatched_client_award_evidence` below after confirming
     # a new quotation, and importing `_log` from there would make that a
-    # circular import (import_service -> purchase_order_service ->
+    # circular import (import_service -> client_award_evidence_service ->
     # import_service). Behavior is identical.
     session.add(
         ImportAuditLogEntry(
@@ -75,18 +75,18 @@ def _log(
     )
 
 
-def _find_existing_purchase_order(session: Session, po_reference_number: str) -> PurchaseOrder | None:
-    stmt = select(PurchaseOrder).where(PurchaseOrder.po_reference_number == po_reference_number)
+def _find_existing_client_award_evidence(session: Session, po_reference_number: str) -> ClientAwardEvidence | None:
+    stmt = select(ClientAwardEvidence).where(ClientAwardEvidence.po_reference_number == po_reference_number)
     return session.execute(stmt).scalars().first()
 
 
-def confirm_purchase_order_import(session: Session, document: ImportedDocument) -> PurchaseOrder:
+def confirm_client_award_evidence_import(session: Session, document: ImportedDocument) -> ClientAwardEvidence:
     """Write a locally-staged, exactly-matched PO candidate into the
-    `PurchaseOrder` table and — the first time this happens for the
+    `ClientAwardEvidence` table and — the first time this happens for the
     matched quotation — award it via the existing, unmodified
     `quotation_service.mark_awarded`.
 
-    Idempotent by `PurchaseOrder.po_reference_number`: if a `PurchaseOrder`
+    Idempotent by `ClientAwardEvidence.po_reference_number`: if a `ClientAwardEvidence`
     with this exact reference already exists (e.g. this same PO was
     already confirmed from a different staged copy, or this function is
     called twice for the same candidate), no new row and no second award
@@ -114,17 +114,17 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
     if document.review_status == ImportReviewStatus.REJECTED:
         raise ValidationError("This PO import was rejected. Re-import the file to confirm it instead.")
 
-    candidate = document.purchase_order_candidate
+    candidate = document.client_award_evidence_candidate
     if candidate is None:
         raise ValidationError("Nothing to confirm — PO extraction did not produce any candidate data.")
 
-    if candidate.match_status == PurchaseOrderMatchStatus.UNMATCHED:
+    if candidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED:
         raise ValidationError(
             "This PO's reference number did not match any existing quotation. Correct the extracted "
             "reference and re-match before confirming — a PO can never be confirmed without an exact "
             "quotation match."
         )
-    if candidate.match_status == PurchaseOrderMatchStatus.AMBIGUOUS:
+    if candidate.match_status == ClientAwardEvidenceMatchStatus.AMBIGUOUS:
         raise ValidationError(
             "This PO's reference number matches more than one quotation "
             f"(ids: {candidate.candidate_quotation_ids}). Resolve the ambiguity manually before confirming — "
@@ -135,11 +135,11 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
     if not normalized_reference:
         raise ValidationError("This PO has no reference number to confirm against.")
 
-    existing = _find_existing_purchase_order(session, normalized_reference)
+    existing = _find_existing_client_award_evidence(session, normalized_reference)
     if existing is not None:
         document.review_status = ImportReviewStatus.CONFIRMED
         document.confirmed_at = datetime.now(UTC).replace(tzinfo=None)
-        document.resulting_purchase_order_id = existing.id
+        document.resulting_client_award_evidence_id = existing.id
         _log(
             session,
             document,
@@ -188,11 +188,11 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
     # vendor named on this PO (if any) was deterministically matched to
     # an existing `Vendor` at extraction time -- an UNMATCHED or
     # AMBIGUOUS vendor identity is never guessed, and never blocks
-    # confirming the PO itself (see `ImportedPurchaseOrderCandidate`'s
+    # confirming the PO itself (see `ImportedClientAwardEvidenceCandidate`'s
     # own docstring).
-    vendor_id = candidate.matched_vendor_id if candidate.vendor_match_status == PurchaseOrderMatchStatus.MATCHED else None
+    vendor_id = candidate.matched_vendor_id if candidate.vendor_match_status == ClientAwardEvidenceMatchStatus.MATCHED else None
 
-    purchase_order = PurchaseOrder(
+    client_award_evidence = ClientAwardEvidence(
         quotation_id=quotation.id,
         vendor_id=vendor_id,
         po_reference_number=normalized_reference,
@@ -203,18 +203,18 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
         currency=currency_enum,
         notes=candidate.notes,
     )
-    session.add(purchase_order)
+    session.add(client_award_evidence)
     session.flush()
 
     if already_awarded:
-        purchase_order.awarded_quotation_version_id = project.winning_quotation_version_id
+        client_award_evidence.awarded_quotation_version_id = project.winning_quotation_version_id
         note = (
             f"Purchase order '{normalized_reference}' confirmed against already-awarded quotation "
             f"'{quotation.reference_number}' — recorded as additional evidence; no new award was made."
         )
     else:
         quotation_service.mark_awarded(session, current_version, contract_value=contract_value)
-        purchase_order.awarded_quotation_version_id = current_version.id
+        client_award_evidence.awarded_quotation_version_id = current_version.id
         note = (
             f"Purchase order '{normalized_reference}' confirmed and matched to quotation "
             f"'{quotation.reference_number}' — quotation version #{current_version.id} marked AWARDED "
@@ -223,13 +223,13 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
 
     document.review_status = ImportReviewStatus.CONFIRMED
     document.confirmed_at = datetime.now(UTC).replace(tzinfo=None)
-    document.resulting_purchase_order_id = purchase_order.id
+    document.resulting_client_award_evidence_id = client_award_evidence.id
     _log(session, document, ImportAuditEventType.CONFIRMED, note=note)
     session.flush()
-    return purchase_order
+    return client_award_evidence
 
 
-def reject_purchase_order_import(session: Session, document: ImportedDocument, *, reason: str | None = None) -> ImportedDocument:
+def reject_client_award_evidence_import(session: Session, document: ImportedDocument, *, reason: str | None = None) -> ImportedDocument:
     if document.review_status == ImportReviewStatus.CONFIRMED:
         raise ValidationError("Cannot reject a PO import that has already been confirmed.")
 
@@ -240,7 +240,7 @@ def reject_purchase_order_import(session: Session, document: ImportedDocument, *
     return document
 
 
-def reconcile_unmatched_purchase_orders(session: Session) -> list[PurchaseOrder]:
+def reconcile_unmatched_client_award_evidence(session: Session) -> list[ClientAwardEvidence]:
     """Re-run exact-reference matching for every currently `UNMATCHED`,
     not-yet-resolved PO candidate — call this after a brand-new
     `Quotation` is created (never for a revision: a revision never
@@ -257,7 +257,7 @@ def reconcile_unmatched_purchase_orders(session: Session) -> list[PurchaseOrder]
 
     Reuses `match_quotation_for_reference` — identical exact,
     whitespace-normalized matching rules as at extraction time, no
-    separate or looser logic — and `confirm_purchase_order_import` —
+    separate or looser logic — and `confirm_client_award_evidence_import` —
     identical award rules as a manual confirmation, including its
     one-shot `mark_awarded` guard and its "already-awarded quotation gets
     evidence-only" behavior. A candidate that newly resolves to
@@ -268,23 +268,23 @@ def reconcile_unmatched_purchase_orders(session: Session) -> list[PurchaseOrder]
     `MATCHED` for a human to complete manually — this never raises.
     Never touches a `CONFIRMED` or `REJECTED` document.
 
-    Returns every `PurchaseOrder` created/awarded this way (empty if
+    Returns every `ClientAwardEvidence` created/awarded this way (empty if
     nothing was reconciled).
     """
     stmt = (
-        select(ImportedPurchaseOrderCandidate)
-        .join(ImportedDocument, ImportedPurchaseOrderCandidate.imported_document_id == ImportedDocument.id)
+        select(ImportedClientAwardEvidenceCandidate)
+        .join(ImportedDocument, ImportedClientAwardEvidenceCandidate.imported_document_id == ImportedDocument.id)
         .where(
-            ImportedPurchaseOrderCandidate.match_status == PurchaseOrderMatchStatus.UNMATCHED,
+            ImportedClientAwardEvidenceCandidate.match_status == ClientAwardEvidenceMatchStatus.UNMATCHED,
             ImportedDocument.review_status == ImportReviewStatus.NEEDS_REVIEW,
         )
     )
     candidates = session.execute(stmt).scalars().all()
 
-    reconciled: list[PurchaseOrder] = []
+    reconciled: list[ClientAwardEvidence] = []
     for candidate in candidates:
         outcome = match_quotation_for_reference(session, candidate.po_reference_number)
-        if outcome.status == PurchaseOrderMatchStatus.UNMATCHED:
+        if outcome.status == ClientAwardEvidenceMatchStatus.UNMATCHED:
             continue  # still nothing to link -- unchanged
 
         candidate.match_status = outcome.status
@@ -294,11 +294,11 @@ def reconcile_unmatched_purchase_orders(session: Session) -> list[PurchaseOrder]
         )
         session.flush()
 
-        if outcome.status != PurchaseOrderMatchStatus.MATCHED:
+        if outcome.status != ClientAwardEvidenceMatchStatus.MATCHED:
             continue  # AMBIGUOUS -- updated for review, never auto-confirmed
 
         try:
-            reconciled.append(confirm_purchase_order_import(session, candidate.document))
+            reconciled.append(confirm_client_award_evidence_import(session, candidate.document))
         except ValidationError:
             continue  # matched, but not confirmable yet -- left MATCHED for manual review
 
