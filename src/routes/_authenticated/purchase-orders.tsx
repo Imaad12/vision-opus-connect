@@ -11,10 +11,10 @@ const config: ResourceConfig = {
     ar: "أوامر الموردين مع البنود والضريبة واعتماد مستقل.",
   },
   perms: {
-    view: ["po.view"],
-    create: ["po.create"],
-    edit: ["po.edit"],
-    remove: ["po.delete"],
+    view: ["purchasing.po_create", "purchasing.po_approve", "purchasing.request"],
+    create: ["purchasing.po_create"],
+    edit: ["purchasing.po_create", "purchasing.po_approve", "purchasing.receive"],
+    remove: ["purchasing.po_approve"],
   },
   columns: [
     { key: "po_no", label: { en: "No.", ar: "الرقم" } },
@@ -63,8 +63,8 @@ const config: ResourceConfig = {
       <ApprovalActions
         row={row}
         table="purchase_orders"
-        submitPerms={["po.create", "po.edit"]}
-        approvePerms={["po.approve"]}
+        submitPerms={["purchasing.po_create", "purchasing.receive"]}
+        approvePerms={["purchasing.po_approve"]}
         refresh={refresh}
       />
     </>

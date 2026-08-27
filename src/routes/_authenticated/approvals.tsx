@@ -42,8 +42,8 @@ function ApprovalsPage() {
 
   const sections = [
     { table: "quotations", label: t("nav.quotations"), rows: queue.data?.quotations ?? [], noKey: "quote_no", perms: ["quotations.approve"] },
-    { table: "purchase_orders", label: t("nav.purchase_orders"), rows: queue.data?.purchase_orders ?? [], noKey: "po_no", perms: ["po.approve"] },
-    { table: "expenses", label: t("nav.expenses"), rows: queue.data?.expenses ?? [], noKey: "expense_no", perms: ["expenses.approve"] },
+    { table: "purchase_orders", label: t("nav.purchase_orders"), rows: queue.data?.purchase_orders ?? [], noKey: "po_no", perms: ["purchasing.po_approve"] },
+    { table: "expenses", label: t("nav.expenses"), rows: queue.data?.expenses ?? [], noKey: "expense_no", perms: ["finance.expenses"] },
   ];
 
   return (
