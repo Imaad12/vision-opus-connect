@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { lovable } from "@/integrations/lovable/index";
 import { supabase } from "@/integrations/supabase/client";
 import { useI18n } from "@/lib/i18n";
 
@@ -26,16 +25,18 @@ export function SignInScreen() {
 
   const signIn = async () => {
     setBusy(true);
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: window.location.origin,
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin + "/dashboard" },
     });
-    if (result.error) {
+    if (error) {
       setBusy(false);
-      toast.error(result.error.message ?? "Sign-in failed");
+      toast.error(error.message ?? "Sign-in failed");
       return;
     }
-    if (result.redirected) return;
-    navigate({ to: "/dashboard" });
+    // On success, Supabase redirects the browser to Google immediately --
+    // there is no further local state to update here before the page
+    // navigates away.
   };
 
   return (
