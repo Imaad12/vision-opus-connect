@@ -17,6 +17,10 @@ packaging (`.app`/DMG). See `ARCHITECTURE.md`, `DATABASE_SCHEMA.md`,
 `FINANCIAL_MODEL.md`, `UI_ARCHITECTURE.md`, and `IMPORT_ARCHITECTURE.md`
 for the design, and "Roadmap" below for what comes next.
 
+A FastAPI layer (`app/api/`) is now being built alongside the desktop UI
+so the existing VINCO web frontend can call this same backend instead of
+its own separate database — see `API_ARCHITECTURE.md`.
+
 ## Requirements
 
 - Python 3.12+
@@ -80,6 +84,18 @@ alembic revision --autogenerate -m "describe the change"
 alembic upgrade head
 ```
 
+## Running the API
+
+```bash
+export VISION_SUPABASE_URL=...        # the VINCO frontend's Supabase project URL
+export VISION_SUPABASE_ANON_KEY=...   # its publishable/anon key (not a secret)
+uvicorn app.api.main:app --reload
+```
+
+See `API_ARCHITECTURE.md` for what this exposes, why identity/permissions
+are verified against the frontend's existing Supabase project rather than
+duplicated here, and what's built so far.
+
 ## Launching the desktop application
 
 ```bash
@@ -140,6 +156,8 @@ See `ARCHITECTURE.md` for the full explanation. Short version:
 
 ```
 app/
+    api/           FastAPI layer exposing the service layer to the VINCO
+                   frontend over HTTP — see API_ARCHITECTURE.md
     core/          money/currency types, the financial calculation engine,
                    import_normalization.py + import_extraction.py (pure,
                    deterministic candidate-data extraction, see
