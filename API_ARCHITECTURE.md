@@ -281,11 +281,52 @@ Design notes:
   recorded `Payment` is a financial event, not an editable/removable
   draft.
 
+## 6.4 Management layer (Milestone 3)
+
+New `management_service.py` -- pure aggregation over rows the services
+above already validate and write; no new financial formula, only new
+groupings of existing ones (`app.core.financial_engine`'s retention/
+outstanding-balance/net-of-tax functions, reused verbatim).
+
+| Route | Permission | Notes |
+|---|---|---|
+| `GET /management/dashboard-summary` | any authenticated user | `dashboard_service.build_dashboard_summary`, unchanged since Phase 3 -- now fed by real `Invoice`/`Payment` rows since Milestone 2 |
+| `GET /management/project-profitability` | `finance.reports` | Real (actual, not quoted/estimated) profit/margin per project, most profitable first; a project with no revenue yet sorts last, not first |
+| `GET /management/vendor-spend` | `finance.reports` | Per-vendor PO commitment / invoiced / paid / outstanding-payable, mirroring the client-side invoice math per project, grouped by vendor instead |
+| `GET /management/cash-flow` | `finance.reports` | Portfolio cash in (client `Payment`s) vs. cash out (vendor `Payment`s) -- from recorded payments, never invoice face values |
+| `GET /management/operating-income` | `finance.reports` | `total_actual_profit - total_payroll_paid` (only `PayrollRecord`s with `status=PAID`) |
+
+`GET /management/dashboard-summary` is deliberately ungated beyond
+authentication, same rule as `GET /company/me` -- it's a portfolio
+headline count, not a financial detail. The other four use
+`finance.reports`, the permission the frontend nav already treats as the
+general finance-reporting read grant (see `nav.invoices` etc. in
+app-shell.tsx, which all already accept it as an alternative to their own
+domain permission).
+
+**Operating income is deliberately narrow**: there is no general
+company-overhead/G&A expense concept in this system (every `ActualCost`
+row requires a `project_id`), so "operating income" here is exactly
+`total actual profit - total paid payroll` -- an honest, currently-
+computable figure, not a placeholder for a fuller P&L that would need a
+new expense category this milestone doesn't introduce.
+
+Also fixed this milestone (not new API, a correctness fix): the
+frontend's `approvals.tsx` had been reading Supabase's `quotations`/
+`purchase_orders`/`expenses` tables directly, all three of which stopped
+receiving new rows once those pages were cut over to this backend across
+Phase A/Milestone 1/Milestone 2 -- the queue had been silently empty.
+Rebuilt against `GET /quotations`, `POST /quotation-versions/{id}/award`/
+`.../lose`, and `GET/POST /purchase-orders/{id}/approve`/`.../reject`.
+There is no Expenses section anymore: `ActualCost`/`cost_service` has no
+submit/approve lifecycle (only a plain `payment_status`), so the
+"approved by a second person" expense workflow the old UI implied does
+not exist server-side -- a real gap, not silently wired to nothing.
+
 ## 7. Next slices
 
 Vendor invoices already ride on the same `Invoice`/`direction=VENDOR`
-model exposed above -- no further work needed there. Remaining: the
-quotation-shape and vendor/project-field reconciliations noted in §6.1,
-and the Management layer (dashboard, cash flow, project profitability,
-vendor analytics), each a real, scoped decision rather than an API
-afterthought.
+model exposed above -- no further work needed there. The quotation-shape
+and vendor/project-field reconciliations noted in §6.1 remain open.
+A dedicated expense approval lifecycle (see §6.4) would close the last
+"second-person approval" gap called out across Finance.

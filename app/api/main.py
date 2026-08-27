@@ -23,6 +23,7 @@ from app.api.routers import (
     invoices,
     leads,
     lookups,
+    management,
     payments,
     payroll,
     projects,
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(leads.router)
     app.include_router(employees.router)
     app.include_router(payroll.router)
+    app.include_router(management.router)
 
     return app
 
