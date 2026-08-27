@@ -61,7 +61,7 @@ def unawarded_project_id(api_client: TestClient) -> int:
     return project["id"]
 
 
-def test_create_contract_for_an_awarded_project(api_client: TestClient, awarded_project_id: int):
+def test_create_contract_and_list_it(api_client: TestClient, awarded_project_id: int):
     response = api_client.post(
         f"/projects/{awarded_project_id}/contracts",
         json={"contract_number": "CTR-2026-001", "signed_date": "2026-01-15"},
@@ -70,6 +70,13 @@ def test_create_contract_for_an_awarded_project(api_client: TestClient, awarded_
     assert response.status_code == 201
     body = response.json()
     assert body["project_id"] == awarded_project_id
+    assert body["project"]["name"] == "Logistics Hub"
+    assert body["project"]["client"]["name"] == "Al Zamil Group"
+
+    listing = api_client.get("/contracts")
+    assert listing.status_code == 200
+    numbers = [c["contract_number"] for c in listing.json()]
+    assert "CTR-2026-001" in numbers
     assert body["contract_number"] == "CTR-2026-001"
     assert body["value"] == "500000.00"
     assert body["status"] == "DRAFT"

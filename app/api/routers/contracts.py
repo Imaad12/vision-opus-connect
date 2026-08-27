@@ -27,6 +27,14 @@ def _get_contract_or_404(session: Session, contract_id: int):
     return contract
 
 
+@router.get("/contracts", response_model=list[ContractRead])
+def list_contracts(
+    session: Session = Depends(get_db),
+    _user=Depends(require_permission("contracts.view")),
+) -> list[ContractRead]:
+    return list(contract_service.list_contracts(session))
+
+
 @router.get("/projects/{project_id}/contract", response_model=ContractRead)
 def get_contract_for_project(
     project_id: int,

@@ -211,6 +211,7 @@ class ContractRead(BaseModel):
 
     id: int
     project_id: int
+    project: ProjectSummary
     quotation_version_id: int
     contract_number: str | None
     value: Decimal

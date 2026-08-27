@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.enums import ContractStatus, ProjectStatus
 from app.models import Contract, Project, QuotationVersion
@@ -21,6 +21,7 @@ from app.services.errors import ValidationError
 
 __all__ = [
     "ValidationError",
+    "list_contracts",
     "get_contract",
     "get_contract_for_project",
     "create_contract",
@@ -28,6 +29,19 @@ __all__ = [
     "complete_contract",
     "terminate_contract",
 ]
+
+
+def list_contracts(session: Session) -> list[Contract]:
+    """All contracts, newest first -- the data behind the global
+    Contracts page. Eagerly loads `project.client` for display, same
+    pattern as `quotation_service.list_quotation_versions`."""
+    stmt = (
+        select(Contract)
+        .options(joinedload(Contract.project).joinedload(Project.client))
+        .where(Contract.is_deleted.is_(False))
+        .order_by(Contract.id.desc())
+    )
+    return list(session.execute(stmt).scalars().all())
 
 
 def get_contract(session: Session, contract_id: int) -> Contract | None:
