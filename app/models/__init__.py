@@ -22,7 +22,10 @@ from app.models.invoice import Invoice, Payment
 from app.models.lookups import CostCategory, Trade
 from app.models.project import Project, ProjectStatusHistory
 from app.models.client_award_evidence import ClientAwardEvidence
+from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
+from app.models.purchase_request import PurchaseRequest
 from app.models.quotation import Quotation, QuotationVersion
+from app.models.receipt import Receipt, ReceiptLine
 from app.models.variation import ProjectVariation
 from app.models.vendor import Vendor
 
@@ -49,8 +52,13 @@ __all__ = [
     "Project",
     "ProjectStatusHistory",
     "ClientAwardEvidence",
+    "PurchaseOrder",
+    "PurchaseOrderLine",
+    "PurchaseRequest",
     "Quotation",
     "QuotationVersion",
+    "Receipt",
+    "ReceiptLine",
     "ProjectVariation",
     "Vendor",
 ]

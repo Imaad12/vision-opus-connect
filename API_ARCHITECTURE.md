@@ -195,13 +195,39 @@ introduced).
   step in the backend beyond submit/award — `QuotationStatus` doesn't
   have one — so no approval endpoint was invented.
 
+## 6.2 Procurement (Milestone 1)
+
+The naming collision is resolved: the client-award-evidence concept is
+`ClientAwardEvidence` (see `PO_ARCHITECTURE.md`'s naming note), and
+`PurchaseOrder` now means the real ERP concept -- an outbound order to a
+vendor. New domain, following the same pattern as everything above (new
+models, `purchase_request_service.py`/`purchase_order_service.py`/
+`receipt_service.py`, `app/api/schemas_procurement.py`,
+`app/api/routers/{purchase_requests,purchase_orders,receipts}.py`):
+
+| Route | Permission | Service |
+|---|---|---|
+| `GET/POST /purchase-requests`, `GET /purchase-requests/{id}` | `purchasing.request` | `purchase_request_service` |
+| `POST /purchase-requests/{id}/submit` | `purchasing.request` | " |
+| `POST /purchase-requests/{id}/approve`, `.../reject` | `purchasing.po_approve` | " |
+| `GET/POST /purchase-orders`, `GET /purchase-orders/{id}` | `purchasing.po_create` | `purchase_order_service` |
+| `PUT /purchase-orders/{id}/lines` | `purchasing.po_create` | " (recomputes subtotal/VAT/total; DRAFT only) |
+| `POST /purchase-orders/{id}/submit` | `purchasing.po_create` | " |
+| `POST /purchase-orders/{id}/approve`, `.../reject`, `.../cancel` | `purchasing.po_approve` | " |
+| `GET/POST /purchase-orders/{id}/receipts`, `GET /receipts/{id}` | `purchasing.receive` | `receipt_service` |
+| `POST /receipts/{id}/cancel` | `purchasing.receive` | " (reverses received quantities) |
+
+`PurchaseOrderStatus` mirrors the frontend's existing `po_status` values
+(`DRAFT/PENDING_APPROVAL/APPROVED/REJECTED/PARTIALLY_RECEIVED/RECEIVED/
+CANCELLED`) deliberately, so the existing Purchase Orders page needs a
+data-source swap, not a new status vocabulary. No warehouse/inventory
+concepts (locations, bins, on-hand stock) -- a `Receipt` only moves
+`PurchaseOrderLine.received_quantity` and the PO's own status.
+
 ## 7. Next slices
 
-Purchase Orders is intentionally not next — see the standing PO-naming
-decision (backend `PurchaseOrder` = client-award evidence vs. the
-frontend's outbound-supplier-order concept) that must be resolved before
-any wiring there. After that: Invoices/Payments/Expenses (no dedicated
-service module yet — one would need to be added first, following
-`vendor_service.py`'s pattern), then the quotation-shape and
-vendor/project-field reconciliations above, each of which is a real,
-scoped decision rather than an API afterthought.
+Vendor invoices (Finance, Milestone 2) — no dedicated service module yet
+for `Invoice`/`Payment`/expenses; one is needed following
+`vendor_service.py`'s pattern. Then the quotation-shape and
+vendor/project-field reconciliations noted above, each a real, scoped
+decision rather than an API afterthought.

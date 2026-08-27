@@ -62,6 +62,33 @@ class InvoiceDirection(StrEnum):
     VENDOR = "VENDOR"
 
 
+class PurchaseRequestStatus(StrEnum):
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+
+
+class PurchaseOrderStatus(StrEnum):
+    """Mirrors the VINCO frontend's real `po_status` vocabulary (see
+    API_ARCHITECTURE.md) so the existing Purchase Orders page can be
+    wired to this API without inventing a second status vocabulary."""
+
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"
+    RECEIVED = "RECEIVED"
+    CANCELLED = "CANCELLED"
+
+
+class ReceiptStatus(StrEnum):
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
 class InvoiceStatus(StrEnum):
     DRAFT = "DRAFT"
     ISSUED = "ISSUED"
