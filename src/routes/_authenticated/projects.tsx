@@ -2,81 +2,98 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { ResourcePage, type ResourceConfig } from "@/components/resource-page";
 
+// Backed by the backend's own `Project` model (`/projects`), not
+// Supabase's `projects` table. The customer dropdown resolves against
+// the backend's own `/clients` (see `customers.tsx`), not Supabase's
+// `customers` table -- the two have entirely different ids, so mixing
+// them would silently point a project at the wrong customer.
+//
+// Not shown here, on purpose: `manager_id`, `location`, `budget_cost`,
+// `progress_percent` (no backend equivalent yet), and a directly
+// editable `contract_value` -- the backend only ever sets that once, via
+// awarding a quotation (see the Quotations screen once wired), never
+// through a direct project edit. It's shown read-only below instead of
+// silently accepting and dropping an edited value.
+// `status` uses the backend's real lifecycle (LEAD/TENDERING/SUBMITTED/
+// AWARDED/LOST/IN_PROGRESS/ON_HOLD/COMPLETED/CLOSED/CANCELLED), not
+// Supabase's planning/active/on_hold/completed/archived/cancelled.
 const config: ResourceConfig = {
   table: "projects",
   title: { en: "Projects", ar: "المشاريع" },
   description: {
-    en: "Delivery portfolio with schedule, value and progress.",
-    ar: "محفظة التنفيذ مع الجدول الزمني والقيمة والتقدم.",
+    en: "Delivery portfolio with schedule and status.",
+    ar: "محفظة التنفيذ مع الجدول الزمني والحالة.",
   },
   perms: {
     view: ["projects.view"],
     create: ["projects.create"],
     edit: ["projects.edit"],
-    remove: ["projects.delete"],
   },
+  backend: { basePath: "/projects" },
   columns: [
-    { key: "project_no", label: { en: "No.", ar: "الرقم" } },
+    { key: "project_code", label: { en: "No.", ar: "الرقم" } },
     { key: "name", label: { en: "Project", ar: "المشروع" } },
-    { key: "customer_id", label: { en: "Customer", ar: "العميل" }, kind: "ref" },
-    { key: "contract_value", label: { en: "Value", ar: "القيمة" }, kind: "money" },
-    { key: "progress_percent", label: { en: "Progress", ar: "التقدم" }, kind: "percent" },
-    { key: "end_date", label: { en: "End date", ar: "تاريخ الانتهاء" }, kind: "date" },
-    { key: "manager_id", label: { en: "Manager", ar: "مدير المشروع" }, kind: "ref" },
+    { key: "client_id", label: { en: "Customer", ar: "العميل" }, kind: "ref" },
+    { key: "contract_value", label: { en: "Contract value", ar: "قيمة العقد" }, kind: "money" },
+    { key: "start_date", label: { en: "Start date", ar: "تاريخ البداية" }, kind: "date" },
+    {
+      key: "planned_completion_date",
+      label: { en: "Expected completion", ar: "الانتهاء المتوقع" },
+      kind: "date",
+    },
     { key: "status", label: { en: "Status", ar: "الحالة" }, kind: "status" },
   ],
   fields: [
     { key: "name", label: { en: "Project name", ar: "اسم المشروع" }, kind: "text", required: true },
     {
-      key: "customer_id",
+      key: "client_id",
       label: { en: "Customer", ar: "العميل" },
       kind: "ref",
-      ref: { table: "customers", labelCol: "name" },
+      ref: { table: "clients", labelCol: "name", backendPath: "/clients" },
       required: true,
       half: true,
     },
-    { key: "manager_id", label: { en: "Project manager", ar: "مدير المشروع" }, kind: "profile", half: true },
-    { key: "location", label: { en: "Site location", ar: "موقع المشروع" }, kind: "text", half: true },
+    {
+      key: "project_code",
+      label: { en: "Project no.", ar: "رقم المشروع" },
+      kind: "text",
+      half: true,
+    },
     {
       key: "status",
       label: { en: "Status", ar: "الحالة" },
       kind: "select",
-      defaultValue: "planning",
+      defaultValue: "LEAD",
       half: true,
       options: [
-        { value: "planning", label: { en: "Planning", ar: "تخطيط" } },
-        { value: "active", label: { en: "Active", ar: "قائم" } },
-        { value: "on_hold", label: { en: "On hold", ar: "معلق" } },
-        { value: "completed", label: { en: "Completed", ar: "مكتمل" } },
-        { value: "cancelled", label: { en: "Cancelled", ar: "ملغى" } },
+        { value: "LEAD", label: { en: "Lead", ar: "فرصة" } },
+        { value: "TENDERING", label: { en: "Tendering", ar: "مناقصة" } },
+        { value: "SUBMITTED", label: { en: "Submitted", ar: "مُقدَّم" } },
+        { value: "AWARDED", label: { en: "Awarded", ar: "مُرسى" } },
+        { value: "LOST", label: { en: "Lost", ar: "خسارة" } },
+        { value: "IN_PROGRESS", label: { en: "In progress", ar: "قيد التنفيذ" } },
+        { value: "ON_HOLD", label: { en: "On hold", ar: "معلق" } },
+        { value: "COMPLETED", label: { en: "Completed", ar: "مكتمل" } },
+        { value: "CLOSED", label: { en: "Closed", ar: "مغلق" } },
+        { value: "CANCELLED", label: { en: "Cancelled", ar: "ملغى" } },
       ],
     },
-    { key: "start_date", label: { en: "Start date", ar: "تاريخ البداية" }, kind: "date", half: true },
-    { key: "end_date", label: { en: "End date", ar: "تاريخ الانتهاء" }, kind: "date", half: true },
     {
-      key: "contract_value",
-      label: { en: "Contract value (SAR)", ar: "قيمة العقد (ر.س)" },
-      kind: "number",
-      defaultValue: 0,
+      key: "start_date",
+      label: { en: "Start date", ar: "تاريخ البداية" },
+      kind: "date",
       half: true,
     },
     {
-      key: "budget_cost",
-      label: { en: "Budget cost (SAR)", ar: "الميزانية التقديرية (ر.س)" },
-      kind: "number",
-      defaultValue: 0,
-      half: true,
-    },
-    {
-      key: "progress_percent",
-      label: { en: "Progress %", ar: "نسبة الإنجاز %" },
-      kind: "number",
-      defaultValue: 0,
+      key: "planned_completion_date",
+      label: { en: "Expected completion", ar: "الانتهاء المتوقع" },
+      kind: "date",
       half: true,
     },
     { key: "description", label: { en: "Scope of work", ar: "نطاق العمل" }, kind: "textarea" },
+    { key: "notes", label: { en: "Notes", ar: "ملاحظات" }, kind: "textarea" },
   ],
-  searchKeys: ["project_no", "name", "location", "description"],
+  searchKeys: ["project_code", "name", "description"],
 };
 
 export const Route = createFileRoute("/_authenticated/projects")({
@@ -86,10 +103,10 @@ export const Route = createFileRoute("/_authenticated/projects")({
       {
         name: "description",
         content:
-          "Delivery portfolio for Vision Contracting Co.: contract value, budget, schedule dates and site progress.",
+          "Delivery portfolio for Vision Contracting Co.: schedule, status and contract value.",
       },
       { property: "og:title", content: "Projects — VINCO ERP" },
-      { property: "og:description", content: "Schedule, value and progress across all sites." },
+      { property: "og:description", content: "Schedule and status across all sites." },
     ],
   }),
   component: () => <ResourcePage config={config} />,

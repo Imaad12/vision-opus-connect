@@ -2,69 +2,49 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { ResourcePage, type ResourceConfig } from "@/components/resource-page";
 
+// Backed by the Vision Contracting backend's own database (`Client` /
+// `client_service.py`) via `/clients`, not Supabase's `customers` table.
+// See API_ARCHITECTURE.md in the backend repo: `Client` today only has
+// name/contact_name/contact_email/contact_phone/address/notes, so the
+// richer fields Supabase's `customers` table has (VAT/CR numbers,
+// industry, region, credit limit, payment terms, an account-owner
+// profile link, a status) aren't shown here rather than being silently
+// dropped on save. Restoring them is a real decision (extend `Client`,
+// or keep those fields Supabase-only) for a later pass, not something
+// invented here to keep this form looking the same as before.
 const config: ResourceConfig = {
   table: "customers",
   title: { en: "Customers", ar: "العملاء" },
   description: {
-    en: "Client accounts with VAT and commercial registration details.",
-    ar: "حسابات العملاء مع بيانات الضريبة والسجل التجاري.",
+    en: "Client accounts.",
+    ar: "حسابات العملاء.",
   },
   perms: {
     view: ["customers.view"],
     create: ["customers.create"],
     edit: ["customers.edit"],
-    remove: ["customers.delete"],
   },
+  backend: { basePath: "/clients" },
   columns: [
     { key: "name", label: { en: "Name", ar: "الاسم" } },
-    { key: "city", label: { en: "City", ar: "المدينة" } },
-    { key: "vat_number", label: { en: "VAT no.", ar: "الرقم الضريبي" } },
-    { key: "phone", label: { en: "Phone", ar: "الهاتف" } },
-    { key: "credit_limit", label: { en: "Credit limit", ar: "حد الائتمان" }, kind: "money" },
-    { key: "owner_id", label: { en: "Account owner", ar: "مسؤول الحساب" } },
-    { key: "status", label: { en: "Status", ar: "الحالة" }, kind: "status" },
+    { key: "contact_name", label: { en: "Contact", ar: "جهة الاتصال" } },
+    { key: "contact_phone", label: { en: "Phone", ar: "الهاتف" } },
+    { key: "contact_email", label: { en: "Email", ar: "البريد" } },
   ],
   fields: [
-    { key: "name", label: { en: "Name (EN)", ar: "الاسم (إنجليزي)" }, kind: "text", required: true, half: true },
-    { key: "name_ar", label: { en: "Name (AR)", ar: "الاسم (عربي)" }, kind: "text", half: true },
-    { key: "vat_number", label: { en: "VAT number", ar: "الرقم الضريبي" }, kind: "text", half: true },
-    { key: "cr_number", label: { en: "CR number", ar: "السجل التجاري" }, kind: "text", half: true },
-    { key: "industry", label: { en: "Sector", ar: "القطاع" }, kind: "text", half: true },
-    { key: "city", label: { en: "City", ar: "المدينة" }, kind: "text", half: true },
-    { key: "region", label: { en: "Region", ar: "المنطقة" }, kind: "text", half: true },
-    { key: "phone", label: { en: "Phone", ar: "الهاتف" }, kind: "text", half: true },
-    { key: "email", label: { en: "Email", ar: "البريد" }, kind: "text", half: true },
-    { key: "website", label: { en: "Website", ar: "الموقع" }, kind: "text", half: true },
+    { key: "name", label: { en: "Name", ar: "الاسم" }, kind: "text", required: true },
     {
-      key: "payment_terms_days",
-      label: { en: "Payment terms (days)", ar: "مدة السداد (يوم)" },
-      kind: "number",
-      defaultValue: 30,
+      key: "contact_name",
+      label: { en: "Contact name", ar: "اسم جهة الاتصال" },
+      kind: "text",
       half: true,
     },
-    {
-      key: "credit_limit",
-      label: { en: "Credit limit (SAR)", ar: "حد الائتمان (ر.س)" },
-      kind: "number",
-      defaultValue: 0,
-      half: true,
-    },
-    { key: "owner_id", label: { en: "Account owner", ar: "مسؤول الحساب" }, kind: "profile", half: true },
-    {
-      key: "status",
-      label: { en: "Status", ar: "الحالة" },
-      kind: "select",
-      defaultValue: "active",
-      half: true,
-      options: [
-        { value: "active", label: { en: "Active", ar: "نشط" } },
-        { value: "inactive", label: { en: "Inactive", ar: "غير نشط" } },
-      ],
-    },
+    { key: "contact_phone", label: { en: "Phone", ar: "الهاتف" }, kind: "text", half: true },
+    { key: "contact_email", label: { en: "Email", ar: "البريد" }, kind: "text", half: true },
     { key: "address", label: { en: "Address", ar: "العنوان" }, kind: "textarea" },
     { key: "notes", label: { en: "Notes", ar: "ملاحظات" }, kind: "textarea" },
   ],
-  searchKeys: ["name", "name_ar", "city", "vat_number", "phone", "email"],
+  searchKeys: ["name", "contact_name", "contact_phone", "contact_email"],
 };
 
 export const Route = createFileRoute("/_authenticated/customers")({
@@ -73,11 +53,10 @@ export const Route = createFileRoute("/_authenticated/customers")({
       { title: "Customers — VINCO ERP" },
       {
         name: "description",
-        content:
-          "Manage Vision Contracting Co. client accounts, VAT and CR numbers, credit limits and account owners.",
+        content: "Manage Vision Contracting Co. client accounts.",
       },
       { property: "og:title", content: "Customers — VINCO ERP" },
-      { property: "og:description", content: "Client accounts, VAT details and credit limits." },
+      { property: "og:description", content: "Client accounts." },
     ],
   }),
   component: () => <ResourcePage config={config} />,

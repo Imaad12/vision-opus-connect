@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
 import { logAudit } from "@/lib/audit";
 import { db, type Row } from "@/lib/db";
 import { formatDate, formatMoney, useI18n, type Lang } from "@/lib/i18n";
@@ -37,11 +38,28 @@ export type FieldDef = {
   options?: { value: string; label: Bilingual }[];
   refTable?: string;
   refLabelColumn?: string;
-  ref?: { table: string; labelCol?: string };
+  // `backendPath` sources this ref's dropdown options from our own API
+  // instead of Supabase -- required whenever the referenced resource has
+  // itself been cut over (its real ids no longer exist in the Supabase
+  // table `table` would otherwise query).
+  ref?: { table: string; labelCol?: string; backendPath?: string };
   required?: boolean;
   defaultValue?: string | number | null;
   half?: boolean;
 };
+
+/**
+ * When set, this resource is served by our own FastAPI backend
+ * (`basePath`, e.g. "/vendors") instead of Supabase's `table`. `table` is
+ * still used as the react-query cache key. Payload shape is intentionally
+ * NOT remapped here: `columns`/`fields` for a backend-backed resource use
+ * the API's real field names directly (see suppliers.tsx/projects.tsx),
+ * so no frontend<->backend translation layer is needed or hidden here.
+ * There is deliberately no `remove` support until a DELETE endpoint
+ * exists -- omit `perms.remove` for these resources rather than wiring a
+ * button to nothing.
+ */
+export type BackendSource = { basePath: string };
 
 export type ResourceConfig = {
   table: string;
@@ -54,6 +72,7 @@ export type ResourceConfig = {
   orderBy?: string;
   extraRowActions?: (row: Row, refresh: () => void) => ReactNode;
   toolbar?: ReactNode;
+  backend?: BackendSource;
 };
 
 function cellValue(row: Row, col: ColumnDef, lang: Lang) {
@@ -96,6 +115,9 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
     queryKey: ["resource", config.table],
     enabled: canView,
     queryFn: async () => {
+      if (config.backend) {
+        return await api.get<Row[]>(config.backend.basePath);
+      }
       const { data, error } = await db
         .from(config.table)
         .select("*")
@@ -117,6 +139,12 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
     queryFn: async () => {
       const out: Record<string, { id: string; label: string }[]> = {};
       for (const f of refFields) {
+        if (f.ref?.backendPath) {
+          const labelCol = f.ref.labelCol ?? "name";
+          const rows = await api.get<Row[]>(f.ref.backendPath);
+          out[f.key] = rows.map((r) => ({ id: String(r["id"]), label: String(r[labelCol] ?? "") }));
+          continue;
+        }
         const table =
           f.kind === "profile" ? "profiles" : (f.refTable ?? f.ref?.table ?? "profiles");
         const labelCol =
@@ -150,6 +178,20 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
         }
         payload[field.key] = v === "" || v === undefined ? null : v;
       }
+
+      if (config.backend) {
+        // Backend-owned resources don't have a Supabase audit_logs entry
+        // written for them here -- that trail belongs on the backend
+        // itself once it has one (see API_ARCHITECTURE.md), not
+        // half-duplicated into Supabase's audit log from the frontend.
+        if (editing?.["id"]) {
+          await api.put(`${config.backend.basePath}/${String(editing["id"])}`, payload);
+        } else {
+          await api.post(config.backend.basePath, payload);
+        }
+        return;
+      }
+
       if (editing?.["id"]) {
         const { error } = await db
           .from(config.table)

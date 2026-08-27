@@ -30,13 +30,20 @@ const MAP: Record<string, { tone: keyof typeof TONES; en: string; ar: string }> 
   submitted: { tone: "warning", en: "Submitted", ar: "بانتظار الاعتماد" },
   sent: { tone: "info", en: "Sent to client", ar: "أُرسل للعميل" },
   expired: { tone: "neutral", en: "Expired", ar: "منتهي" },
-  // projects
+  // projects (Supabase-shaped)
   planning: { tone: "info", en: "Planning", ar: "تخطيط" },
   completed: { tone: "success", en: "Completed", ar: "مكتمل" },
   archived: { tone: "neutral", en: "Archived", ar: "مؤرشف" },
   cancelled: { tone: "danger", en: "Cancelled", ar: "ملغي" },
   suspended: { tone: "warning", en: "Suspended", ar: "موقوف" },
   terminated: { tone: "danger", en: "Terminated", ar: "منتهي" },
+  // projects (backend ProjectStatus -- values arrive uppercase; lookup
+  // below lowercases first, so these keys stay lowercase like the rest)
+  lead: { tone: "neutral", en: "Lead", ar: "فرصة" },
+  tendering: { tone: "info", en: "Tendering", ar: "مناقصة" },
+  awarded: { tone: "success", en: "Awarded", ar: "مُرسى" },
+  in_progress: { tone: "accent", en: "In progress", ar: "قيد التنفيذ" },
+  closed: { tone: "neutral", en: "Closed", ar: "مغلق" },
   // po
   pending_approval: { tone: "warning", en: "Pending approval", ar: "بانتظار الاعتماد" },
   partially_received: { tone: "accent", en: "Partially received", ar: "مستلم جزئياً" },
@@ -52,7 +59,10 @@ const MAP: Record<string, { tone: keyof typeof TONES; en: string; ar: string }> 
 export function StatusBadge({ value }: { value: string | null | undefined }) {
   const { lang } = useI18n();
   if (!value) return <span className="text-muted-foreground">—</span>;
-  const entry = MAP[value];
+  // Backend enums (e.g. ProjectStatus, QuotationStatus) arrive uppercase
+  // ("LEAD", "AWARDED"); Supabase's own enums are already lowercase. One
+  // case-insensitive lookup covers both without a second map.
+  const entry = MAP[value.toLowerCase()];
   const tone = entry?.tone ?? "neutral";
   const label = entry ? entry[lang] : value.replace(/_/g, " ");
   return (
