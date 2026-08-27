@@ -30,6 +30,8 @@ const MAP: Record<string, { tone: keyof typeof TONES; en: string; ar: string }> 
   submitted: { tone: "warning", en: "Submitted", ar: "بانتظار الاعتماد" },
   sent: { tone: "info", en: "Sent to client", ar: "أُرسل للعميل" },
   expired: { tone: "neutral", en: "Expired", ar: "منتهي" },
+  revised: { tone: "accent", en: "Revised", ar: "مُعدَّل" },
+  withdrawn: { tone: "neutral", en: "Withdrawn", ar: "مسحوب" },
   // projects (Supabase-shaped)
   planning: { tone: "info", en: "Planning", ar: "تخطيط" },
   completed: { tone: "success", en: "Completed", ar: "مكتمل" },
