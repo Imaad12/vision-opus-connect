@@ -186,6 +186,37 @@ export const dict: Dict = {
 
   "nav.people": { en: "People", ar: "الموارد البشرية" },
   "nav.hr_employees": { en: "Employees", ar: "الموظفون" },
+
+  "dash.operating_income": { en: "Operating income", ar: "الدخل التشغيلي" },
+  "dash.net_cash_flow": { en: "Net cash flow", ar: "صافي التدفق النقدي" },
+  "dash.view_management": { en: "View management report", ar: "عرض التقرير الإداري" },
+
+  "nav.management": { en: "Management", ar: "الإدارة" },
+  "mgmt.title": { en: "Management report", ar: "التقرير الإداري" },
+  "mgmt.description": {
+    en: "Cash flow, operating income, project profitability and vendor spend across the whole portfolio.",
+    ar: "التدفق النقدي والدخل التشغيلي وربحية المشاريع وإنفاق الموردين على مستوى المحفظة.",
+  },
+  "mgmt.cash_in": { en: "Cash in", ar: "التدفق الداخل" },
+  "mgmt.cash_out": { en: "Cash out", ar: "التدفق الخارج" },
+  "mgmt.net_cash_flow": { en: "Net cash flow", ar: "صافي التدفق النقدي" },
+  "mgmt.total_actual_profit": { en: "Total actual profit", ar: "إجمالي الربح الفعلي" },
+  "mgmt.total_payroll_paid": { en: "Payroll paid", ar: "الرواتب المدفوعة" },
+  "mgmt.operating_income": { en: "Operating income", ar: "الدخل التشغيلي" },
+  "mgmt.project_profitability": { en: "Project profitability", ar: "ربحية المشاريع" },
+  "mgmt.project": { en: "Project", ar: "المشروع" },
+  "mgmt.client": { en: "Customer", ar: "العميل" },
+  "mgmt.contract_value": { en: "Contract value", ar: "قيمة العقد" },
+  "mgmt.actual_cost": { en: "Actual cost", ar: "التكلفة الفعلية" },
+  "mgmt.actual_profit": { en: "Actual profit", ar: "الربح الفعلي" },
+  "mgmt.margin": { en: "Margin", ar: "الهامش" },
+  "mgmt.receivables": { en: "Receivables outstanding", ar: "الذمم المدينة المستحقة" },
+  "mgmt.vendor_spend": { en: "Vendor spend", ar: "إنفاق الموردين" },
+  "mgmt.vendor": { en: "Vendor", ar: "المورد" },
+  "mgmt.po_committed": { en: "PO committed", ar: "الملتزم به بأوامر الشراء" },
+  "mgmt.invoiced": { en: "Invoiced", ar: "المفوتر" },
+  "mgmt.paid": { en: "Paid", ar: "المدفوع" },
+  "mgmt.payable_outstanding": { en: "Payable outstanding", ar: "المستحق للموردين" },
 };
 
 type I18nValue = {

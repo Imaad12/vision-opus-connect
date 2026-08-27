@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
+  ArrowRight,
   BadgeCheck,
   ClipboardList,
   Percent,
@@ -13,8 +14,21 @@ import {
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { useMe } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
 import { db, type Row } from "@/lib/db";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
+
+type Lead = { status: string; estimated_value: string | null };
+type QuotationVersion = { status: string; quoted_value: string | null };
+type Project = { status: string; contract_value: string | null };
+type Invoice = {
+  direction: string;
+  amount: string;
+  tax_amount: string | null;
+  amount_paid: string;
+  issued_date: string | null;
+};
+type PurchaseOrder = { status: string };
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -62,24 +76,52 @@ function DashboardPage() {
   const { t, lang } = useI18n();
   const me = useMe();
 
-  const stats = useQuery({
-    queryKey: ["dashboard-stats"],
-    queryFn: async () => {
-      const [leads, quotes, projects, invoices, pos] = await Promise.all([
-        db.from("leads").select("id, title, status, estimated_value").limit(500),
-        db.from("quotations").select("id, quote_no, title, status, total, created_at").limit(500),
-        db.from("projects").select("id, name, status, contract_value, progress_percent").limit(500),
-        db.from("invoices").select("id, type, total, amount_paid, vat_amount, status, issue_date").limit(500),
-        db.from("purchase_orders").select("id, po_no, status, total").limit(500),
-      ]);
-      return {
-        leads: (leads.data ?? []) as Row[],
-        quotes: (quotes.data ?? []) as Row[],
-        projects: (projects.data ?? []) as Row[],
-        invoices: (invoices.data ?? []) as Row[],
-        pos: (pos.data ?? []) as Row[],
-      };
-    },
+  // Backed by the real backend now: leads/quotations/projects/invoices/
+  // purchase-orders all stopped receiving new rows in Supabase once each
+  // was cut over (Phase A, Milestone 1, Milestone 2) -- this dashboard
+  // had been silently stale against those Supabase tables since.
+  const canSeeLeads = me.can("leads.view");
+  const canSeeQuotes = me.can("quotations.view");
+  const canSeeProjects = me.can("projects.view");
+  const canSeeInvoices = me.can("finance.invoices") || me.can("finance.reports");
+  const canSeePOs = me.can("purchasing.po_approve") || me.can("purchasing.po_create");
+
+  const leadsQuery = useQuery({
+    queryKey: ["dashboard-leads"],
+    enabled: canSeeLeads,
+    queryFn: () => api.get<Lead[]>("/leads"),
+  });
+  const quotesQuery = useQuery({
+    queryKey: ["dashboard-quotes"],
+    enabled: canSeeQuotes,
+    queryFn: () => api.get<QuotationVersion[]>("/quotations"),
+  });
+  const projectsQuery = useQuery({
+    queryKey: ["dashboard-projects"],
+    enabled: canSeeProjects,
+    queryFn: () => api.get<Project[]>("/projects"),
+  });
+  const invoicesQuery = useQuery({
+    queryKey: ["dashboard-invoices"],
+    enabled: canSeeInvoices,
+    queryFn: () => api.get<Invoice[]>("/invoices"),
+  });
+  const posQuery = useQuery({
+    queryKey: ["dashboard-pos"],
+    enabled: canSeePOs,
+    queryFn: () => api.get<PurchaseOrder[]>("/purchase-orders"),
+  });
+
+  const canSeeManagement = me.can("finance.reports");
+  const operatingIncomeQuery = useQuery({
+    queryKey: ["dashboard-operating-income"],
+    enabled: canSeeManagement,
+    queryFn: () => api.get<{ operating_income: string }>("/management/operating-income"),
+  });
+  const cashFlowQuery = useQuery({
+    queryKey: ["dashboard-cash-flow"],
+    enabled: canSeeManagement,
+    queryFn: () => api.get<{ net_cash_flow: string }>("/management/cash-flow"),
   });
 
   const audit = useQuery({
@@ -95,30 +137,32 @@ function DashboardPage() {
     },
   });
 
-  const d = stats.data;
-  const openLeadValue = (d?.leads ?? [])
-    .filter((l) => !["won", "lost"].includes(String(l["status"])))
-    .reduce((s, l) => s + Number(l["estimated_value"] ?? 0), 0);
-  const awaiting = (d?.quotes ?? []).filter((q) => q["status"] === "submitted");
-  const activeProjects = (d?.projects ?? []).filter((p) => p["status"] === "active");
-  const salesInvoices = (d?.invoices ?? []).filter((i) => i["type"] === "sales");
-  const receivables = salesInvoices.reduce(
-    (s, i) => s + (Number(i["total"] ?? 0) - Number(i["amount_paid"] ?? 0)),
+  const leads = leadsQuery.data ?? [];
+  const openLeadValue = leads
+    .filter((l) => !["WON", "LOST"].includes(l.status))
+    .reduce((s, l) => s + Number(l.estimated_value ?? 0), 0);
+  const awaiting = (quotesQuery.data ?? []).filter((q) => q.status === "SUBMITTED");
+  const activeProjects = (projectsQuery.data ?? []).filter(
+    (p) => !["COMPLETED", "CLOSED", "CANCELLED", "LOST"].includes(p.status),
+  );
+  const clientInvoices = (invoicesQuery.data ?? []).filter((i) => i.direction === "CLIENT");
+  const receivables = clientInvoices.reduce(
+    (s, i) => s + (Number(i.amount ?? 0) - Number(i.amount_paid ?? 0)),
     0,
   );
-  const vatYear = salesInvoices
-    .filter((i) => String(i["issue_date"] ?? "").startsWith(String(new Date().getFullYear())))
-    .reduce((s, i) => s + Number(i["vat_amount"] ?? 0), 0);
-  const posPending = (d?.pos ?? []).filter((p) => p["status"] === "pending_approval");
+  const vatYear = clientInvoices
+    .filter((i) => (i.issued_date ?? "").startsWith(String(new Date().getFullYear())))
+    .reduce((s, i) => s + Number(i.tax_amount ?? 0), 0);
+  const posPending = (posQuery.data ?? []).filter((p) => p.status === "PENDING_APPROVAL");
 
-  const stageOrder = ["new", "qualified", "proposal", "negotiation", "won", "lost", "on_hold"];
+  const stageOrder = ["NEW", "QUALIFIED", "PROPOSAL", "NEGOTIATION", "WON", "LOST", "ON_HOLD"];
   const byStage = stageOrder
     .map((stage) => ({
       stage,
-      count: (d?.leads ?? []).filter((l) => l["status"] === stage).length,
-      value: (d?.leads ?? [])
-        .filter((l) => l["status"] === stage)
-        .reduce((s, l) => s + Number(l["estimated_value"] ?? 0), 0),
+      count: leads.filter((l) => l.status === stage).length,
+      value: leads
+        .filter((l) => l.status === stage)
+        .reduce((s, l) => s + Number(l.estimated_value ?? 0), 0),
     }))
     .filter((s) => s.count > 0);
   const maxStage = Math.max(1, ...byStage.map((s) => s.value));
@@ -137,7 +181,7 @@ function DashboardPage() {
           label={t("dash.awaiting")}
           value={String(awaiting.length)}
           hint={formatMoney(
-            awaiting.reduce((s, q) => s + Number(q["total"] ?? 0), 0),
+            awaiting.reduce((s, q) => s + Number(q.quoted_value ?? 0), 0),
             lang,
           )}
         />
@@ -146,7 +190,7 @@ function DashboardPage() {
           label={t("dash.active_projects")}
           value={String(activeProjects.length)}
           hint={formatMoney(
-            activeProjects.reduce((s, p) => s + Number(p["contract_value"] ?? 0), 0),
+            activeProjects.reduce((s, p) => s + Number(p.contract_value ?? 0), 0),
             lang,
           )}
         />
@@ -154,6 +198,35 @@ function DashboardPage() {
         <Kpi icon={Percent} label={t("dash.vat_quarter")} value={formatMoney(vatYear, lang)} />
         <Kpi icon={ShoppingCart} label={t("dash.po_pending")} value={String(posPending.length)} />
       </div>
+
+      {canSeeManagement && (
+        <div className="surface-panel mt-4 flex flex-wrap items-center justify-between gap-4 p-4">
+          <div className="flex flex-wrap items-center gap-6">
+            <div>
+              <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {t("dash.operating_income")}
+              </p>
+              <p className="num mt-1 text-xl font-semibold">
+                {formatMoney(Number(operatingIncomeQuery.data?.operating_income ?? 0), lang)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {t("dash.net_cash_flow")}
+              </p>
+              <p className="num mt-1 text-xl font-semibold">
+                {formatMoney(Number(cashFlowQuery.data?.net_cash_flow ?? 0), lang)}
+              </p>
+            </div>
+          </div>
+          <Link
+            to="/management"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-accent hover:underline"
+          >
+            {t("dash.view_management")} <ArrowRight className="size-4" />
+          </Link>
+        </div>
+      )}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div className="surface-panel p-4">

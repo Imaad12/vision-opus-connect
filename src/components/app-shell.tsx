@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   ShoppingCart,
   Target,
+  TrendingUp,
   Truck,
   Users,
   Wallet,
@@ -69,7 +70,7 @@ const SECTIONS: NavSection[] = [
         to: "/approvals",
         labelKey: "nav.approvals",
         icon: BadgeCheck,
-        perms: ["quotations.approve", "purchasing.po_approve", "finance.expenses"],
+        perms: ["quotations.approve", "quotations.edit", "purchasing.po_approve"],
       },
     ],
   },
@@ -119,6 +120,17 @@ const SECTIONS: NavSection[] = [
         perms: ["finance.expenses", "finance.reports"],
       },
       { to: "/vat", labelKey: "nav.vat", icon: Percent, perms: ["finance.vat", "finance.reports"] },
+    ],
+  },
+  {
+    titleKey: "nav.management",
+    items: [
+      {
+        to: "/management",
+        labelKey: "nav.management",
+        icon: TrendingUp,
+        perms: ["finance.reports"],
+      },
     ],
   },
   {
