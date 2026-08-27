@@ -127,25 +127,66 @@ fails as a 422, never a 500.
 |---|---|---|
 | `GET /health` | none | — |
 | `GET /company/me` | any authenticated user (matches `company_settings_select`'s `USING (true)`) | `project_service.get_or_create_default_company` |
-| `GET /clients` | `customers.view` | `client_service.list_clients` |
-| `GET /clients/{id}` | `customers.view` | `client_service.get_client` |
+| `GET /clients`, `GET /clients/{id}` | `customers.view` | `client_service` |
 | `POST /clients` | `customers.create` | `client_service.create_client` |
 | `PUT /clients/{id}` | `customers.edit` | `client_service.update_client` |
+| `GET /vendors`, `GET /vendors/{id}` | `suppliers.view` | `vendor_service` (new, mirrors `client_service`) |
+| `POST /vendors` | `suppliers.create` | `vendor_service.create_vendor` |
+| `PUT /vendors/{id}` | `suppliers.edit` | `vendor_service.update_vendor` |
+| `GET /projects`, `GET /projects/{id}` | `projects.view` | `project_service` |
+| `POST /projects` | `projects.create` | `project_service.create_project` |
+| `PUT /projects/{id}` | `projects.edit` | `project_service.update_project` |
+| `GET /quotations` | `quotations.view` | `quotation_service.list_quotation_versions` |
+| `GET /quotations/{id}`, `GET /quotations/{id}/versions` | `quotations.view` | `quotation_service` |
+| `POST /projects/{id}/quotations` | `quotations.create` | `quotation_service.create_quotation` |
+| `POST /quotations/{id}/revisions` | `quotations.create` | `quotation_service.create_quotation_revision` |
+| `GET /quotation-versions/{id}`, `.../boq-lines` | `quotations.view` | `quotation_service` (BOQ lines: read-only) |
+| `POST /quotation-versions/{id}/submit` | `quotations.submit` | `quotation_service.mark_submitted` |
+| `POST /quotation-versions/{id}/lose`, `.../withdraw` | `quotations.edit` | `quotation_service.mark_lost` / `mark_withdrawn` |
+| `POST /quotation-versions/{id}/award` | `quotations.approve` | `quotation_service.mark_awarded` |
 
 Run locally: `uvicorn app.api.main:app --reload`, configured via
 `VISION_SUPABASE_URL` and `VISION_SUPABASE_ANON_KEY` (both already
 public/client-side values in the frontend's `.env` — no new secret is
 introduced).
 
-## 7. Next slices (same pattern, in Step 3B's stated order)
+### 6.1 Known field/shape gaps (not papered over)
 
-Suppliers (`Vendor`/`vendor_matching`), Projects (`project_service`),
-Quotations (`quotation_service`), Purchase Orders
-(`purchase_order_service`), then Invoices/Payments/Expenses. Each is:
-a Pydantic schema, a router that calls the existing service functions
-with the matching frontend permission string, and route-level tests
-following `test_api_clients.py`'s pattern (in-memory DB + a fake
-Supabase auth double). No new service-layer logic should be needed for
-any of these — if one seems to be, that's a signal the frontend needs a
-capability the backend doesn't have yet (see the integration report's
-"missing backend APIs"), not something to improvise in a route.
+- **Vendors/`suppliers.tsx`**: the frontend form collects `category`,
+  `cr_number`, `city`, `payment_terms_days` (a number), a three-state
+  `status`, `rating`, `iban`, `address`, `name_ar` — none of which exist
+  on `Vendor`. The API exposes exactly what `Vendor` has
+  (`vendor_type`, `name`, contact fields, `tax_number`, `payment_terms`
+  as free text, `is_active`, `notes`). Wiring the frontend's supplier
+  *form* needs one of: extend `Vendor` with the missing columns, or trim
+  the form. Not decided here.
+- **Projects/`projects.tsx`**: the frontend form also collects
+  `manager_id`, `location`, `budget_cost`, `progress_percent`, and a
+  directly-editable `contract_value`. `contract_value` is deliberately
+  never settable through `create_project`/`update_project` — it is set
+  exactly once by `quotation_service.mark_awarded` — so an API that
+  accepted it from this form and silently dropped it would be worse than
+  not wiring the field at all. `ProjectStatus`'s real values differ
+  entirely from the frontend's; returned as-is, not silently renamed.
+- **Quotations/`quotations.tsx`**: the frontend models one flat
+  `quotations` row per quote plus separate `quotation_items`/
+  `quotation_approvals` tables. The backend keeps `Quotation` (identity)
+  and `QuotationVersion` (the priced, dated, status-carrying, *immutable*
+  revision) separate by design — collapsing that to fit the frontend's
+  flat shape would remove the audit trail `quotation_service` exists to
+  protect. This API exposes the real versioned shape; reconciling it
+  with the existing quotation UI is the next dedicated piece of work,
+  not something to shortcut here. There is also no distinct "approval"
+  step in the backend beyond submit/award — `QuotationStatus` doesn't
+  have one — so no approval endpoint was invented.
+
+## 7. Next slices
+
+Purchase Orders is intentionally not next — see the standing PO-naming
+decision (backend `PurchaseOrder` = client-award evidence vs. the
+frontend's outbound-supplier-order concept) that must be resolved before
+any wiring there. After that: Invoices/Payments/Expenses (no dedicated
+service module yet — one would need to be added first, following
+`vendor_service.py`'s pattern), then the quotation-shape and
+vendor/project-field reconciliations above, each of which is a real,
+scoped decision rather than an API afterthought.

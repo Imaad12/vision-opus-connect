@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routers import clients, company, health
+from app.api.routers import clients, company, health, projects, quotations, vendors
 from app.services.errors import ValidationError
 
 
@@ -30,6 +30,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(company.router)
     app.include_router(clients.router)
+    app.include_router(vendors.router)
+    app.include_router(projects.router)
+    app.include_router(quotations.router)
 
     return app
 

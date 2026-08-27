@@ -8,11 +8,12 @@ that being a database migration.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import Currency
+from app.core.enums import Currency, ProjectStatus, QuotationStatus, VendorType
 
 
 class CompanyRead(BaseModel):
@@ -52,3 +53,137 @@ class ClientCreate(BaseModel):
 
 class ClientUpdate(ClientCreate):
     pass
+
+
+class VendorRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    vendor_type: VendorType
+    name: str
+    contact_name: str | None
+    contact_email: str | None
+    contact_phone: str | None
+    tax_number: str | None
+    default_currency: Currency
+    payment_terms: str | None
+    is_active: bool
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class VendorCreate(BaseModel):
+    name: str = Field(min_length=1)
+    vendor_type: VendorType = VendorType.SUPPLIER
+    contact_name: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    tax_number: str | None = None
+    default_currency: Currency = Currency.AED
+    payment_terms: str | None = None
+    is_active: bool = True
+    notes: str | None = None
+
+
+class VendorUpdate(VendorCreate):
+    pass
+
+
+class ProjectRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    company_id: int
+    client_id: int
+    name: str
+    project_code: str | None
+    description: str | None
+    status: ProjectStatus
+    start_date: date | None
+    planned_completion_date: date | None
+    actual_completion_date: date | None
+    award_date: date | None
+    contract_value: Decimal | None
+    contract_currency: Currency
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1)
+    client_id: int
+    project_code: str | None = None
+    description: str | None = None
+    status: ProjectStatus = ProjectStatus.LEAD
+    currency: Currency = Currency.AED
+    start_date: date | None = None
+    planned_completion_date: date | None = None
+    actual_completion_date: date | None = None
+    notes: str | None = None
+
+
+class ProjectUpdate(ProjectCreate):
+    pass
+
+
+class QuotationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    reference_number: str | None
+    title: str | None
+
+
+class QuotationVersionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    quotation_id: int
+    version_number: int
+    status: QuotationStatus
+    quoted_value: Decimal | None
+    currency: Currency
+    issued_date: date | None
+    valid_until: date | None
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+    quotation: QuotationRead
+
+
+class QuotationCreate(BaseModel):
+    reference_number: str | None = None
+    title: str | None = None
+    quoted_value: Decimal | None = None
+    currency: Currency = Currency.AED
+    issued_date: date | None = None
+    valid_until: date | None = None
+    notes: str | None = None
+
+
+class QuotationRevisionCreate(BaseModel):
+    quoted_value: Decimal | None = None
+    currency: Currency = Currency.AED
+    issued_date: date | None = None
+    valid_until: date | None = None
+    notes: str | None = None
+
+
+class QuotationAward(BaseModel):
+    contract_value: Decimal = Field(gt=0)
+
+
+class BOQLineItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    line_number: str | None
+    description: str
+    unit: str | None
+    quantity: Decimal | None
+    unit_rate: Decimal | None
+    total: Decimal | None
+    currency: Currency

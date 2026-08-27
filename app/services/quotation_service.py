@@ -17,8 +17,36 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.enums import DEFAULT_CURRENCY, Currency, ProjectStatus, QuotationStatus
-from app.models import Project, Quotation, QuotationVersion
+from app.models import BOQLineItem, Project, Quotation, QuotationVersion
 from app.services.errors import ValidationError
+
+
+def get_quotation(session: Session, quotation_id: int) -> Quotation | None:
+    quotation = session.get(Quotation, quotation_id)
+    if quotation is None or quotation.is_deleted:
+        return None
+    return quotation
+
+
+def get_quotation_version(session: Session, version_id: int) -> QuotationVersion | None:
+    version = session.get(QuotationVersion, version_id)
+    if version is None or version.is_deleted:
+        return None
+    return version
+
+
+def list_boq_line_items(session: Session, version: QuotationVersion) -> list[BOQLineItem]:
+    """Read-only: BOQ line items are populated by the document-import
+    pipeline (`app.services.import_service`), never edited by hand here --
+    there is no manual BOQ-authoring service to reuse or duplicate."""
+    if version.boq is None:
+        return []
+    stmt = (
+        select(BOQLineItem)
+        .where(BOQLineItem.boq_id == version.boq.id, BOQLineItem.is_deleted.is_(False))
+        .order_by(BOQLineItem.id)
+    )
+    return list(session.execute(stmt).scalars().all())
 
 
 def list_quotation_versions(session: Session, *, search: str | None = None) -> list[QuotationVersion]:
