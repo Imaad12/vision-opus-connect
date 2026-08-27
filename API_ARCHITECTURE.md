@@ -224,10 +224,68 @@ data-source swap, not a new status vocabulary. No warehouse/inventory
 concepts (locations, bins, on-hand stock) -- a `Receipt` only moves
 `PurchaseOrderLine.received_quantity` and the PO's own status.
 
+## 6.3 Finance, CRM, People (Milestone 2)
+
+Finance reuses the `Invoice`/`Payment`/`ActualCost` models already added
+in Phase 1/2 -- this slice is their first CRUD/lifecycle service+API
+layer, not a schema change. CRM (`Contact`, `Lead`) and People
+(`Employee`, `PayrollRecord`) are new models, all following the same
+model → service → schema → router pattern as everything above.
+
+| Route | Permission | Service |
+|---|---|---|
+| `GET/POST /invoices`, `GET /invoices/{id}`, `PUT /invoices/{id}` | `finance.invoices` | `invoice_service` |
+| `POST /invoices/{id}/issue`, `.../cancel` | `finance.invoices` | " |
+| `GET/POST /payments`, `GET /payments/{id}` | `finance.payments` | `payment_service` |
+| `GET/POST /expenses`, `GET /expenses/{id}`, `PUT /expenses/{id}` | `finance.expenses` | `cost_service` (existing `ActualCost` CRUD, extended) |
+| `GET /cost-categories` | `finance.expenses` | `lookup_service` (existing, newly exposed) |
+| `GET/POST /contacts`, `GET /contacts/{id}`, `PUT /contacts/{id}` | `contacts.view/create/edit` | `contact_service` |
+| `GET/POST /leads`, `GET /leads/{id}`, `PUT /leads/{id}` | `leads.view/create/edit` | `lead_service` |
+| `GET/POST /employees`, `GET /employees/{id}`, `PUT /employees/{id}` | `employees.view` / `employees.manage` | `employee_service` |
+| `GET/POST /payroll-records`, `GET /payroll-records/{id}` | `employees.manage` | `payroll_service` |
+| `POST /payroll-records/{id}/approve`, `.../pay` | `employees.manage` | " |
+
+Design notes:
+
+- **Invoice status is derived, not client-set.** `recompute_invoice_status`
+  runs after every payment create/void and moves
+  `ISSUED -> PARTIALLY_PAID -> PAID` from `amount_paid` vs.
+  `amount - retention_amount` (`app.core.financial_engine`'s existing
+  `calculate_amount_due_after_retention`/`calculate_outstanding_balance`).
+  `DRAFT`/`CANCELLED`/`DISPUTED` are untouched by that recompute --
+  `OVERDUE` and `DISPUTED` are deliberately never set automatically
+  (there is no scheduler here to compare `due_date` to "now"); both are
+  only ever reachable via an explicit `PUT /invoices/{id}`.
+- **`Lead` is independent of `Project.status`**, which also starts at
+  `LEAD`/`TENDERING`. A lead may never become a project; winning one is
+  recorded via `status=WON` plus an optional, manually-set
+  `converted_project_id` -- there is no automatic lead-to-project
+  conversion, matching the existing manual award-to-contract pattern.
+- **The HR `Employee` model is unrelated to the frontend's existing
+  `/employees` page**, which manages Supabase's own
+  `profiles`/`user_roles`/`user_scopes` (application login identity and
+  RBAC) and stays there deliberately. `employees.view`/`employees.manage`
+  existed in the frontend's `app_permission` enum but were unused before
+  this slice (that page instead checks `admin.users`/`admin.roles`) --
+  this is their real, intended resource. The frontend page for this is
+  new (`/hr-employees`), not a rewire of `/employees`.
+- **`PayrollRecord` has no frontend page yet** -- built as a real, tested
+  backend domain (`DRAFT -> APPROVED -> PAID`, `net_amount` always
+  server-computed as `gross_amount - deductions`) since Milestone 2 named
+  "employees/payroll" as in scope, without inventing a UI ahead of a
+  concrete page request.
+- **No delete/remove anywhere in this slice.** `finance.invoices`/
+  `finance.payments`/`finance.expenses` have no separate delete
+  permission in the real `app_permission` enum, `leads` has no
+  `leads.delete` (winning/losing is `status`, not deletion), and a
+  recorded `Payment` is a financial event, not an editable/removable
+  draft.
+
 ## 7. Next slices
 
-Vendor invoices (Finance, Milestone 2) — no dedicated service module yet
-for `Invoice`/`Payment`/expenses; one is needed following
-`vendor_service.py`'s pattern. Then the quotation-shape and
-vendor/project-field reconciliations noted above, each a real, scoped
-decision rather than an API afterthought.
+Vendor invoices already ride on the same `Invoice`/`direction=VENDOR`
+model exposed above -- no further work needed there. Remaining: the
+quotation-shape and vendor/project-field reconciliations noted in §6.1,
+and the Management layer (dashboard, cash flow, project profitability,
+vendor analytics), each a real, scoped decision rather than an API
+afterthought.

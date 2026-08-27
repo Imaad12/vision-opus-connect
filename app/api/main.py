@@ -15,8 +15,16 @@ from fastapi.responses import JSONResponse
 from app.api.routers import (
     clients,
     company,
+    contacts,
     contracts,
+    employees,
+    expenses,
     health,
+    invoices,
+    leads,
+    lookups,
+    payments,
+    payroll,
     projects,
     purchase_orders,
     purchase_requests,
@@ -48,6 +56,14 @@ def create_app() -> FastAPI:
     app.include_router(purchase_requests.router)
     app.include_router(purchase_orders.router)
     app.include_router(receipts.router)
+    app.include_router(lookups.router)
+    app.include_router(invoices.router)
+    app.include_router(payments.router)
+    app.include_router(expenses.router)
+    app.include_router(contacts.router)
+    app.include_router(leads.router)
+    app.include_router(employees.router)
+    app.include_router(payroll.router)
 
     return app
 

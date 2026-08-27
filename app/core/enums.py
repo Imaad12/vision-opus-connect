@@ -196,6 +196,43 @@ class ExtractionStatus(StrEnum):
     SEGMENTS_PROPOSED = "SEGMENTS_PROPOSED"
 
 
+class LeadSource(StrEnum):
+    REFERRAL = "REFERRAL"
+    TENDER = "TENDER"
+    WEBSITE = "WEBSITE"
+    EXISTING_CLIENT = "EXISTING_CLIENT"
+    OTHER = "OTHER"
+
+
+class LeadStatus(StrEnum):
+    """A `Lead` is deliberately independent of `Project.status` (which also
+    starts at LEAD/TENDERING) -- see CRM_ARCHITECTURE note in
+    API_ARCHITECTURE.md: a lead may never become a project at all, so this
+    is a separate pre-project pipeline, not a duplicate of it. Winning a
+    lead is recorded here (`WON` + optional `converted_project_id`); it
+    never auto-creates a `Project` row."""
+
+    NEW = "NEW"
+    QUALIFIED = "QUALIFIED"
+    PROPOSAL = "PROPOSAL"
+    NEGOTIATION = "NEGOTIATION"
+    WON = "WON"
+    LOST = "LOST"
+    ON_HOLD = "ON_HOLD"
+
+
+class EmploymentStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    ON_LEAVE = "ON_LEAVE"
+    TERMINATED = "TERMINATED"
+
+
+class PayrollStatus(StrEnum):
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    PAID = "PAID"
+
+
 class ImportReviewStatus(StrEnum):
     """Where a staged document sits in the human review/confirmation
     workflow. NEEDS_REVIEW is the starting point once extraction has

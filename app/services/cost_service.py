@@ -193,6 +193,71 @@ def list_actual_costs(session: Session, project: Project) -> list[ActualCost]:
     return list(session.execute(stmt).scalars().all())
 
 
+def list_expenses(session: Session, *, project_id: int | None = None) -> list[ActualCost]:
+    """Flat, project-agnostic listing for the `/expenses` API resource --
+    `list_actual_costs` above requires a loaded `Project` and is used by
+    the project-detail views; this is used by the global expenses screen."""
+    stmt = (
+        select(ActualCost)
+        .options(joinedload(ActualCost.cost_category), joinedload(ActualCost.vendor))
+        .where(ActualCost.is_deleted.is_(False))
+    )
+    if project_id is not None:
+        stmt = stmt.where(ActualCost.project_id == project_id)
+    stmt = stmt.order_by(ActualCost.incurred_date.desc().nulls_last(), ActualCost.id.desc())
+    return list(session.execute(stmt).scalars().all())
+
+
+def get_actual_cost(session: Session, cost_id: int) -> ActualCost | None:
+    cost = session.get(ActualCost, cost_id)
+    if cost is None or cost.is_deleted:
+        return None
+    return cost
+
+
+def update_actual_cost(
+    session: Session,
+    cost: ActualCost,
+    *,
+    project_id: int,
+    cost_category_id: int,
+    amount: Decimal,
+    tax_amount: Decimal | None = None,
+    is_tax_recoverable: bool = True,
+    incurred_date: date | None = None,
+    description: str | None = None,
+    vendor_id: int | None = None,
+    reference_number: str | None = None,
+    payment_status: CostPaymentStatus = CostPaymentStatus.UNPAID,
+    currency: Currency = DEFAULT_CURRENCY,
+    notes: str | None = None,
+) -> ActualCost:
+    project = session.get(Project, project_id)
+    if project is None or project.is_deleted:
+        raise ValidationError("Select a valid project.")
+    if cost_category_id is None or session.get(CostCategory, cost_category_id) is None:
+        raise ValidationError("Select a valid cost category.")
+    if amount is None:
+        raise ValidationError("Gross amount is required.")
+    if tax_amount is not None and abs(tax_amount) > abs(amount):
+        raise ValidationError("Tax amount cannot exceed the gross amount.")
+
+    cost.project_id = project_id
+    cost.cost_category_id = cost_category_id
+    cost.vendor_id = vendor_id
+    cost.reference_number = (reference_number or "").strip() or None
+    cost.description = (description or "").strip() or None
+    cost.amount = amount
+    cost.tax_amount = tax_amount
+    cost.is_tax_recoverable = is_tax_recoverable
+    cost.currency = currency
+    cost.payment_status = payment_status
+    cost.incurred_date = incurred_date
+    cost.notes = (notes or "").strip() or None
+    session.flush()
+    return cost
+
+
 def add_actual_cost(
     session: Session,
     project: Project,
@@ -274,7 +339,10 @@ __all__ = [
     "start_new_estimate_revision",
     "mark_revision_final",
     "list_actual_costs",
+    "list_expenses",
+    "get_actual_cost",
     "add_actual_cost",
+    "update_actual_cost",
     "cost_by_category",
     "net_amount_of",
 ]
