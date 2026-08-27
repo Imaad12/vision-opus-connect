@@ -83,6 +83,18 @@ def list_quotation_versions(
     return list(quotation_service.list_versions_for_quotation(session, quotation_id))
 
 
+@router.get("/projects/{project_id}/quotations", response_model=list[QuotationRead])
+def list_quotations_for_project(
+    project_id: int,
+    session: Session = Depends(get_db),
+    _user=Depends(require_permission("quotations.view")),
+) -> list[QuotationRead]:
+    project = project_service.get_project(session, project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    return list(quotation_service.list_quotations_for_project(session, project_id))
+
+
 @router.post(
     "/projects/{project_id}/quotations",
     response_model=QuotationVersionRead,

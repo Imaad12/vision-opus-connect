@@ -80,6 +80,18 @@ class PaymentMethod(StrEnum):
     OTHER = "OTHER"
 
 
+class ContractStatus(StrEnum):
+    """Lifecycle of a `Contract` once a quotation has been awarded.
+    Deliberately no amendment/versioning states -- a value change after
+    signing is a `ProjectVariation`, exactly like a post-award change to
+    `Project.contract_value` (see `quotation_service.mark_awarded`)."""
+
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    TERMINATED = "TERMINATED"
+
+
 class VariationStatus(StrEnum):
     PROPOSED = "PROPOSED"
     PENDING_APPROVAL = "PENDING_APPROVAL"

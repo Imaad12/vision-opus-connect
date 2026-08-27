@@ -144,6 +144,21 @@ fails as a 422, never a 500.
 | `POST /quotation-versions/{id}/submit` | `quotations.submit` | `quotation_service.mark_submitted` |
 | `POST /quotation-versions/{id}/lose`, `.../withdraw` | `quotations.edit` | `quotation_service.mark_lost` / `mark_withdrawn` |
 | `POST /quotation-versions/{id}/award` | `quotations.approve` | `quotation_service.mark_awarded` |
+| `GET /projects/{id}/quotations` | `quotations.view` | `quotation_service.list_quotations_for_project` |
+| `GET /projects/{id}/contract`, `GET /contracts/{id}` | `contracts.view` | new `contract_service` |
+| `POST /projects/{id}/contracts` | `contracts.create` | `contract_service.create_contract` (project must be `AWARDED`) |
+| `POST /contracts/{id}/activate`, `.../complete`, `.../terminate` | `contracts.edit` | `contract_service` |
+
+`QuotationRead` now nests `project: {id, name, project_code, client: {id, name}}`,
+read from the same eager-loaded relationships `list_quotation_versions`
+already uses — this is what lets a quotation list show project/client
+names without a second round trip.
+
+`Contract` (new model) is created once, only from an `AWARDED` project,
+copying `value`/`currency` from `Project` at that moment rather than
+referencing it live — see the model's docstring. No amendment/versioning
+states; a post-signing value change is a `ProjectVariation`, same as it
+already is for `Project.contract_value` itself.
 
 Run locally: `uvicorn app.api.main:app --reload`, configured via
 `VISION_SUPABASE_URL` and `VISION_SUPABASE_ANON_KEY` (both already

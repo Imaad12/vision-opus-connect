@@ -62,6 +62,32 @@ def test_create_quotation_and_list_it(api_client: TestClient, project_id: int):
     assert "Q-2026-001" in refs
 
 
+def test_quotation_read_includes_project_and_client_names(api_client: TestClient, project_id: int):
+    version = api_client.post(
+        f"/projects/{project_id}/quotations", json={"title": "Nested read check"}
+    ).json()
+
+    project_summary = version["quotation"]["project"]
+    assert project_summary["id"] == project_id
+    assert project_summary["name"] == "Retail Fit-Out"
+    assert project_summary["client"]["name"] == "Nasser Trading Co."
+
+
+def test_list_quotations_for_a_project(api_client: TestClient, project_id: int):
+    api_client.post(f"/projects/{project_id}/quotations", json={"title": "Only quotation"})
+
+    response = api_client.get(f"/projects/{project_id}/quotations")
+
+    assert response.status_code == 200
+    titles = [q["title"] for q in response.json()]
+    assert "Only quotation" in titles
+
+
+def test_list_quotations_for_missing_project_is_404(api_client: TestClient):
+    response = api_client.get("/projects/999999/quotations")
+    assert response.status_code == 404
+
+
 def test_create_quotation_for_missing_project_is_404(api_client: TestClient):
     response = api_client.post("/projects/999999/quotations", json={"title": "Should not exist"})
     assert response.status_code == 404

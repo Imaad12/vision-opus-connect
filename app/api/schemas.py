@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import Currency, ProjectStatus, QuotationStatus, VendorType
+from app.core.enums import ContractStatus, Currency, ProjectStatus, QuotationStatus, VendorType
 
 
 class CompanyRead(BaseModel):
@@ -128,6 +128,22 @@ class ProjectUpdate(ProjectCreate):
     pass
 
 
+class ClientSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ProjectSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    project_code: str | None
+    client: ClientSummary
+
+
 class QuotationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -135,6 +151,7 @@ class QuotationRead(BaseModel):
     project_id: int
     reference_number: str | None
     title: str | None
+    project: ProjectSummary
 
 
 class QuotationVersionRead(BaseModel):
@@ -187,3 +204,29 @@ class BOQLineItemRead(BaseModel):
     unit_rate: Decimal | None
     total: Decimal | None
     currency: Currency
+
+
+class ContractRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    quotation_version_id: int
+    contract_number: str | None
+    value: Decimal
+    currency: Currency
+    status: ContractStatus
+    signed_date: date | None
+    start_date: date | None
+    end_date: date | None
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContractCreate(BaseModel):
+    contract_number: str | None = None
+    signed_date: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    notes: str | None = None
