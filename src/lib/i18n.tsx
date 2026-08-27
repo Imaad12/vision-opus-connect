@@ -180,6 +180,12 @@ export const dict: Dict = {
   "po.remaining": { en: "Remaining", ar: "المتبقي" },
   "po.qty_to_receive": { en: "Qty received", ar: "الكمية المستلمة" },
   "po.no_lines": { en: "No lines yet", ar: "لا توجد بنود بعد" },
+
+  "invoice.issue": { en: "Issue invoice", ar: "إصدار الفاتورة" },
+  "invoice.cancel": { en: "Cancel invoice", ar: "إلغاء الفاتورة" },
+
+  "nav.people": { en: "People", ar: "الموارد البشرية" },
+  "nav.hr_employees": { en: "Employees", ar: "الموظفون" },
 };
 
 type I18nValue = {

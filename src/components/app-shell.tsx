@@ -122,6 +122,17 @@ const SECTIONS: NavSection[] = [
     ],
   },
   {
+    titleKey: "nav.people",
+    items: [
+      {
+        to: "/hr-employees",
+        labelKey: "nav.hr_employees",
+        icon: Users,
+        perms: ["employees.view"],
+      },
+    ],
+  },
+  {
     titleKey: "nav.documents",
     items: [
       { to: "/documents", labelKey: "nav.documents", icon: FileStack, perms: ["documents.view"] },
@@ -176,9 +187,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           VC
         </div>
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-sidebar-foreground">
-            {t("app.short")}
-          </p>
+          <p className="truncate text-sm font-semibold text-sidebar-foreground">{t("app.short")}</p>
           <p className="truncate text-xs text-sidebar-foreground/60">{t("app.name")}</p>
         </div>
       </div>

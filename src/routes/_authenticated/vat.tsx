@@ -4,8 +4,11 @@ import { useState } from "react";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
 import { useMe } from "@/hooks/use-auth";
-import { db, type Row } from "@/lib/db";
+import { api } from "@/lib/api";
 import { formatMoney, useI18n } from "@/lib/i18n";
+
+type InvoiceRow = { direction: string; tax_amount: string | null; issued_date: string | null };
+type ExpenseRow = { tax_amount: string | null; incurred_date: string | null };
 
 export const Route = createFileRoute("/_authenticated/vat")({
   head: () => ({
@@ -32,15 +35,24 @@ function VatPage() {
 
   const allowed = me.canAny(["finance.vat", "finance.reports"]);
 
+  // Backed by the backend's real `/invoices` (`direction`/`tax_amount`/
+  // `issued_date`) and `/expenses` (`tax_amount`/`incurred_date`) --
+  // Supabase's `invoices`/`expenses` tables are no longer where those
+  // records are created, so this report would otherwise silently go
+  // stale the moment those two pages were cut over.
   const report = useQuery({
     queryKey: ["vat", from, toDate],
     enabled: allowed,
     queryFn: async () => {
-      const [inv, exp] = await Promise.all([
-        db.from("invoices").select("type, subtotal, vat_amount, total, issue_date").gte("issue_date", from).lte("issue_date", toDate),
-        db.from("expenses").select("amount, vat_amount, expense_date").gte("expense_date", from).lte("expense_date", toDate),
+      const [invoices, expenses] = await Promise.all([
+        api.get<InvoiceRow[]>("/invoices"),
+        api.get<ExpenseRow[]>("/expenses"),
       ]);
-      return { invoices: (inv.data ?? []) as Row[], expenses: (exp.data ?? []) as Row[] };
+      const inRange = (d: string | null) => d != null && d >= from && d <= toDate;
+      return {
+        invoices: invoices.filter((i) => inRange(i.issued_date)),
+        expenses: expenses.filter((e) => inRange(e.incurred_date)),
+      };
     },
   });
 
@@ -53,12 +65,12 @@ function VatPage() {
     );
   }
 
-  const sales = (report.data?.invoices ?? []).filter((i) => i["type"] === "sales");
-  const purchases = (report.data?.invoices ?? []).filter((i) => i["type"] === "purchase");
-  const output = sales.reduce((s, i) => s + Number(i["vat_amount"] ?? 0), 0);
+  const sales = (report.data?.invoices ?? []).filter((i) => i.direction === "CLIENT");
+  const purchases = (report.data?.invoices ?? []).filter((i) => i.direction === "VENDOR");
+  const output = sales.reduce((s, i) => s + Number(i.tax_amount ?? 0), 0);
   const inputVat =
-    purchases.reduce((s, i) => s + Number(i["vat_amount"] ?? 0), 0) +
-    (report.data?.expenses ?? []).reduce((s, e) => s + Number(e["vat_amount"] ?? 0), 0);
+    purchases.reduce((s, i) => s + Number(i.tax_amount ?? 0), 0) +
+    (report.data?.expenses ?? []).reduce((s, e) => s + Number(e.tax_amount ?? 0), 0);
 
   return (
     <>
