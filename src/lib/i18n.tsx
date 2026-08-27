@@ -161,6 +161,25 @@ export const dict: Dict = {
   "contract.activate": { en: "Activate", ar: "تفعيل" },
   "contract.complete": { en: "Mark completed", ar: "وضع كمكتمل" },
   "contract.terminate": { en: "Terminate", ar: "إنهاء" },
+
+  "po.new": { en: "New purchase order", ar: "أمر شراء جديد" },
+  "po.number": { en: "PO number", ar: "رقم أمر الشراء" },
+  "po.vendor": { en: "Vendor", ar: "المورد" },
+  "po.order_date": { en: "Order date", ar: "تاريخ الأمر" },
+  "po.vat_rate": { en: "VAT rate %", ar: "نسبة الضريبة %" },
+  "po.subtotal": { en: "Subtotal", ar: "المجموع" },
+  "po.vat_amount": { en: "VAT", ar: "الضريبة" },
+  "po.total": { en: "Total", ar: "الإجمالي" },
+  "po.manage_lines": { en: "Manage lines", ar: "إدارة البنود" },
+  "po.submit": { en: "Submit for approval", ar: "إرسال للاعتماد" },
+  "po.approve": { en: "Approve", ar: "اعتماد" },
+  "po.reject": { en: "Reject", ar: "رفض" },
+  "po.cancel": { en: "Cancel PO", ar: "إلغاء الأمر" },
+  "po.receive": { en: "Receive", ar: "استلام" },
+  "po.receive_title": { en: "Record receipt", ar: "تسجيل استلام" },
+  "po.remaining": { en: "Remaining", ar: "المتبقي" },
+  "po.qty_to_receive": { en: "Qty received", ar: "الكمية المستلمة" },
+  "po.no_lines": { en: "No lines yet", ar: "لا توجد بنود بعد" },
 };
 
 type I18nValue = {
