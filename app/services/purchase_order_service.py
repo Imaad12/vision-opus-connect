@@ -184,8 +184,17 @@ def confirm_purchase_order_import(session: Session, document: ImportedDocument) 
     except ValueError:
         currency_enum = DEFAULT_CURRENCY
 
+    # Supplier/Vendor intelligence foundation: recorded only when the
+    # vendor named on this PO (if any) was deterministically matched to
+    # an existing `Vendor` at extraction time -- an UNMATCHED or
+    # AMBIGUOUS vendor identity is never guessed, and never blocks
+    # confirming the PO itself (see `ImportedPurchaseOrderCandidate`'s
+    # own docstring).
+    vendor_id = candidate.matched_vendor_id if candidate.vendor_match_status == PurchaseOrderMatchStatus.MATCHED else None
+
     purchase_order = PurchaseOrder(
         quotation_id=quotation.id,
+        vendor_id=vendor_id,
         po_reference_number=normalized_reference,
         po_date=candidate.po_date,
         net_value=candidate.net_value,

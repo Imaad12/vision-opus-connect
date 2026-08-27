@@ -22,6 +22,18 @@ what makes importing the same PO twice (whether the identical file, a
 rescanned copy, or a manually re-run confirmation) refuse to create a
 second record or a second award, rather than relying on file-hash
 deduplication alone (which only catches byte-identical re-imports).
+
+`vendor_id` (Supplier/Vendor intelligence foundation) is a completely
+separate, independent, and always-nullable relationship: where a
+supplier/subcontractor is actually identifiable on the client PO itself
+(e.g. a client-nominated subcontractor) and deterministically matched to
+an existing `Vendor` (see `app.services.vendor_matching.match_vendor`),
+it is recorded here directly rather than left to be derived later by a
+text search. This is deliberately additive and orthogonal to
+`quotation_id`: it is never required, never inferred from
+`quotation`/`quotation.project`, and its absence or presence changes
+nothing about the award semantics above -- a PO with no identifiable
+vendor is exactly as valid and confirmable as one with one.
 """
 
 from __future__ import annotations
@@ -41,6 +53,7 @@ from app.database.base import Base, SoftDeleteMixin, TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.quotation import Quotation, QuotationVersion
+    from app.models.vendor import Vendor
 
 
 class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
@@ -53,6 +66,7 @@ class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     quotation_id: Mapped[int] = mapped_column(ForeignKey("quotations.id"), nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(ForeignKey("vendors.id"))
     # The specific quotation revision that was current at the moment this
     # PO triggered award (or, for a later PO confirmed against an
     # already-awarded quotation, the version that was actually awarded —
@@ -78,6 +92,7 @@ class PurchaseOrder(Base, TimestampMixin, SoftDeleteMixin):
     awarded_quotation_version: Mapped["QuotationVersion | None"] = relationship(
         "QuotationVersion", foreign_keys=[awarded_quotation_version_id]
     )
+    vendor: Mapped["Vendor | None"] = relationship("Vendor", foreign_keys=[vendor_id])
 
     def __repr__(self) -> str:
         return (

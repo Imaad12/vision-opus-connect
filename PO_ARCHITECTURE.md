@@ -197,3 +197,80 @@ numbers are in that session's report; summarized here for future rounds:
 - No dashboard/funnel reporting (quoted → awarded/PO received → invoiced →
   paid) — this foundation only makes sure the data needed for it exists;
   building the reporting itself is explicitly out of scope for this round.
+
+## 8. Supplier/Vendor intelligence foundation
+
+The next ERP vertical after quotations/POs is Supplier/Vendor
+intelligence: `Supplier → PO → Quotation/Project` today, and — not built
+in this round — `Supplier → Invoice → Payment` later. This round
+establishes the relationships that later work depends on, without
+building the downstream financial modules themselves.
+
+### 8.1 What already existed
+
+`Vendor` (one table, `vendor_type` discriminator for Supplier/
+Subcontractor — see `DATABASE_SCHEMA.md` §3.9) already existed, already
+used by `ActualCost.vendor_id` and `Invoice.vendor_id`. It was extended,
+not duplicated: `tax_number`, `default_currency`, `is_active` were added
+as plain, additive columns. "Total historical spend" and "outstanding
+payable amount" were deliberately *not* added as columns — every
+relationship needed to compute them already existed before this round
+(`ActualCost.vendor_id`, `Invoice.vendor_id` + `Payment`), so they remain
+computed-on-demand, never stored, the same rule this schema has followed
+everywhere since Phase 1.
+
+### 8.2 Extraction and matching are document-kind-agnostic by design
+
+`app/core/vendor_extraction.py` and `app/services/vendor_matching.py` are
+deliberately not quotation/PO-specific code — they extract/match a
+vendor's identity (name, VAT/tax registration number) from *any*
+already-OCR'd text, the same way `po_extraction.py`/`po_matching.py`
+extract/match PO-shaped fields, but with no assumption baked in about
+what kind of document produced that text. The only thing wired to a
+specific document type this round is the one call site
+(`import_service._build_purchase_order_candidate`, since client POs are
+the only document type currently staged that might plausibly name a
+vendor — e.g. a client-nominated subcontractor). When vendor invoices or
+other procurement documents are ingested in a future round, they reuse
+these same two modules unchanged; only a new call site is added.
+
+Matching is exact only, strongest-signal-first (tax number, then name),
+whitespace/case-normalized but never fuzzy or similarity-based — the
+same discipline `po_matching.py` already established for PO-to-quotation
+matching. An exact match against more than one `Vendor` is `AMBIGUOUS`
+and is never resolved by falling through to a weaker signal. Reuses
+`PurchaseOrderMatchStatus`'s existing three values rather than
+introducing a near-duplicate enum — its values carry no PO-specific
+meaning, only its class name does.
+
+### 8.3 The vendor match is always optional, unlike the quotation match
+
+This is the one deliberate asymmetry from the existing PO↔quotation
+matching rule: an `UNMATCHED`/`AMBIGUOUS` `match_status` blocks
+`confirm_purchase_order_import` outright (no PO can exist without an
+exact quotation match), but an `UNMATCHED`/`AMBIGUOUS`
+`vendor_match_status` never blocks it. Most real client POs will never
+name a vendor at all, and that must never be treated as a defect in the
+PO itself. `PurchaseOrder.vendor_id` is therefore always nullable and
+independent of `quotation_id` — populated only when a vendor was both
+named on the document and deterministically matched, exactly mirroring
+"PO before quotation"/"quotation before PO" reconciliation's own
+principle: extract first, stage, identify a candidate if possible, leave
+unmatched if not, and never let an unresolved secondary identity block a
+primary, already-safe transaction.
+
+### 8.4 What this round does not build
+
+- No vendor invoice ingestion, no vendor PO (a PO *we* issue to a
+  supplier, as opposed to a PO a *client* issues to us) — this round only
+  extends the existing client-PO pipeline with an optional vendor link.
+- No supplier spend/payable analytics functions — the relationships
+  needed for them exist; the functions themselves are future work.
+- No UI for managing vendors or reviewing a vendor match.
+- No real supplier/vendor document archive has been ingested yet — the
+  label vocabulary in `vendor_extraction.py` is provisional accounting-
+  document wording, the same starting posture `po_extraction.py` had
+  before real PO scans existed to validate against. When real supplier
+  documents arrive, extend it the same evidence-driven way: diagnose
+  against the real OCR text first, then make a narrow, grounded addition
+  with a regression test — never expand the heuristic set speculatively.

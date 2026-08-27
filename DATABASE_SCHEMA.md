@@ -269,13 +269,47 @@ additive migration on this table, not a schema redesign.
 |---|---|---|
 | id | PK | |
 | vendor_type | VendorType enum, required | `SUPPLIER` or `SUBCONTRACTOR` |
-| name | str, required, indexed | |
+| name | str, required, indexed | doubles as legal/name identity — see §3.9.1 |
 | trade_id | FK → Trade.id, nullable | primary specialization |
 | contact_name | str, nullable | |
 | contact_email | str, nullable | |
 | contact_phone | str, nullable | |
+| tax_number | str, nullable, indexed | VAT/tax registration number — the strongest deterministic matching signal, see §3.9.1 |
+| default_currency | Currency enum, required, default AED | |
 | payment_terms | str, nullable | e.g. "30 days" |
+| is_active | bool, required, default True | |
 | notes | text, nullable | |
+
+#### 3.9.1 Supplier/Vendor intelligence foundation
+
+`Vendor` is deliberately not extended with an "invoiced value"/"total
+spend"/"outstanding payable" column — those are computed, never stored,
+the same rule already followed everywhere else in this schema (§2): they
+are derivable on demand from `ActualCost.vendor_id`, `Invoice.vendor_id`
+(+ `Payment`), and (once matched) `PurchaseOrder.vendor_id` below, so no
+new relationship was needed to "reach" a vendor's documents, projects, or
+transactions — they were already reachable transitively before this
+round.
+
+What this round actually adds is the extraction/matching path that
+*populates* `PurchaseOrder.vendor_id` in the first place, mirroring the
+existing PO → Quotation matching discipline exactly (see §3.18 and
+PO_ARCHITECTURE.md):
+
+- `app.core.vendor_extraction.extract_vendor_candidate` — deterministic,
+  document-kind-agnostic extraction of a vendor's name and/or VAT/tax
+  registration number from any already-OCR'd text (not quotation/PO-
+  specific code; it has no idea what kind of document it was handed).
+- `app.services.vendor_matching.match_vendor` — exact, whitespace/case-
+  normalized matching only, never fuzzy, tried strongest-signal-first
+  (tax number, then name); an exact match against more than one `Vendor`
+  is `AMBIGUOUS` and never falls through to a weaker signal to break the
+  tie. Reuses `PurchaseOrderMatchStatus`'s existing three values rather
+  than introducing a near-duplicate enum.
+- A vendor match is always optional and never blocks anything: most real
+  client POs will never name a vendor at all, and `confirm_purchase_
+  order_import`'s existing award gate is completely unaffected by
+  whether one was found.
 
 ### 3.10 EstimateRevision
 
@@ -517,9 +551,17 @@ subject to the graded review a quotation's financial extraction needs.
 | awarded_quotation_version_id | FK -> quotation_versions.id, nullable | the version awarded (or, for a PO confirmed against an already-awarded quotation, the version that was actually awarded) — a snapshot, never recomputed |
 | po_reference_number | str(100), required, **unique** | per current business practice, the quotation's own reference number as printed on the PO; the unique constraint is the idempotency mechanism — re-confirming the same reference never creates a second row or a second award |
 | po_date, net_value, tax_value, gross_value, currency | nullable except currency | extracted PO fields, kept for analytics; `net_value` is what feeds `contract_value` (VAT-exclusive, matching that column's existing invariant) |
+| vendor_id | FK -> vendors.id, **nullable** | Supplier/Vendor intelligence foundation (§3.9.1) — set only when a vendor named on the PO document was deterministically matched; completely independent of, and never required by, `quotation_id`/the award relationship above |
 | notes | text, nullable | |
 
 **ImportedPurchaseOrderCandidate** — one-to-one with `ImportedDocument` (unique FK), the staging layer: the same extracted fields as `PurchaseOrder` above, plus `match_status` (`PurchaseOrderMatchStatus`: `MATCHED`/`UNMATCHED`/`AMBIGUOUS`, computed immediately at extraction time — matching is exact-string, not a judgment call, so it is never deferred to confirmation), `matched_quotation_id` (set only when `MATCHED`), `candidate_quotation_ids` (JSON list, diagnostic only, set only when `AMBIGUOUS`), and `raw_values`/`field_confidence` (same JSON-dict convention as `ImportedQuotationCandidate`).
+
+`vendor_name`/`vendor_tax_number` (extracted, nullable free text) and
+`vendor_match_status`/`matched_vendor_id`/`candidate_vendor_ids` mirror
+the quotation-matching columns' own shape, on the same independent
+identity axis as `PurchaseOrder.vendor_id` above — see §3.9.1. Unlike
+`match_status`, an `UNMATCHED`/`AMBIGUOUS` `vendor_match_status` never
+blocks `confirm_purchase_order_import`.
 
 `ImportedDocument.resulting_purchase_order_id` (nullable FK) is populated only once a PO candidate is confirmed — mirrors `resulting_quotation_id` etc.
 

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.purchase_order import PurchaseOrder
     from app.models.quotation import Quotation, QuotationVersion
+    from app.models.vendor import Vendor
 
 
 class ImportedDocument(Base, TimestampMixin):
@@ -272,6 +273,22 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     `candidate_quotation_ids` holds the JSON list of every quotation id
     that shared the (normalized) reference when `match_status ==
     AMBIGUOUS`, purely for reviewer diagnostics -- never used to pick one.
+
+    `vendor_name`/`vendor_tax_number` (Supplier/Vendor intelligence
+    foundation) are a completely independent identity axis from
+    `po_reference_number`'s quotation matching above -- a client PO
+    document occasionally names a supplier/subcontractor (e.g. a
+    client-nominated subcontractor) that has nothing to do with which
+    quotation the PO awards. `vendor_match_status`/`matched_vendor_id`/
+    `candidate_vendor_ids` mirror the quotation-matching columns' own
+    shape exactly (see `app.services.vendor_matching.match_vendor`) and
+    reuse `PurchaseOrderMatchStatus` for the same reason that type is
+    reused there: its three values carry no PO-specific meaning. Like the
+    quotation match, this is computed at extraction time and never
+    fuzzy-matched; unlike the quotation match, a vendor match is never
+    required for `confirm_purchase_order_import` to succeed -- most real
+    client POs will never name a vendor at all, and that must never block
+    confirming the PO itself.
     """
 
     __tablename__ = "imported_purchase_order_candidates"
@@ -297,6 +314,16 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     matched_quotation_id: Mapped[int | None] = mapped_column(ForeignKey("quotations.id"))
     candidate_quotation_ids: Mapped[str | None] = mapped_column(Text)
 
+    vendor_name: Mapped[str | None] = mapped_column(String(255))
+    vendor_tax_number: Mapped[str | None] = mapped_column(String(50))
+    vendor_match_status: Mapped[PurchaseOrderMatchStatus] = mapped_column(
+        SAEnum(PurchaseOrderMatchStatus, native_enum=False),
+        default=PurchaseOrderMatchStatus.UNMATCHED,
+        nullable=False,
+    )
+    matched_vendor_id: Mapped[int | None] = mapped_column(ForeignKey("vendors.id"))
+    candidate_vendor_ids: Mapped[str | None] = mapped_column(Text)
+
     raw_values: Mapped[str | None] = mapped_column(Text)
     field_confidence: Mapped[str | None] = mapped_column(Text)
 
@@ -308,6 +335,7 @@ class ImportedPurchaseOrderCandidate(Base, TimestampMixin):
     matched_quotation: Mapped["Quotation | None"] = relationship(
         "Quotation", foreign_keys=[matched_quotation_id]
     )
+    matched_vendor: Mapped["Vendor | None"] = relationship("Vendor", foreign_keys=[matched_vendor_id])
 
     def __repr__(self) -> str:
         return (

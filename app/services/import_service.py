@@ -50,6 +50,7 @@ from app.core.import_segmentation import detect_segments, find_field_pages, slic
 from app.core.ocr_confidence import compute_ocr_confidence_status
 from app.core.ocr_extraction import extract_via_ocr
 from app.core.po_extraction import extract_purchase_order_candidate
+from app.core.vendor_extraction import extract_vendor_candidate
 from app.importers.base import ExtractedTable, RawExtraction, build_default_registry
 from app.models import (
     BOQ,
@@ -67,6 +68,7 @@ from app.models import (
 from app.services import client_service, project_service, purchase_order_service, quotation_service
 from app.services.errors import RevisionConflictError, ValidationError
 from app.services.po_matching import match_quotation_for_reference
+from app.services.vendor_matching import match_vendor
 
 logger = logging.getLogger("app.services.import_service")
 
@@ -457,6 +459,17 @@ def _build_purchase_order_candidate(session: Session, document: ImportedDocument
     fields = extract_purchase_order_candidate(raw.text, raw.tables)
     outcome = match_quotation_for_reference(session, fields.po_reference_number)
 
+    # Supplier/Vendor intelligence foundation: a completely independent
+    # identity axis from the quotation-reference match above -- see
+    # `app.core.vendor_extraction`/`app.services.vendor_matching` and
+    # `ImportedPurchaseOrderCandidate`'s own docstring. Always attempted
+    # (harmless no-op when the PO names no vendor at all, the common
+    # case), never required for the PO itself to be confirmable.
+    vendor_fields = extract_vendor_candidate(raw.text, raw.tables)
+    vendor_outcome = match_vendor(
+        session, vendor_name=vendor_fields.vendor_name, vendor_tax_number=vendor_fields.vendor_tax_number
+    )
+
     candidate = ImportedPurchaseOrderCandidate(
         imported_document_id=document.id,
         po_reference_number=fields.po_reference_number,
@@ -469,6 +482,13 @@ def _build_purchase_order_candidate(session: Session, document: ImportedDocument
         matched_quotation_id=outcome.quotation.id if outcome.quotation else None,
         candidate_quotation_ids=(
             json.dumps(outcome.candidate_quotation_ids) if outcome.candidate_quotation_ids else None
+        ),
+        vendor_name=vendor_fields.vendor_name,
+        vendor_tax_number=vendor_fields.vendor_tax_number,
+        vendor_match_status=vendor_outcome.status,
+        matched_vendor_id=vendor_outcome.vendor.id if vendor_outcome.vendor else None,
+        candidate_vendor_ids=(
+            json.dumps(vendor_outcome.candidate_vendor_ids) if vendor_outcome.candidate_vendor_ids else None
         ),
         raw_values=json.dumps(fields.raw_values),
         field_confidence=json.dumps(fields.field_confidence),
