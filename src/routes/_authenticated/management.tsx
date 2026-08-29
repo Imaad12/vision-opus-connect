@@ -92,10 +92,21 @@ function ManagementPage() {
 
   const cf = cashFlowQuery.data;
   const oi = operatingIncomeQuery.data;
+  const hasFetchError =
+    cashFlowQuery.isError ||
+    operatingIncomeQuery.isError ||
+    profitabilityQuery.isError ||
+    vendorSpendQuery.isError;
 
   return (
     <>
       <PageHeader title={t("mgmt.title")} description={t("mgmt.description")} />
+
+      {hasFetchError && (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {t("common.load_failed")} — {t("dash.data_may_be_incomplete")}
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <div className="surface-panel p-4">

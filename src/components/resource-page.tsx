@@ -17,10 +17,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { logAudit } from "@/lib/audit";
 import { db, type Row } from "@/lib/db";
 import { formatDate, formatMoney, useI18n, type Lang } from "@/lib/i18n";
+
+function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object" && "message" in e)
+    return String((e as { message: unknown }).message);
+  return String(e);
+}
 
 export type Bilingual = { en: string; ar: string };
 
@@ -325,20 +333,39 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
             <tbody>
               {listQuery.isLoading && (
                 <tr>
-                  <td colSpan={columns.length + 1} className="px-3 py-8 text-center text-muted-foreground">
+                  <td
+                    colSpan={columns.length + 1}
+                    className="px-3 py-8 text-center text-muted-foreground"
+                  >
                     {t("common.loading")}
                   </td>
                 </tr>
               )}
-              {!listQuery.isLoading && rows.length === 0 && (
+              {listQuery.isError && (
                 <tr>
-                  <td colSpan={columns.length + 1} className="px-3 py-10 text-center text-muted-foreground">
+                  <td
+                    colSpan={columns.length + 1}
+                    className="px-3 py-10 text-center text-destructive"
+                  >
+                    {t("common.load_failed")}: {errorMessage(listQuery.error)}
+                  </td>
+                </tr>
+              )}
+              {!listQuery.isLoading && !listQuery.isError && rows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={columns.length + 1}
+                    className="px-3 py-10 text-center text-muted-foreground"
+                  >
                     {t("common.empty")}
                   </td>
                 </tr>
               )}
               {rows.map((row) => (
-                <tr key={String(row["id"])} className="border-b border-border/70 last:border-0 hover:bg-muted/30">
+                <tr
+                  key={String(row["id"])}
+                  className="border-b border-border/70 last:border-0 hover:bg-muted/30"
+                >
                   {columns.map((c) => (
                     <td key={c.key} className="px-3 py-2.5 align-middle">
                       {cellValue(row, c, lang)}
@@ -498,7 +525,9 @@ export function RecordDialog({
                   </select>
                 ) : (
                   <Input
-                    type={field.kind === "number" ? "number" : field.kind === "date" ? "date" : "text"}
+                    type={
+                      field.kind === "number" ? "number" : field.kind === "date" ? "date" : "text"
+                    }
                     step={field.kind === "number" ? "any" : undefined}
                     value={String(value ?? "")}
                     required={field.required}

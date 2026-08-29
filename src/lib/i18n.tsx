@@ -66,6 +66,11 @@ export const dict: Dict = {
   "common.end_date": { en: "End date", ar: "تاريخ الانتهاء" },
   "common.empty": { en: "No records yet", ar: "لا توجد سجلات بعد" },
   "common.loading": { en: "Loading…", ar: "جارٍ التحميل…" },
+  "common.load_failed": { en: "Couldn't load data", ar: "تعذر تحميل البيانات" },
+  "dash.data_may_be_incomplete": {
+    en: "figures below may be incomplete until this is resolved.",
+    ar: "قد تكون الأرقام أدناه غير مكتملة حتى يتم حل هذه المشكلة.",
+  },
   "common.no_access": {
     en: "You do not have permission to view this module.",
     ar: "لا تملك صلاحية الوصول إلى هذه الشاشة.",

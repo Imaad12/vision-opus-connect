@@ -124,6 +124,17 @@ function DashboardPage() {
     queryFn: () => api.get<{ net_cash_flow: string }>("/management/cash-flow"),
   });
 
+  // Every KPI below quietly falls back to 0/empty on a failed fetch (a
+  // network/CORS/backend-down failure looks identical to "no data yet"
+  // otherwise) -- this is the one visible signal that something is
+  // actually broken, not just a company with nothing recorded yet.
+  const hasFetchError =
+    leadsQuery.isError ||
+    quotesQuery.isError ||
+    projectsQuery.isError ||
+    invoicesQuery.isError ||
+    posQuery.isError;
+
   const audit = useQuery({
     queryKey: ["dashboard-audit"],
     enabled: me.can("admin.audit"),
@@ -173,6 +184,12 @@ function DashboardPage() {
         title={t("nav.dashboard")}
         description={`${t("dash.welcome")}, ${me.profile?.full_name ?? ""}`}
       />
+
+      {hasFetchError && (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {t("common.load_failed")} — {t("dash.data_may_be_incomplete")}
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <Kpi icon={Target} label={t("dash.pipeline")} value={formatMoney(openLeadValue, lang)} />
