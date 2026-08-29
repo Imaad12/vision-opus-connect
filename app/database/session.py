@@ -18,10 +18,19 @@ _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
 
 
-def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+    """SQLite doesn't enforce foreign keys unless told to, per connection --
+    this PRAGMA is SQLite-specific syntax and meaningless (would error) on
+    any other database. PostgreSQL always enforces foreign keys natively,
+    so it needs no equivalent -- see `_attach_dialect_listeners`."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+def _attach_dialect_listeners(engine: Engine) -> None:
+    if engine.dialect.name == "sqlite":
+        event.listen(engine, "connect", _enable_sqlite_foreign_keys)
 
 
 def get_engine(database_url: str | None = None) -> Engine:
@@ -33,12 +42,12 @@ def get_engine(database_url: str | None = None) -> Engine:
     global _engine, _SessionFactory
     if database_url is not None:
         engine = create_engine(database_url, future=True)
-        event.listen(engine, "connect", _enable_foreign_keys)
+        _attach_dialect_listeners(engine)
         return engine
 
     if _engine is None:
-        _engine = create_engine(settings.database_url, future=True)
-        event.listen(_engine, "connect", _enable_foreign_keys)
+        _engine = create_engine(settings.resolved_database_url, future=True)
+        _attach_dialect_listeners(_engine)
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine
 

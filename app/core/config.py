@@ -20,6 +20,16 @@ class Settings(BaseSettings):
 
     database_path: Path = PROJECT_ROOT / "vision_contracting.db"
 
+    #: A full SQLAlchemy connection string (e.g.
+    #: "postgresql+psycopg://user:pass@host:5432/dbname") for production
+    #: use, read from VISION_DATABASE_URL. Empty by default, in which case
+    #: `resolved_database_url` below falls back to the local SQLite file
+    #: at `database_path` -- local development and the test suite are
+    #: completely unaffected by this setting existing. Whatever connection
+    #: string your hosting provider gives you for its managed Postgres
+    #: instance goes here, verbatim.
+    database_url: str = ""
+
     #: Identity/RBAC currently lives in the existing Supabase project the
     #: VINCO frontend already authenticates against (see API_ARCHITECTURE.md
     #: -- this backend deliberately does not duplicate the role/permission
@@ -50,8 +60,21 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
 
     @property
-    def database_url(self) -> str:
-        return f"sqlite:///{self.database_path}"
+    def resolved_database_url(self) -> str:
+        """The connection string the application actually uses: the
+        explicit `database_url` override if set (production), otherwise
+        the local SQLite file (development/tests)."""
+        return self.database_url or f"sqlite:///{self.database_path}"
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.resolved_database_url.startswith("postgresql")
+
+    #: Python `logging` level name for the FastAPI process's stdout logs
+    #: (see app/core/logging_config.py). "INFO" by default; set
+    #: VISION_LOG_LEVEL=WARNING or similar in production to quiet routine
+    #: per-request access logs.
+    log_level: str = "INFO"
 
 
 settings = Settings()

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, Date, Index, UniqueConstraint, text, true
+from sqlalchemy import Boolean, CheckConstraint, Date, Index, UniqueConstraint, false, text, true
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -50,11 +50,21 @@ class EstimateRevision(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         UniqueConstraint("project_id", "revision_number", name="uq_estimate_revision_number"),
         CheckConstraint("revision_number > 0", name="ck_estimate_revisions_revision_number_positive"),
+        # A partial unique index: at most one `is_final=True` row per
+        # project, but any number of non-final ones. `sqlite_where`/
+        # `postgresql_where` are dialect-specific kwargs SQLAlchemy only
+        # honors on their own dialect -- both are required, or this index
+        # silently becomes a *plain* unique index on `project_id` (i.e.
+        # "one revision per project, period") on whichever dialect's kwarg
+        # is missing, which is a different, much stricter rule than
+        # intended. SQLite's dialect compares against the literal integer
+        # it stores booleans as; PostgreSQL has a real boolean type.
         Index(
             "uq_estimate_revisions_one_final_per_project",
             "project_id",
             unique=True,
             sqlite_where=text("is_final = 1"),
+            postgresql_where=text("is_final = true"),
         ),
     )
 
@@ -63,7 +73,7 @@ class EstimateRevision(Base, TimestampMixin, SoftDeleteMixin):
     quotation_version_id: Mapped[int | None] = mapped_column(ForeignKey("quotation_versions.id"))
     revision_number: Mapped[int] = mapped_column(nullable=False)
     effective_date: Mapped[date | None] = mapped_column(Date)
-    is_final: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
+    is_final: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     currency: Mapped[Currency] = mapped_column(
         SAEnum(Currency, native_enum=False), default=DEFAULT_CURRENCY, nullable=False
     )

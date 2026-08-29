@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.logging_middleware import AccessLogMiddleware
 from app.api.routers import (
     clients,
     company,
@@ -35,11 +36,14 @@ from app.api.routers import (
     vendors,
 )
 from app.core.config import settings
+from app.core.logging_config import configure_logging
 from app.services.errors import ValidationError
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title="Vision Contracting API", version="0.1.0")
+    app.add_middleware(AccessLogMiddleware)
 
     # Without this, every cross-origin request from the frontend (a
     # different origin/port than this API) fails the browser's CORS
