@@ -22,7 +22,14 @@ if config.config_file_name is not None:
 # Use the application's own settings for the database URL rather than a
 # hardcoded value in alembic.ini, so migrations always target the same
 # database the application would use.
-config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
+#
+# `set_main_option` stores this into a configparser section, which treats
+# '%' as the start of a '%(name)s' interpolation -- a literal '%' in the
+# URL (e.g. a percent-encoded password character, or a `?options=...`
+# query string like the one a schema-scoped connection string can carry)
+# must be escaped as '%%' or configparser raises
+# "invalid interpolation syntax" before the URL is ever used.
+config.set_main_option("sqlalchemy.url", settings.resolved_database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

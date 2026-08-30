@@ -122,7 +122,7 @@ def check_sequences(target: Engine) -> bool:
                 continue
             seq_value = conn.execute(
                 text(
-                    "SELECT last_value FROM pg_sequences WHERE schemaname = 'public' "
+                    "SELECT last_value FROM pg_sequences WHERE schemaname = current_schema() "
                     "AND sequencename = split_part(pg_get_serial_sequence(:t, 'id'), '.', 2)"
                 ),
                 {"t": table.name},

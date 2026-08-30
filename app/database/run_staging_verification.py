@@ -1,45 +1,53 @@
 """ONE-COMMAND PostgreSQL staging verification.
 
-Runs the entire staging cutover check end-to-end against a real, empty
-PostgreSQL database (e.g. a fresh Supabase project or schema reserved
-for staging) and a COPY of the real local SQLite business database:
+Runs the entire staging cutover check end-to-end against an ISOLATED
+PostgreSQL SCHEMA inside your existing database (never your `public`
+schema) and a COPY of the real local SQLite business database:
 
     python -m app.database.run_staging_verification
 
-Never run this against a database that already has real production data
-in it -- it refuses to proceed unless the target's `public` schema is
-completely empty (see `check_schema_empty` below), specifically so it
-can never overwrite or duplicate anything real.
+This never touches, reads, or writes anything in `public` (or any other
+pre-existing schema). It works entirely inside its own dedicated schema
+(named by VISION_STAGING_SCHEMA, default "vinco_staging") within the same
+database VISION_DATABASE_URL already points at -- no new connection
+string, no new Supabase project, no CREATE DATABASE privilege needed.
+Every connection this script makes sets its PostgreSQL `search_path` to
+that schema alone, so unqualified table/sequence lookups can never
+resolve to `public`. It owns that schema's entire lifecycle -- each run
+starts by dropping and recreating it from scratch -- which is safe to do
+without asking, because nothing but a previous run of this exact script
+could ever have put anything there.
 
 What it does, in this order (note: the PostgreSQL-compatibility test
 suite runs BEFORE any real data is copied in, not after, even though a
 literal reading of "copy data, then run compatibility tests" would put
 it later -- those tests call `Base.metadata.drop_all()` on the target at
 teardown, which would silently destroy the staged data copy if run
-afterward; running them first, while the target is still empty, is
+afterward; running them first, while the schema is still empty, is
 lossless and covers exactly the same ground):
 
   1.  Read the PostgreSQL connection string from VISION_DATABASE_URL, or
       prompt for it (hidden input, never touches shell history).
   2.  Connect and verify the server is reachable.
-  3.  Confirm the target's `public` schema is completely empty (abort
-      otherwise -- this script never touches a non-empty database).
+  3.  Drop and recreate the isolated staging schema (never `public`).
   4.  Run the PostgreSQL dialect-compatibility tests against the (still
-      empty) target.
+      empty) staging schema.
   5.  Apply the PostgreSQL baseline migration (`alembic stamp` +
-      `alembic upgrade head`).
+      `alembic upgrade head`) inside the staging schema.
   6.  Locate the real local SQLite database and make a timestamped COPY
       of it -- every later step operates on the copy, never the
       original. The original's checksum is recorded now and re-checked
       at the very end.
-  7.  Migrate the copy's data into the now-empty target.
+  7.  Migrate the copy's data into the now-empty staging schema.
   8.  Compare row counts, key financial totals, foreign-key referential
-      integrity, and sequence positions between the copy and the target.
-  9.  Start the FastAPI app against the target on a scratch local port
-      and run smoke tests: /health, and a protected endpoint without a
-      token (must be rejected). Optionally, if you paste a Supabase
-      access token when prompted (also hidden input, skippable), it also
-      exercises one authenticated create -> read -> cleanup cycle.
+      integrity, and sequence positions between the copy and the staging
+      schema.
+  9.  Start the FastAPI app against the staging schema on a scratch local
+      port and run smoke tests: /health, and a protected endpoint
+      without a token (must be rejected). Optionally, if you paste a
+      Supabase access token when prompted (also hidden input,
+      skippable), it also exercises one authenticated create -> read ->
+      cleanup cycle.
   10. Re-verify the original SQLite file's checksum is unchanged.
   11. Print one PASS/FAIL report covering everything above.
 
@@ -64,6 +72,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 import httpx
 from sqlalchemy import create_engine, text
@@ -71,18 +80,28 @@ from sqlalchemy.engine import URL
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: The dedicated, isolated schema this script creates, uses, and resets
+#: on every run -- never `public`, never any pre-existing schema.
+STAGING_SCHEMA = os.environ.get("VISION_STAGING_SCHEMA", "vinco_staging")
+
 
 class StagingCheckFailed(Exception):
     pass
 
 
-def build_engine_url(raw: str) -> URL:
+def build_engine_url(raw: str, schema: str) -> URL:
     """Parse a possibly-malformed connection string into a structured
     URL, tolerating two things real users actually run into: no
     '+psycopg' driver suffix, and a password containing a raw '@' (which
     is otherwise ambiguous in a URI, since '@' is also the credentials/
     host separator -- splitting on the LAST '@' resolves it correctly
-    because a hostname itself never contains '@')."""
+    because a hostname itself never contains '@').
+
+    Also forces every connection's PostgreSQL `search_path` to `schema`
+    alone (preserving any other query parameters already present, e.g.
+    `sslmode`), so every unqualified table/sequence lookup this script or
+    the app makes resolves inside the isolated staging schema and can
+    never reach `public`."""
     raw = raw.strip()
     if "://" not in raw:
         raise StagingCheckFailed("Connection string must include a scheme, e.g. postgresql://...")
@@ -94,10 +113,15 @@ def build_engine_url(raw: str) -> URL:
         raise StagingCheckFailed("Connection string is missing a password (user:password@...).")
     user, password = creds.split(":", 1)
     if "/" in hostpart:
-        hostport, database = hostpart.split("/", 1)
+        hostport, dbpart = hostpart.split("/", 1)
     else:
-        hostport, database = hostpart, ""
-    database = (database.split("?", 1)[0] or "postgres").strip("/")
+        hostport, dbpart = hostpart, ""
+    if "?" in dbpart:
+        database, query_string = dbpart.split("?", 1)
+        query = dict(parse_qsl(query_string))
+    else:
+        database, query = dbpart, {}
+    database = database.strip("/") or "postgres"
     if ":" in hostport:
         host, port_s = hostport.split(":", 1)
         try:
@@ -108,7 +132,13 @@ def build_engine_url(raw: str) -> URL:
         host, port = hostport, 5432
     if not host:
         raise StagingCheckFailed("Connection string is missing a host.")
-    return URL.create("postgresql+psycopg", username=user, password=password, host=host, port=port, database=database)
+
+    search_path_opt = f"-csearch_path={schema}"
+    query["options"] = f"{query['options']} {search_path_opt}" if query.get("options") else search_path_opt
+
+    return URL.create(
+        "postgresql+psycopg", username=user, password=password, host=host, port=port, database=database, query=query
+    )
 
 
 def make_redactor(*secrets: str):
@@ -146,18 +176,18 @@ def check_connection(engine, redact) -> str:
     return short_version
 
 
-def check_schema_empty(engine) -> None:
-    print("[3/11] Confirming the target's public schema is empty...")
-    with engine.connect() as conn:
-        rows = conn.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).fetchall()
-    tables = [r[0] for r in rows]
-    if tables:
-        raise StagingCheckFailed(
-            "Target database already has tables in its public schema: "
-            f"{tables}. This script refuses to run against a non-empty database -- "
-            "point it at a genuinely empty staging database/schema and try again."
-        )
-    print("        Empty, OK to proceed.")
+def reset_staging_schema(engine, schema: str) -> None:
+    """Drop and recreate the isolated staging schema. Safe to do without
+    asking: `schema` is a name this script owns end to end (default
+    "vinco_staging"), never `public` or anything pre-existing, so nothing
+    could be in it except leftovers from a previous run of this exact
+    tool -- and this uses DROP SCHEMA, never DROP DATABASE or anything
+    that could reach outside that one namespace."""
+    print(f"[3/11] Creating an isolated staging schema '{schema}' (never touching public)...")
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    print(f"        Schema '{schema}' is ready and empty. Your public schema was not touched.")
 
 
 def run_subprocess(cmd: list[str], env: dict, redact, cwd: Path = REPO_ROOT) -> tuple[bool, str]:
@@ -320,7 +350,7 @@ def main() -> int:
     print("=" * 70)
 
     raw_url = get_database_url()
-    parsed = build_engine_url(raw_url)
+    parsed = build_engine_url(raw_url, STAGING_SCHEMA)
     canonical_url = parsed.render_as_string(hide_password=False)
     redact = make_redactor(raw_url, canonical_url, parsed.password or "", parsed.username or "")
 
@@ -332,8 +362,8 @@ def main() -> int:
     version = check_connection(engine, redact)
     report.append(("Connect to PostgreSQL", True, version))
 
-    check_schema_empty(engine)
-    report.append(("Target schema is empty", True, ""))
+    reset_staging_schema(engine, STAGING_SCHEMA)
+    report.append((f"Isolated staging schema '{STAGING_SCHEMA}' ready (public untouched)", True, ""))
 
     ok, compat_output = run_compat_tests(canonical_url, base_env, redact)
     report.append(("PostgreSQL compatibility tests", ok, "" if ok else compat_output[-2000:]))
@@ -400,7 +430,8 @@ def main() -> int:
             print(f"         {detail}")
     print("=" * 70)
     print("OVERALL: " + ("ALL CHECKS PASSED" if all_passed else "ONE OR MORE CHECKS FAILED"))
-    print(f"Staging copy of the schema is now live in your target PostgreSQL database. Test record cleanup: {'done' if any('cleaned up' in line for line in api_lines) else 'n/a (no token provided, no write test performed)'}")
+    print(f"Staged data lives in the isolated '{STAGING_SCHEMA}' schema only -- your public schema was never touched.")
+    print(f"Test record cleanup: {'done' if any('cleaned up' in line for line in api_lines) else 'n/a (no token provided, no write test performed)'}")
     return 0 if all_passed else 1
 
 
