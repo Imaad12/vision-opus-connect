@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: vinco-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      # Supabase Session Pooler connection string, in the form
+      # postgresql+psycopg://user:password@host:5432/dbname
+      # (get the exact host from Supabase Dashboard -> Project Settings ->
+      # Database -> Connection string -> Session pooler tab). Set as a
+      # secret in the Render dashboard -- never commit a real value.
+      - key: VISION_DATABASE_URL
+        sync: false
+      # Supabase project URL, e.g. https://<ref>.supabase.co
+      - key: VISION_SUPABASE_URL
+        sync: false
+      # Supabase anon/publishable key (safe to expose client-side, but
+      # still set as a Render secret rather than committed here).
+      - key: VISION_SUPABASE_ANON_KEY
+        sync: false
+      # Comma-separated list of allowed frontend origins, e.g.
+      # https://vinco.pages.dev,https://app.yourdomain.com
+      - key: VISION_CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: VISION_LOG_LEVEL
+        value: INFO
