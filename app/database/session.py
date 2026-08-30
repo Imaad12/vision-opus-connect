@@ -13,6 +13,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.database.schema_isolation import pin_search_path_from_settings
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -43,11 +44,13 @@ def get_engine(database_url: str | None = None) -> Engine:
     if database_url is not None:
         engine = create_engine(database_url, future=True)
         _attach_dialect_listeners(engine)
+        pin_search_path_from_settings(engine)
         return engine
 
     if _engine is None:
         _engine = create_engine(settings.resolved_database_url, future=True)
         _attach_dialect_listeners(_engine)
+        pin_search_path_from_settings(_engine)
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine
 

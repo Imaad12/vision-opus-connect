@@ -76,5 +76,14 @@ class Settings(BaseSettings):
     #: per-request access logs.
     log_level: str = "INFO"
 
+    #: If set, every connection this process makes explicitly runs
+    #: `SET search_path TO <staging_schema>` immediately after connecting
+    #: (see app/database/schema_isolation.py) -- used only by the staging
+    #: verification tooling (app/database/run_staging_verification.py) to
+    #: pin every operation inside one isolated PostgreSQL schema, never
+    #: touching `public`. Empty by default, in which case nothing about
+    #: normal application behavior changes.
+    staging_schema: str = ""
+
 
 settings = Settings()

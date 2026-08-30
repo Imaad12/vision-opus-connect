@@ -18,19 +18,19 @@ creates and drops all tables). Not run by default / in normal CI:
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Generator
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import Engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
+from app.core.config import settings
 from app.core.enums import DEFAULT_CURRENCY
 from app.database.base import Base
+from app.database.schema_isolation import verify_search_path
 from app.database.session import get_engine
 from app.models.client import Client
 from app.models.company import Company
@@ -46,38 +46,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _requested_search_path(url: str) -> str | None:
-    """If the connection URL asks for an isolated schema via a
-    `?options=-c search_path=...` (or `-csearch_path=...`) query
-    parameter, return that schema name; otherwise None."""
-    options = make_url(url).query.get("options", "")
-    match = re.search(r"search_path=([\w\"]+)", options)
-    return match.group(1) if match else None
-
-
 @pytest.fixture
 def pg_engine() -> Generator[Engine, None, None]:
+    # `get_engine()` already pins an explicit `SET search_path` on every
+    # new connection when VISION_STAGING_SCHEMA is set (see
+    # app.database.schema_isolation) -- confirmed necessary because
+    # Supabase's Supavisor Session Pooler silently drops a connection
+    # string's `-c search_path=...` startup option, and a stock PgBouncer
+    # instead hard-rejects the connection for carrying one at all. This
+    # re-checks the explicit SET actually took before any DDL runs,
+    # rather than letting a failure surface later as a confusing FK
+    # type-mismatch against some unrelated pre-existing table.
     engine = get_engine(POSTGRES_TEST_URL)
-    expected_schema = _requested_search_path(POSTGRES_TEST_URL)
-    if expected_schema:
-        # A connection pooler that doesn't forward the startup `options`
-        # parameter to the real backend would silently leave this
-        # connection on its default search_path (typically `public`) --
-        # `Base.metadata.create_all()` below would then operate against
-        # whatever already lives there instead of the isolated schema
-        # the caller asked for. That's a real, dangerous failure mode
-        # (not this schema's problem to work around): catch it here,
-        # loudly and specifically, before any DDL runs, rather than
-        # letting it surface later as a confusing FK type-mismatch
-        # against some unrelated pre-existing table.
-        with engine.connect() as conn:
-            actual_schema = conn.execute(text("SELECT current_schema()")).scalar()
-        assert actual_schema == expected_schema, (
+    if settings.staging_schema:
+        actual_schema = verify_search_path(engine, settings.staging_schema)
+        assert actual_schema == settings.staging_schema, (
             f"Connection did not apply the requested isolated schema: expected "
-            f"current_schema() = {expected_schema!r} but got {actual_schema!r}. "
-            "This means the connection pooler in front of this database is not "
-            "honoring the '-c search_path=...' startup option, so DDL below would "
-            "silently run against the wrong schema. Refusing to proceed."
+            f"current_schema() = {settings.staging_schema!r} but got {actual_schema!r} "
+            "even after an explicit SET search_path. Refusing to proceed."
         )
     Base.metadata.create_all(engine)
     try:

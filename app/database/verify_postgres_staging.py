@@ -35,6 +35,7 @@ from sqlalchemy.engine import Engine
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from app.database.base import Base
+from app.database.schema_isolation import pin_search_path_from_settings
 from app.models.contract import Contract
 from app.models.cost import ActualCost
 from app.models.employee import PayrollRecord
@@ -146,6 +147,7 @@ def main() -> None:
 
     source_engine = create_engine(args.source, future=True)
     target_engine = create_engine(args.target, future=True)
+    pin_search_path_from_settings(target_engine)
 
     results = [
         compare_row_counts(source_engine, target_engine),

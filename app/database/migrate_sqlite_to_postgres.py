@@ -41,6 +41,7 @@ from sqlalchemy import create_engine, func, select, text
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from app.database.base import Base
+from app.database.schema_isolation import pin_search_path_from_settings
 
 
 def _row_counts(engine) -> dict[str, int]:
@@ -76,6 +77,7 @@ def _reset_postgres_sequence(target_conn, table) -> None:
 def migrate(source_url: str, target_url: str, *, dry_run: bool, force: bool) -> int:
     source_engine = create_engine(source_url, future=True)
     target_engine = create_engine(target_url, future=True)
+    pin_search_path_from_settings(target_engine)
 
     if not target_url.startswith("postgresql"):
         print(f"Refusing to run: target URL is not a PostgreSQL URL: {target_url}", file=sys.stderr)

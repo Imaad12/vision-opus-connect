@@ -11,12 +11,18 @@ pre-existing schema). It works entirely inside its own dedicated schema
 (named by VISION_STAGING_SCHEMA, default "vinco_staging") within the same
 database VISION_DATABASE_URL already points at -- no new connection
 string, no new Supabase project, no CREATE DATABASE privilege needed.
-Every connection this script makes sets its PostgreSQL `search_path` to
-that schema alone, so unqualified table/sequence lookups can never
-resolve to `public`. It owns that schema's entire lifecycle -- each run
-starts by dropping and recreating it from scratch -- which is safe to do
-without asking, because nothing but a previous run of this exact script
-could ever have put anything there.
+Every connection this script (or Alembic, or the app it starts) makes
+runs an explicit `SET search_path TO <schema>` immediately after
+connecting, rather than relying on a `-c search_path=...` connection-
+string startup option -- confirmed, empirically, that Supabase's
+Supavisor Session Pooler silently drops that option (leaving connections
+on `public`), and that a stock PgBouncer instead hard-rejects the
+connection outright for carrying one it doesn't recognize. An explicit
+SET statement, sent as a normal query after the connection is already
+established, has neither blind spot. It owns the isolated schema's
+entire lifecycle -- each run starts by dropping and recreating it from
+scratch -- which is safe to do without asking, because nothing but a
+previous run of this exact script could ever have put anything there.
 
 What it does, in this order (note: the PostgreSQL-compatibility test
 suite runs BEFORE any real data is copied in, not after, even though a
@@ -78,6 +84,8 @@ import httpx
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 
+from app.database.schema_isolation import pin_search_path, verify_search_path
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The dedicated, isolated schema this script creates, uses, and resets
@@ -89,7 +97,7 @@ class StagingCheckFailed(Exception):
     pass
 
 
-def build_engine_url(raw: str, schema: str) -> URL:
+def build_engine_url(raw: str) -> URL:
     """Parse a possibly-malformed connection string into a structured
     URL, tolerating two things real users actually run into: no
     '+psycopg' driver suffix, and a password containing a raw '@' (which
@@ -97,11 +105,17 @@ def build_engine_url(raw: str, schema: str) -> URL:
     host separator -- splitting on the LAST '@' resolves it correctly
     because a hostname itself never contains '@').
 
-    Also forces every connection's PostgreSQL `search_path` to `schema`
-    alone (preserving any other query parameters already present, e.g.
-    `sslmode`), so every unqualified table/sequence lookup this script or
-    the app makes resolves inside the isolated staging schema and can
-    never reach `public`."""
+    Deliberately does NOT embed a `-c search_path=...` option into the
+    URL: confirmed by direct testing that Supabase's Supavisor Session
+    Pooler silently drops that startup option, and that a stock PgBouncer
+    instead hard-rejects the connection outright for carrying one it
+    doesn't recognize -- so putting it in the connection string is not
+    merely ineffective, it's actively unsafe against at least one common
+    real pooler. The isolated schema is applied via an explicit
+    `SET search_path` on the connection instead (see
+    app.database.schema_isolation), and travels to Alembic/pytest/uvicorn
+    subprocesses via the VISION_STAGING_SCHEMA environment variable, not
+    via this URL."""
     raw = raw.strip()
     if "://" not in raw:
         raise StagingCheckFailed("Connection string must include a scheme, e.g. postgresql://...")
@@ -132,9 +146,6 @@ def build_engine_url(raw: str, schema: str) -> URL:
         host, port = hostport, 5432
     if not host:
         raise StagingCheckFailed("Connection string is missing a host.")
-
-    search_path_opt = f"-csearch_path={schema}"
-    query["options"] = f"{query['options']} {search_path_opt}" if query.get("options") else search_path_opt
 
     return URL.create(
         "postgresql+psycopg", username=user, password=password, host=host, port=port, database=database, query=query
@@ -190,25 +201,25 @@ def reset_staging_schema(engine, schema: str) -> None:
     print(f"        Schema '{schema}' is ready and empty. Your public schema was not touched.")
 
     # Belt-and-braces: prove the isolation is actually in effect on THIS
-    # connection before anything else runs. `search_path` is set via a
-    # `-c search_path=...` startup option on the connection string; some
-    # connection poolers don't forward startup options to the real
-    # backend, which would silently leave every later operation (compat
-    # tests, the baseline migration) pointed at `public` -- exactly the
-    # database this script must never touch. Fail loudly here instead of
-    # letting that surface later as a confusing error against whatever
-    # unrelated tables already live in public.
-    with engine.connect() as conn:
-        actual_schema = conn.execute(text("SELECT current_schema()")).scalar()
+    # connection before anything else runs. `engine` was pinned (by the
+    # caller) to run an explicit `SET search_path TO schema` on every new
+    # connection -- confirmed necessary because Supabase's Supavisor
+    # Session Pooler silently drops the connection string's
+    # `-c search_path=...` startup option, which would otherwise leave
+    # every later operation (compat tests, the baseline migration)
+    # pointed at `public` -- exactly the database this script must never
+    # touch. Fail loudly here instead of letting that surface later as a
+    # confusing error against whatever unrelated tables already live in
+    # public.
+    actual_schema = verify_search_path(engine, schema)
     if actual_schema != schema:
         raise StagingCheckFailed(
             f"Isolation check failed: expected current_schema() = '{schema}' but got "
-            f"'{actual_schema}'. Your connection pooler is not honoring the "
-            "'-c search_path=...' startup option, so operations would silently run "
-            "against the wrong schema (likely 'public'). Refusing to proceed -- "
-            "nothing has been created or modified beyond the isolated schema itself."
+            f"'{actual_schema}' even after an explicit SET search_path. Refusing to "
+            "proceed -- nothing has been created or modified beyond the isolated "
+            "schema itself."
         )
-    print(f"        Verified: this connection is isolated to '{schema}' (current_schema() confirmed).")
+    print(f"        Verified: this connection is isolated to '{schema}' (current_schema() confirmed via explicit SET).")
 
 
 def run_subprocess(cmd: list[str], env: dict, redact, cwd: Path = REPO_ROOT) -> tuple[bool, str]:
@@ -247,7 +258,7 @@ def _save_and_print_failure(output: str, label: str, tail_lines: int = 60) -> Pa
 
 def run_compat_tests(canonical_url: str, base_env: dict, redact) -> tuple[bool, str]:
     print("[4/11] Running PostgreSQL dialect-compatibility tests (target still empty)...")
-    env = {**base_env, "VISION_TEST_POSTGRES_URL": canonical_url}
+    env = {**base_env, "VISION_TEST_POSTGRES_URL": canonical_url, "VISION_STAGING_SCHEMA": STAGING_SCHEMA}
     ok, output = run_subprocess([sys.executable, "-m", "pytest", "app/tests/test_postgres_compat.py", "-v"], env, redact)
     if ok:
         print("        PASSED")
@@ -258,7 +269,7 @@ def run_compat_tests(canonical_url: str, base_env: dict, redact) -> tuple[bool, 
 
 def apply_baseline_migration(canonical_url: str, base_env: dict, redact) -> tuple[bool, str]:
     print("[5/11] Applying the PostgreSQL baseline migration...")
-    env = {**base_env, "VISION_DATABASE_URL": canonical_url}
+    env = {**base_env, "VISION_DATABASE_URL": canonical_url, "VISION_STAGING_SCHEMA": STAGING_SCHEMA}
     ok1, out1 = run_subprocess([sys.executable, "-m", "alembic", "stamp", "cb86207a716e"], env, redact)
     if not ok1:
         _save_and_print_failure(out1, "migration_stamp")
@@ -314,7 +325,7 @@ def _server_log_tail(log_path: Path, redact, n: int = 15) -> str:
 def run_api_smoke_tests(canonical_url: str, base_env: dict, redact) -> tuple[bool, list[str]]:
     print("[9/11] Starting the API against PostgreSQL for smoke tests...")
     port = find_free_port()
-    env = {**base_env, "VISION_DATABASE_URL": canonical_url}
+    env = {**base_env, "VISION_DATABASE_URL": canonical_url, "VISION_STAGING_SCHEMA": STAGING_SCHEMA}
     log_path = Path(tempfile.gettempdir()) / f"vinco_staging_api_{port}.log"
     log_file = open(log_path, "w")
     proc = subprocess.Popen(
@@ -383,6 +394,7 @@ def run_api_smoke_tests(canonical_url: str, base_env: dict, redact) -> tuple[boo
                     # the test row directly, the same way a soft-delete
                     # migration tool would.
                     cleanup_engine = create_engine(canonical_url, future=True)
+                    pin_search_path(cleanup_engine, STAGING_SCHEMA)
                     with cleanup_engine.begin() as conn:
                         conn.execute(text("DELETE FROM clients WHERE id = :id"), {"id": new_id})
                     lines.append(f"  [OK] cleaned up test record id={new_id} directly (no DELETE route exists)")
@@ -406,12 +418,17 @@ def main() -> int:
     print("=" * 70)
 
     raw_url = get_database_url()
-    parsed = build_engine_url(raw_url, STAGING_SCHEMA)
+    parsed = build_engine_url(raw_url)
     canonical_url = parsed.render_as_string(hide_password=False)
     redact = make_redactor(raw_url, canonical_url, parsed.password or "", parsed.username or "")
 
     engine = create_engine(canonical_url, future=True)
-    base_env = os.environ.copy()
+    pin_search_path(engine, STAGING_SCHEMA)
+    # Every subprocess (Alembic, pytest, uvicorn) reads this to pin its
+    # own connections to the same isolated schema -- never the
+    # connection string itself, which some poolers (PgBouncer) hard-
+    # reject if it carries an unrecognized startup option.
+    base_env = {**os.environ, "VISION_STAGING_SCHEMA": STAGING_SCHEMA}
 
     report: list[tuple[str, bool, str]] = []
 

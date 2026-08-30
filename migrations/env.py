@@ -9,6 +9,7 @@ from alembic import context
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from app.core.config import settings
 from app.database.base import Base
+from app.database.schema_isolation import pin_search_path, verify_search_path
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -81,6 +82,26 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
+    # A `-c search_path=...` startup option is only honored if whatever
+    # sits between this process and the real backend forwards it --
+    # confirmed that Supabase's Supavisor Session Pooler silently drops
+    # it, and that a stock PgBouncer instead hard-rejects the connection
+    # outright for carrying an option it doesn't recognize. Neither
+    # problem exists for `SET search_path` sent as a normal query after
+    # connecting, so VISION_STAGING_SCHEMA (never the connection string
+    # itself) is how the intended schema travels to this process; pin it
+    # and verify it actually took before running any migration DDL.
+    if settings.staging_schema:
+        pin_search_path(connectable, settings.staging_schema)
+        actual_schema = verify_search_path(connectable, settings.staging_schema)
+        if actual_schema != settings.staging_schema:
+            raise RuntimeError(
+                f"Schema isolation failed: expected current_schema() = "
+                f"'{settings.staging_schema}' but got '{actual_schema}' even after an "
+                "explicit SET search_path. Refusing to run migrations -- DDL would not "
+                "land where intended."
+            )
 
     with connectable.connect() as connection:
         context.configure(
