@@ -189,6 +189,27 @@ def reset_staging_schema(engine, schema: str) -> None:
         conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     print(f"        Schema '{schema}' is ready and empty. Your public schema was not touched.")
 
+    # Belt-and-braces: prove the isolation is actually in effect on THIS
+    # connection before anything else runs. `search_path` is set via a
+    # `-c search_path=...` startup option on the connection string; some
+    # connection poolers don't forward startup options to the real
+    # backend, which would silently leave every later operation (compat
+    # tests, the baseline migration) pointed at `public` -- exactly the
+    # database this script must never touch. Fail loudly here instead of
+    # letting that surface later as a confusing error against whatever
+    # unrelated tables already live in public.
+    with engine.connect() as conn:
+        actual_schema = conn.execute(text("SELECT current_schema()")).scalar()
+    if actual_schema != schema:
+        raise StagingCheckFailed(
+            f"Isolation check failed: expected current_schema() = '{schema}' but got "
+            f"'{actual_schema}'. Your connection pooler is not honoring the "
+            "'-c search_path=...' startup option, so operations would silently run "
+            "against the wrong schema (likely 'public'). Refusing to proceed -- "
+            "nothing has been created or modified beyond the isolated schema itself."
+        )
+    print(f"        Verified: this connection is isolated to '{schema}' (current_schema() confirmed).")
+
 
 def run_subprocess(cmd: list[str], env: dict, redact, cwd: Path = REPO_ROOT) -> tuple[bool, str]:
     proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
