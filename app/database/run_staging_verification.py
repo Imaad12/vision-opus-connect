@@ -430,6 +430,23 @@ def main() -> int:
     # reject if it carries an unrecognized startup option.
     base_env = {**os.environ, "VISION_STAGING_SCHEMA": STAGING_SCHEMA}
 
+    # migrate_sqlite_to_postgres.migrate() (step 7) runs IN-PROCESS, not
+    # as a subprocess, so `base_env` above never reaches it -- it builds
+    # its own target engine and pins it via `pin_search_path_from_settings`,
+    # which reads the shared `Settings` singleton, not os.environ directly.
+    # Setting the env var alone (as done for subprocesses) is not enough
+    # here, since that singleton was already constructed from whatever
+    # VISION_STAGING_SCHEMA was present at import time -- normally empty
+    # for a real user's shell, which is exactly what caused this: with no
+    # override, Postgres's default search_path ("$user", public) resolves
+    # to `public`, which either has none of our tables at all
+    # ("relation ... does not exist") or an unrelated pre-existing one.
+    # Mutate the singleton directly so every in-process engine created for
+    # the rest of this run picks up the isolated schema too.
+    from app.core.config import settings as app_settings
+
+    app_settings.staging_schema = STAGING_SCHEMA
+
     report: list[tuple[str, bool, str]] = []
 
     version = check_connection(engine, redact)
@@ -458,10 +475,25 @@ def main() -> int:
     print("[7/11] Migrating the copy's data into PostgreSQL...")
     from app.database.migrate_sqlite_to_postgres import migrate as migrate_data
 
-    rc = migrate_data(f"sqlite:///{copy_path}", canonical_url, dry_run=False, force=False)
-    ok = rc == 0
-    report.append(("Migrate SQLite copy -> PostgreSQL", ok, ""))
+    # migrate_data() runs in-process (not a subprocess), so a genuine
+    # data/type error inside it (as opposed to the "target not empty"
+    # style failures it returns a code for) raises a real Python
+    # exception -- without this try/except it would skip straight past
+    # every diagnostic path below and be caught only by the top-level
+    # generic handler, which deliberately shows just one redacted line
+    # for safety. Capture and redact the full traceback here instead, the
+    # same way compat-test/migration subprocess failures already are.
+    try:
+        rc = migrate_data(f"sqlite:///{copy_path}", canonical_url, dry_run=False, force=False)
+        ok = rc == 0
+        migrate_output = ""
+    except Exception:
+        ok = False
+        migrate_output = _defensive_redact(redact(traceback.format_exc()))
+    report.append(("Migrate SQLite copy -> PostgreSQL", ok, migrate_output[-2000:] if not ok else ""))
     if not ok:
+        if migrate_output:
+            _save_and_print_failure(migrate_output, "data_migration")
         raise StagingCheckFailed("Data migration failed -- see output above.")
 
     print("[8/11] Verifying row counts, financial totals, foreign keys, sequences...")
@@ -472,15 +504,24 @@ def main() -> int:
         compare_row_counts,
     )
 
-    source_engine = create_engine(f"sqlite:///{copy_path}", future=True)
-    ok_counts = compare_row_counts(source_engine, engine)
-    ok_totals = compare_financial_totals(source_engine, engine)
-    ok_fks = check_foreign_key_integrity(engine)
-    ok_seqs = check_sequences(engine)
-    report.append(("Row counts match", ok_counts, ""))
-    report.append(("Financial totals match", ok_totals, ""))
-    report.append(("Foreign key integrity", ok_fks, ""))
-    report.append(("Sequence positions correct", ok_seqs, ""))
+    # Same in-process-exception exposure as step 7 -- these also run
+    # directly rather than as a subprocess, so a genuine error here (as
+    # opposed to a detected [MISMATCH]) needs the same explicit capture.
+    try:
+        source_engine = create_engine(f"sqlite:///{copy_path}", future=True)
+        ok_counts = compare_row_counts(source_engine, engine)
+        ok_totals = compare_financial_totals(source_engine, engine)
+        ok_fks = check_foreign_key_integrity(engine)
+        ok_seqs = check_sequences(engine)
+        report.append(("Row counts match", ok_counts, ""))
+        report.append(("Financial totals match", ok_totals, ""))
+        report.append(("Foreign key integrity", ok_fks, ""))
+        report.append(("Sequence positions correct", ok_seqs, ""))
+    except Exception:
+        verify_output = _defensive_redact(redact(traceback.format_exc()))
+        _save_and_print_failure(verify_output, "verification")
+        report.append(("Row counts / totals / FK / sequence verification", False, verify_output[-2000:]))
+        raise StagingCheckFailed("Verification step failed -- see output above.")
 
     ok, api_lines = run_api_smoke_tests(canonical_url, base_env, redact)
     report.append(("API smoke tests", ok, "\n".join(api_lines)))
