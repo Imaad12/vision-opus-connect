@@ -170,7 +170,7 @@ def check_connection(engine, redact) -> str:
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version()")).scalar_one()
     except Exception as exc:
-        raise StagingCheckFailed(f"Could not connect: {redact(str(exc))}") from exc
+        raise StagingCheckFailed(f"Could not connect: {_defensive_redact(redact(str(exc)))}") from exc
     short_version = version.split(",")[0]
     print(f"        Connected OK ({short_version})")
     return short_version
@@ -196,11 +196,42 @@ def run_subprocess(cmd: list[str], env: dict, redact, cwd: Path = REPO_ROOT) -> 
     return proc.returncode == 0, output
 
 
+#: Generic defense-in-depth redaction applied on top of the specific-value
+#: redactor (`make_redactor`) before anything is written to disk or
+#: printed on a failure path -- catches any URI-shaped credential that
+#: the specific-value redactor might miss (e.g. a differently re-encoded
+#: form of the same URL logged by a library).
+_URI_CREDENTIAL_RE = re.compile(r"[a-zA-Z][\w+.-]*://[^@\s]+@")
+
+
+def _defensive_redact(text_: str) -> str:
+    return _URI_CREDENTIAL_RE.sub("***REDACTED***@", text_)
+
+
+def _save_and_print_failure(output: str, label: str, tail_lines: int = 60) -> Path:
+    """Persist an already-redacted subprocess's combined stdout/stderr to a
+    temp file and print the tail of it immediately, so a failure is never
+    silently swallowed by an early abort before the final report would
+    otherwise have shown it. Applies a second, generic redaction pass on
+    top of whatever specific-value redaction the caller already did."""
+    output = _defensive_redact(output)
+    log_path = Path(tempfile.gettempdir()) / f"vinco_staging_{label}_{os.getpid()}.log"
+    log_path.write_text(output)
+    print(f"        FAILED -- full output saved to: {log_path}")
+    print(f"        Last {tail_lines} lines:")
+    for line in output.splitlines()[-tail_lines:]:
+        print("        | " + line)
+    return log_path
+
+
 def run_compat_tests(canonical_url: str, base_env: dict, redact) -> tuple[bool, str]:
     print("[4/11] Running PostgreSQL dialect-compatibility tests (target still empty)...")
     env = {**base_env, "VISION_TEST_POSTGRES_URL": canonical_url}
     ok, output = run_subprocess([sys.executable, "-m", "pytest", "app/tests/test_postgres_compat.py", "-v"], env, redact)
-    print("        " + ("PASSED" if ok else "FAILED"))
+    if ok:
+        print("        PASSED")
+    else:
+        _save_and_print_failure(output, "compat_tests")
     return ok, output
 
 
@@ -209,9 +240,13 @@ def apply_baseline_migration(canonical_url: str, base_env: dict, redact) -> tupl
     env = {**base_env, "VISION_DATABASE_URL": canonical_url}
     ok1, out1 = run_subprocess([sys.executable, "-m", "alembic", "stamp", "cb86207a716e"], env, redact)
     if not ok1:
+        _save_and_print_failure(out1, "migration_stamp")
         return False, out1
     ok2, out2 = run_subprocess([sys.executable, "-m", "alembic", "upgrade", "head"], env, redact)
-    print("        " + ("PASSED" if ok2 else "FAILED"))
+    if ok2:
+        print("        PASSED")
+    else:
+        _save_and_print_failure(out1 + "\n" + out2, "migration_upgrade")
     return ok2, out1 + "\n" + out2
 
 
@@ -249,7 +284,7 @@ def find_free_port() -> int:
 
 def _server_log_tail(log_path: Path, redact, n: int = 15) -> str:
     try:
-        text_ = redact(log_path.read_text(errors="replace"))
+        text_ = _defensive_redact(redact(log_path.read_text(errors="replace")))
     except OSError:
         return ""
     return "\n".join("        | " + ln for ln in text_.splitlines()[-n:])
@@ -447,8 +482,7 @@ if __name__ == "__main__":
         # built in main() isn't in scope here, so fall back to a generic
         # regex that strips credentials out of any URI-shaped substring
         # (scheme://user:password@host) before printing anything.
-        last_line = traceback.format_exc().splitlines()[-1]
-        last_line = re.sub(r"[a-zA-Z][\w+.-]*://[^@\s]+@", "***REDACTED***@", last_line)
+        last_line = _defensive_redact(traceback.format_exc().splitlines()[-1])
         print("\nUNEXPECTED ERROR -- aborting without printing full details for safety.", file=sys.stderr)
         print(last_line, file=sys.stderr)
         sys.exit(1)
