@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
@@ -49,10 +49,17 @@ export function useSessionUser() {
   return { userId, ready };
 }
 
-export function useMe() {
-  const { userId, ready } = useSessionUser();
-
-  const query = useQuery({
+/**
+ * Query definition for `useMe()`'s profile/roles/permissions fetch,
+ * factored out (react-query's own `queryOptions()` helper) so a route
+ * loader can `queryClient.ensureQueryData(meQueryOptions(userId))` to
+ * prime the exact same cache entry ahead of a page mounting -- e.g. on
+ * nav-link hover, via TanStack Router's `defaultPreloadStaleTime`
+ * (router.tsx) -- without duplicating this query's definition and
+ * risking it drifting from what `useMe()` itself fetches.
+ */
+export function meQueryOptions(userId: string | null) {
+  return queryOptions({
     queryKey: ["me", userId],
     enabled: Boolean(userId),
     queryFn: async () => {
@@ -89,6 +96,12 @@ export function useMe() {
       };
     },
   });
+}
+
+export function useMe() {
+  const { userId, ready } = useSessionUser();
+
+  const query = useQuery(meQueryOptions(userId));
 
   const permissions = query.data?.permissions ?? new Set<string>();
 
