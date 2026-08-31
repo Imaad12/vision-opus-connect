@@ -18,6 +18,17 @@ import { supabase } from "@/integrations/supabase/client";
 const rawApiUrl = import.meta.env["VITE_API_URL"] as string | undefined;
 const API_BASE_URL = rawApiUrl && rawApiUrl.trim() !== "" ? rawApiUrl : "http://localhost:8000";
 
+// Deliberately visible in the browser console (not a secret -- just the
+// backend base URL) so a build-time env-injection problem is provable
+// from the deployed site itself: open DevTools on the live app and this
+// line shows exactly what VITE_API_URL resolved to in *this* bundle,
+// with no dependency on dashboard access or on trusting a redeploy
+// actually picked up a new value.
+if (typeof window !== "undefined") {
+  // eslint-disable-next-line no-console
+  console.info(`[vinco] API_BASE_URL = ${API_BASE_URL}`);
+}
+
 export class ApiError extends Error {
   status: number;
 
