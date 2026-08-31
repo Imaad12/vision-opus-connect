@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Building2, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -6,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useI18n } from "@/lib/i18n";
+import { signInWithGoogleDesktop } from "@/lib/tauri-auth";
 
 export function SignInScreen() {
   const { t, lang, toggle } = useI18n();
@@ -25,6 +27,22 @@ export function SignInScreen() {
 
   const signIn = async () => {
     setBusy(true);
+    // Desktop: Google refuses to authenticate an embedded webview, so this
+    // opens the system browser instead and waits for the OS to hand the
+    // vinco://auth-callback deep link back to this app -- see
+    // src/lib/tauri-auth.ts. Web: unchanged, same in-window redirect as
+    // before.
+    if (isTauri()) {
+      try {
+        await signInWithGoogleDesktop();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Sign-in failed");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: window.location.origin + "/dashboard" },

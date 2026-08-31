@@ -7,11 +7,13 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
+import { isTauri } from "@tauri-apps/api/core";
 import { useEffect, type ReactNode } from "react";
 
 import { Toaster } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { I18nProvider } from "@/lib/i18n";
+import { initTauriDeepLinkAuth } from "@/lib/tauri-auth";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
@@ -132,6 +134,14 @@ function RootComponent() {
     });
     return () => sub.subscription.unsubscribe();
   }, [router, queryClient]);
+
+  // Desktop only: registers the vinco://auth-callback deep-link listener
+  // once per app launch (see src/lib/tauri-auth.ts). A plain no-op import
+  // on the web build -- isTauri() is false there, so this never runs.
+  useEffect(() => {
+    if (!isTauri()) return;
+    void initTauriDeepLinkAuth();
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>

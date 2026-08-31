@@ -1,0 +1,37 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "VINCO ERP desktop client -- a Tauri shell around the same React/TanStack frontend the web app uses. No business logic lives here: every request goes to the same FastAPI backend as the web client."
+authors = ["Vision Contracting Co."]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+# Google OAuth must run in the system browser, not this window's webview --
+# Google blocks sign-in from embedded/non-standard user agents (see
+# src/lib/tauri-auth.ts). tauri-plugin-opener launches the system browser;
+# tauri-plugin-deep-link registers the vinco:// scheme the OS hands back to
+# this app once Supabase completes the OAuth redirect.
+tauri-plugin-opener = "2"
+tauri-plugin-deep-link = "2"
+# Session/refresh-token storage for the desktop client -- see the storage
+# adapter in src/integrations/supabase/client.ts and the "DESKTOP STORAGE"
+# section of DESKTOP_ARCHITECTURE.md for why this (not localStorage) is
+# used when running under Tauri.
+tauri-plugin-store = "2"

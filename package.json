@@ -7,9 +7,13 @@
     "dev": "vite dev",
     "build": "vite build",
     "build:dev": "vite build --mode development",
+    "build:desktop": "cross-env VINCO_TARGET=desktop vite build && node scripts/copy-desktop-shell.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -45,6 +49,10 @@
     "@tanstack/react-router": "1.170.18",
     "@tanstack/react-start": "1.168.32",
     "@tanstack/router-plugin": "1.168.23",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-deep-link": "^2.4.9",
+    "@tauri-apps/plugin-opener": "^2.5.4",
+    "@tauri-apps/plugin-store": "^2.4.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -69,10 +77,12 @@
   "devDependencies": {
     "@eslint/js": "^9.32.0",
     "@lovable.dev/vite-tanstack-config": "^2.15.0",
+    "@tauri-apps/cli": "^2",
     "@types/node": "^22.16.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.2.0",
+    "cross-env": "^10.1.0",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.6",
