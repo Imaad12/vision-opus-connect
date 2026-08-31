@@ -34,6 +34,7 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import Engine
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
+from app.core.config import normalize_postgres_url
 from app.database.base import Base
 from app.database.schema_isolation import pin_search_path_from_settings
 from app.models.contract import Contract
@@ -140,6 +141,8 @@ def main() -> None:
     parser.add_argument("--source", required=True, help="Source SQLite SQLAlchemy URL (a COPY, never the original file)")
     parser.add_argument("--target", required=True, help="Target PostgreSQL SQLAlchemy URL")
     args = parser.parse_args()
+    args.source = normalize_postgres_url(args.source)
+    args.target = normalize_postgres_url(args.target)
 
     if not args.target.startswith("postgresql"):
         print(f"Refusing to run: target URL is not PostgreSQL: {args.target}", file=sys.stderr)

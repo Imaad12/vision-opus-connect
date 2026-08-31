@@ -15,6 +15,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def normalize_postgres_url(url: str) -> str:
+    """Ensure a PostgreSQL SQLAlchemy URL names the psycopg (v3) driver
+    explicitly (`postgresql+psycopg://`) instead of relying on
+    SQLAlchemy's dialect default for a bare `postgresql://` scheme --
+    that default is psycopg2, a package this project deliberately does
+    not depend on (see pyproject.toml: `psycopg[binary]`, psycopg v3).
+    A hosting provider's connection string (e.g. Render's
+    VISION_DATABASE_URL) commonly omits the driver suffix entirely,
+    which otherwise fails at engine-creation time with
+    `ModuleNotFoundError: No module named 'psycopg2'` the first time any
+    route actually opens a connection -- not at import time, so nothing
+    catches it before a request 500s.
+
+    A URL that already names a driver (`postgresql+psycopg://`,
+    `postgresql+asyncpg://`, ...) is returned unchanged, and so is any
+    non-PostgreSQL URL (sqlite, ...).
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VISION_", env_file=".env", extra="ignore")
 
@@ -63,8 +85,11 @@ class Settings(BaseSettings):
     def resolved_database_url(self) -> str:
         """The connection string the application actually uses: the
         explicit `database_url` override if set (production), otherwise
-        the local SQLite file (development/tests)."""
-        return self.database_url or f"sqlite:///{self.database_path}"
+        the local SQLite file (development/tests). Normalized so every
+        caller (the app engine, Alembic) consistently gets the psycopg
+        v3 driver on a PostgreSQL URL, regardless of whether the raw
+        VISION_DATABASE_URL value named a driver at all."""
+        return normalize_postgres_url(self.database_url or f"sqlite:///{self.database_path}")
 
     @property
     def is_postgres(self) -> bool:
