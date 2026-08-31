@@ -20,6 +20,11 @@ dist-ssr
 .wrangler/
 .dev.vars
 
+# Local environment overrides — never commit real Supabase/API credentials.
+# See .env.example for the variables required; production values are set
+# as Cloudflare environment variables, not committed here.
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
