@@ -9,8 +9,14 @@
  */
 import { supabase } from "@/integrations/supabase/client";
 
-const API_BASE_URL =
-  (import.meta.env["VITE_API_URL"] as string | undefined) ?? "http://localhost:8000";
+// `??` alone isn't enough here: an env var that resolves to an empty
+// string (present but blank, e.g. a Cloudflare variable set with no
+// value) is not nullish, so `?? fallback` would silently leave
+// API_BASE_URL as "" -- turning every request into a same-origin
+// relative fetch (against whatever origin served the page) instead of
+// hitting the backend at all. Blank must be treated as unset too.
+const rawApiUrl = import.meta.env["VITE_API_URL"] as string | undefined;
+const API_BASE_URL = rawApiUrl && rawApiUrl.trim() !== "" ? rawApiUrl : "http://localhost:8000";
 
 export class ApiError extends Error {
   status: number;
