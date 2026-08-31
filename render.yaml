@@ -2,6 +2,17 @@ services:
   - type: web
     name: vinco-api
     runtime: docker
+    # Pinned explicitly: this file (and the Dockerfile/app/api it
+    # references) exists ONLY on this branch -- `main` has no Dockerfile
+    # and no `app/api` package at all, so this service cannot possibly
+    # build from `main`. If this service was ever pointed at `main` (or
+    # any commit before the FastAPI layer existed), every route 404s
+    # even though /health can still pass. Render's Blueprint sync uses
+    # this field; a manually-created (non-Blueprint) Web Service instead
+    # has its branch set directly in the dashboard under
+    # Settings -> Build & Deploy -- this field has no effect there, so
+    # that setting must be checked/changed by hand too.
+    branch: claude/postgres-productionization
     dockerfilePath: ./Dockerfile
     plan: starter
     healthCheckPath: /health
