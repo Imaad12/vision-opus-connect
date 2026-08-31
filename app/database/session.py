@@ -58,16 +58,24 @@ def get_engine(database_url: str | None = None) -> Engine:
 
     Passing an explicit `database_url` (e.g. `sqlite:///:memory:` in tests)
     creates a fresh, independent engine rather than reusing the cached one.
+
+    `pool_pre_ping=True` issues a lightweight `SELECT 1` before handing a
+    pooled connection to a caller, transparently discarding and replacing
+    it if that fails. Supabase's Supavisor pooler (and poolers/proxies in
+    general) can silently close a connection that's sat idle in this
+    process's own pool for a while; without pre-ping, the first query on
+    such a connection fails outright instead of SQLAlchemy quietly
+    reconnecting.
     """
     global _engine, _SessionFactory
     if database_url is not None:
-        engine = create_engine(normalize_postgres_url(database_url), future=True)
+        engine = create_engine(normalize_postgres_url(database_url), future=True, pool_pre_ping=True)
         _attach_dialect_listeners(engine)
         _pin_and_verify_schema(engine)
         return engine
 
     if _engine is None:
-        _engine = create_engine(settings.resolved_database_url, future=True)
+        _engine = create_engine(settings.resolved_database_url, future=True, pool_pre_ping=True)
         _attach_dialect_listeners(_engine)
         _pin_and_verify_schema(_engine)
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
