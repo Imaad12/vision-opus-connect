@@ -101,14 +101,31 @@ class Settings(BaseSettings):
     #: per-request access logs.
     log_level: str = "INFO"
 
-    #: If set, every connection this process makes explicitly runs
-    #: `SET search_path TO <staging_schema>` immediately after connecting
-    #: (see app/database/schema_isolation.py) -- used only by the staging
-    #: verification tooling (app/database/run_staging_verification.py) to
-    #: pin every operation inside one isolated PostgreSQL schema, never
-    #: touching `public`. Empty by default, in which case nothing about
-    #: normal application behavior changes.
-    staging_schema: str = ""
+    #: The PostgreSQL schema every connection this process makes is
+    #: pinned to via an explicit `SET search_path` immediately after
+    #: connecting (see app/database/schema_isolation.py) -- the schema
+    #: is created if missing, and nothing VINCO's own models/migrations
+    #: do ever names a schema explicitly, so this one setting is what
+    #: puts every VINCO table, and every FK between them, inside it.
+    #:
+    #: Defaults to "vinco" because the real Supabase project this
+    #: backend authenticates against already owns `public` (its own
+    #: Auth/RBAC tables, plus pre-existing UUID-keyed application tables
+    #: with names that collide with several of VINCO's own, e.g.
+    #: `contacts`/`projects`/`invoices` -- see
+    #: migrations/versions/926e160784a0_postgresql_baseline_schema.py's
+    #: docstring). VINCO's tables must never land there. This has no
+    #: effect at all on Supabase's own Auth/RBAC: `SupabaseAuth.
+    #: check_permission` (app/api/auth.py) evaluates permissions over
+    #: PostgREST/HTTPS using the caller's own token, never through this
+    #: process's own database connection.
+    #:
+    #: The staging verification tooling (run_staging_verification.py)
+    #: overrides this to its own disposable "vinco_staging" schema, so
+    #: staging runs never touch the real `vinco` schema either. Ignored
+    #: entirely for SQLite (local dev/tests) -- there is no schema
+    #: concept to pin there.
+    staging_schema: str = "vinco"
 
 
 settings = Settings()

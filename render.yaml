@@ -37,3 +37,14 @@ services:
         sync: false
       - key: VISION_LOG_LEVEL
         value: INFO
+      # The PostgreSQL schema VINCO's own tables live in, isolated from
+      # the same database's `public` schema -- which the Supabase
+      # project this backend authenticates against already owns (Auth/
+      # RBAC tables, plus pre-existing UUID-keyed application tables
+      # that collide by name with several of VINCO's, e.g. `contacts`/
+      # `projects`/`invoices`). Not a secret -- committed as a plain
+      # value. Also the code default (app/core/config.py), so this
+      # entry exists for documentation/explicitness, not because
+      # anything breaks without it.
+      - key: VISION_STAGING_SCHEMA
+        value: vinco

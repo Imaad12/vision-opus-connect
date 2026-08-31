@@ -12,7 +12,10 @@ opened a connection, as `ModuleNotFoundError: No module named
 
 from __future__ import annotations
 
+from sqlalchemy import create_engine
+
 from app.core.config import Settings, normalize_postgres_url
+from app.database.schema_isolation import pin_search_path_from_settings
 
 
 def test_bare_postgresql_url_gets_psycopg_driver() -> None:
@@ -46,3 +49,28 @@ def test_settings_resolved_database_url_normalizes_bare_postgres_url() -> None:
 def test_settings_resolved_database_url_falls_back_to_sqlite_when_unset() -> None:
     settings = Settings(database_url="")
     assert settings.resolved_database_url.startswith("sqlite:///")
+
+
+def test_staging_schema_defaults_to_vinco() -> None:
+    # This is what keeps VINCO's own tables out of Supabase's `public`
+    # schema by default -- see app/core/config.py's field docstring for
+    # the full rationale (public already owns Auth/RBAC tables plus
+    # pre-existing UUID-keyed application tables that collide by name
+    # with several of VINCO's own).
+    assert Settings().staging_schema == "vinco"
+
+
+def test_pin_search_path_from_settings_is_a_no_op_for_sqlite(monkeypatch) -> None:
+    # SET search_path / CREATE SCHEMA are PostgreSQL-only syntax; against
+    # a SQLite engine they must never even be attempted, since
+    # staging_schema now defaults to "vinco" for every environment,
+    # local SQLite dev included.
+    import app.core.config as config_module
+
+    monkeypatch.setattr(config_module.settings, "staging_schema", "vinco")
+    engine = create_engine("sqlite:///:memory:", future=True)
+    pin_search_path_from_settings(engine)  # must not raise
+    with engine.connect() as conn:
+        from sqlalchemy import text
+
+        assert conn.execute(text("SELECT 1")).scalar_one() == 1

@@ -12,8 +12,8 @@ from contextlib import contextmanager
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import settings
-from app.database.schema_isolation import pin_search_path_from_settings
+from app.core.config import normalize_postgres_url, settings
+from app.database.schema_isolation import pin_search_path_from_settings, verify_search_path
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -34,6 +34,25 @@ def _attach_dialect_listeners(engine: Engine) -> None:
         event.listen(engine, "connect", _enable_sqlite_foreign_keys)
 
 
+def _pin_and_verify_schema(engine: Engine) -> None:
+    """Pin `engine` to `settings.staging_schema` (a no-op for SQLite) and,
+    for PostgreSQL, immediately verify the pin actually took before
+    returning the engine to any caller. Fails loudly here -- at engine
+    creation, the first time this process ever touches the database --
+    rather than letting a wrong schema surface later as a confusing
+    UndefinedTable/UndefinedColumn deep inside some unrelated request."""
+    pin_search_path_from_settings(engine)
+    if engine.dialect.name == "postgresql" and settings.staging_schema:
+        actual_schema = verify_search_path(engine, settings.staging_schema)
+        if actual_schema != settings.staging_schema:
+            raise RuntimeError(
+                f"Schema isolation failed: expected current_schema() = "
+                f"{settings.staging_schema!r} but got {actual_schema!r} even after an "
+                "explicit SET search_path. Refusing to serve requests against the wrong "
+                "schema -- see app.database.schema_isolation."
+            )
+
+
 def get_engine(database_url: str | None = None) -> Engine:
     """Return the process-wide engine, creating it on first use.
 
@@ -42,15 +61,15 @@ def get_engine(database_url: str | None = None) -> Engine:
     """
     global _engine, _SessionFactory
     if database_url is not None:
-        engine = create_engine(database_url, future=True)
+        engine = create_engine(normalize_postgres_url(database_url), future=True)
         _attach_dialect_listeners(engine)
-        pin_search_path_from_settings(engine)
+        _pin_and_verify_schema(engine)
         return engine
 
     if _engine is None:
         _engine = create_engine(settings.resolved_database_url, future=True)
         _attach_dialect_listeners(_engine)
-        pin_search_path_from_settings(_engine)
+        _pin_and_verify_schema(_engine)
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine
 
