@@ -217,6 +217,22 @@ def amount_paid(session: Session, invoice: Invoice) -> Decimal:
     return sum((p.amount for p in session.execute(stmt).scalars().all()), Decimal("0.00"))
 
 
+def amount_paid_bulk(session: Session, invoice_ids: list[int]) -> dict[int, Decimal]:
+    """Same figure as `amount_paid`, for many invoices in one query instead
+    of one query per invoice -- used by the invoice list endpoint, where
+    calling `amount_paid` per row was a confirmed N+1 (one `SELECT ...
+    FROM payments` per invoice in the response)."""
+    if not invoice_ids:
+        return {}
+    stmt = select(Payment.invoice_id, Payment.amount).where(
+        Payment.invoice_id.in_(invoice_ids), Payment.is_deleted.is_(False)
+    )
+    totals: dict[int, Decimal] = dict.fromkeys(invoice_ids, Decimal("0.00"))
+    for invoice_id, amount in session.execute(stmt).all():
+        totals[invoice_id] = totals[invoice_id] + amount
+    return totals
+
+
 def outstanding_balance(session: Session, invoice: Invoice) -> Decimal | None:
     due = calculate_amount_due_after_retention(invoice.amount, invoice.retention_amount)
     return calculate_outstanding_balance(due, amount_paid(session, invoice))

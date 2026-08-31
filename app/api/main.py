@@ -19,6 +19,7 @@ from app.api.routers import (
     company,
     contacts,
     contracts,
+    dashboard,
     employees,
     expenses,
     health,
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(projects.router)
     app.include_router(quotations.router)
     app.include_router(contracts.router)
+    app.include_router(dashboard.router)
     app.include_router(purchase_requests.router)
     app.include_router(purchase_orders.router)
     app.include_router(receipts.router)

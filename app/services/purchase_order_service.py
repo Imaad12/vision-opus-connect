@@ -18,7 +18,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.enums import DEFAULT_CURRENCY, Currency, PurchaseOrderStatus
 from app.models import Project, PurchaseOrder, PurchaseOrderLine, PurchaseRequest, Vendor
@@ -44,7 +44,21 @@ def _round(value: Decimal) -> Decimal:
 
 
 def list_purchase_orders(session: Session, *, project_id: int | None = None) -> list[PurchaseOrder]:
-    stmt = select(PurchaseOrder).where(PurchaseOrder.is_deleted.is_(False))
+    """`PurchaseOrderRead` embeds `vendor`, `project`, and `lines` on every
+    row -- eagerly loaded here in 3 extra queries total (not 3 per row) via
+    `selectinload`, since SQLAlchemy's default lazy loading would otherwise
+    issue one query per relationship per PO when the response is
+    serialized (confirmed as a real N+1 against this endpoint's actual
+    response schema, not a speculative optimization)."""
+    stmt = (
+        select(PurchaseOrder)
+        .options(
+            selectinload(PurchaseOrder.vendor),
+            selectinload(PurchaseOrder.project),
+            selectinload(PurchaseOrder.lines),
+        )
+        .where(PurchaseOrder.is_deleted.is_(False))
+    )
     if project_id is not None:
         stmt = stmt.where(PurchaseOrder.project_id == project_id)
     stmt = stmt.order_by(PurchaseOrder.id.desc())

@@ -11,6 +11,19 @@ from pydantic import BaseModel, ConfigDict
 from app.core.enums import Currency, ProjectStatus
 
 
+class DashboardKpisRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    pipeline_value: Decimal | None
+    awaiting_count: int | None
+    awaiting_value: Decimal | None
+    active_projects_count: int | None
+    active_projects_value: Decimal | None
+    receivables: Decimal | None
+    vat_year_to_date: Decimal | None
+    po_pending_count: int | None
+
+
 class DashboardSummaryRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

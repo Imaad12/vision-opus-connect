@@ -5,6 +5,8 @@ finance, unlike customers/vendors."""
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -30,7 +32,13 @@ def list_invoices(
     _user=Depends(require_permission("finance.invoices")),
 ) -> list[InvoiceRead]:
     invoices = invoice_service.list_invoices(session, project_id=project_id)
-    return [_to_read(session, i) for i in invoices]
+    paid_by_invoice = invoice_service.amount_paid_bulk(session, [i.id for i in invoices])
+    results = []
+    for invoice in invoices:
+        data = InvoiceRead.model_validate(invoice)
+        data.amount_paid = paid_by_invoice.get(invoice.id, Decimal("0.00"))
+        results.append(data)
+    return results
 
 
 @router.get("/{invoice_id}", response_model=InvoiceRead)
