@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatMoney, useI18n } from "@/lib/i18n";
+import { QK_PURCHASE_ORDERS, QK_QUOTATIONS } from "@/lib/shared-query-keys";
 
 // Rebuilt against the real backend: the previous version read Supabase's
 // `quotations`/`purchase_orders`/`expenses` tables directly, all three of
@@ -74,13 +75,13 @@ function ApprovalsPage() {
   const refresh = (key: string) => void queryClient.invalidateQueries({ queryKey: [key] });
 
   const quotationsQuery = useQuery({
-    queryKey: ["approvals-quotations"],
+    queryKey: QK_QUOTATIONS,
     enabled: canApproveQuotes || canRejectQuotes,
     queryFn: () => api.get<QuotationVersion[]>("/quotations"),
   });
 
   const poQuery = useQuery({
-    queryKey: ["approvals-pos"],
+    queryKey: QK_PURCHASE_ORDERS,
     enabled: canApprovePOs,
     queryFn: () => api.get<PurchaseOrder[]>("/purchase-orders"),
   });
@@ -92,7 +93,7 @@ function ApprovalsPage() {
       toast.success(t("common.saved"));
       setAwardTarget(null);
       setContractValue("");
-      refresh("approvals-quotations");
+      refresh(QK_QUOTATIONS[0]);
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
@@ -101,7 +102,7 @@ function ApprovalsPage() {
     mutationFn: (id: number) => api.post(`/quotation-versions/${id}/lose`, {}),
     onSuccess: () => {
       toast.success(t("common.saved"));
-      refresh("approvals-quotations");
+      refresh(QK_QUOTATIONS[0]);
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
@@ -111,7 +112,7 @@ function ApprovalsPage() {
       api.post(`/purchase-orders/${args.id}/${args.action}`, {}),
     onSuccess: () => {
       toast.success(t("common.saved"));
-      refresh("approvals-pos");
+      refresh(QK_PURCHASE_ORDERS[0]);
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });

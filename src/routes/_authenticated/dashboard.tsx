@@ -16,19 +16,29 @@ import { StatusBadge } from "@/components/status-badge";
 import { useMe } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import { db, type Row } from "@/lib/db";
+import { QK_MANAGEMENT_CASH_FLOW, QK_MANAGEMENT_OPERATING_INCOME } from "@/lib/shared-query-keys";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
 
 type Lead = { status: string; estimated_value: string | null };
-type QuotationVersion = { status: string; quoted_value: string | null };
-type Project = { status: string; contract_value: string | null };
-type Invoice = {
-  direction: string;
-  amount: string;
-  tax_amount: string | null;
-  amount_paid: string;
-  issued_date: string | null;
+
+// Everything but the pipeline-by-stage chart (which still needs the raw
+// `/leads` rows below) is now one call to the backend's aggregated
+// `/dashboard/summary` instead of separately fetching the full
+// `/quotations`, `/projects`, `/invoices`, and `/purchase-orders` lists
+// just to reduce 2-5 fields per row to a single sum or count -- see
+// `app/api/routers/dashboard.py` on the backend for why. A `null` field
+// means the signed-in user lacks that section's permission (mirrors the
+// old per-query `enabled` gates, computed server-side now instead).
+type DashboardSummary = {
+  pipeline_value: string | null;
+  awaiting_count: number | null;
+  awaiting_value: string | null;
+  active_projects_count: number | null;
+  active_projects_value: string | null;
+  receivables: string | null;
+  vat_year_to_date: string | null;
+  po_pending_count: number | null;
 };
-type PurchaseOrder = { status: string };
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -81,45 +91,25 @@ function DashboardPage() {
   // was cut over (Phase A, Milestone 1, Milestone 2) -- this dashboard
   // had been silently stale against those Supabase tables since.
   const canSeeLeads = me.can("leads.view");
-  const canSeeQuotes = me.can("quotations.view");
-  const canSeeProjects = me.can("projects.view");
-  const canSeeInvoices = me.can("finance.invoices") || me.can("finance.reports");
-  const canSeePOs = me.can("purchasing.po_approve") || me.can("purchasing.po_create");
 
   const leadsQuery = useQuery({
     queryKey: ["dashboard-leads"],
     enabled: canSeeLeads,
     queryFn: () => api.get<Lead[]>("/leads"),
   });
-  const quotesQuery = useQuery({
-    queryKey: ["dashboard-quotes"],
-    enabled: canSeeQuotes,
-    queryFn: () => api.get<QuotationVersion[]>("/quotations"),
-  });
-  const projectsQuery = useQuery({
-    queryKey: ["dashboard-projects"],
-    enabled: canSeeProjects,
-    queryFn: () => api.get<Project[]>("/projects"),
-  });
-  const invoicesQuery = useQuery({
-    queryKey: ["dashboard-invoices"],
-    enabled: canSeeInvoices,
-    queryFn: () => api.get<Invoice[]>("/invoices"),
-  });
-  const posQuery = useQuery({
-    queryKey: ["dashboard-pos"],
-    enabled: canSeePOs,
-    queryFn: () => api.get<PurchaseOrder[]>("/purchase-orders"),
+  const summaryQuery = useQuery({
+    queryKey: ["dashboard-summary"],
+    queryFn: () => api.get<DashboardSummary>("/dashboard/summary"),
   });
 
   const canSeeManagement = me.can("finance.reports");
   const operatingIncomeQuery = useQuery({
-    queryKey: ["dashboard-operating-income"],
+    queryKey: QK_MANAGEMENT_OPERATING_INCOME,
     enabled: canSeeManagement,
     queryFn: () => api.get<{ operating_income: string }>("/management/operating-income"),
   });
   const cashFlowQuery = useQuery({
-    queryKey: ["dashboard-cash-flow"],
+    queryKey: QK_MANAGEMENT_CASH_FLOW,
     enabled: canSeeManagement,
     queryFn: () => api.get<{ net_cash_flow: string }>("/management/cash-flow"),
   });
@@ -128,12 +118,7 @@ function DashboardPage() {
   // network/CORS/backend-down failure looks identical to "no data yet"
   // otherwise) -- this is the one visible signal that something is
   // actually broken, not just a company with nothing recorded yet.
-  const hasFetchError =
-    leadsQuery.isError ||
-    quotesQuery.isError ||
-    projectsQuery.isError ||
-    invoicesQuery.isError ||
-    posQuery.isError;
+  const hasFetchError = leadsQuery.isError || summaryQuery.isError;
 
   const audit = useQuery({
     queryKey: ["dashboard-audit"],
@@ -152,19 +137,14 @@ function DashboardPage() {
   const openLeadValue = leads
     .filter((l) => !["WON", "LOST"].includes(l.status))
     .reduce((s, l) => s + Number(l.estimated_value ?? 0), 0);
-  const awaiting = (quotesQuery.data ?? []).filter((q) => q.status === "SUBMITTED");
-  const activeProjects = (projectsQuery.data ?? []).filter(
-    (p) => !["COMPLETED", "CLOSED", "CANCELLED", "LOST"].includes(p.status),
-  );
-  const clientInvoices = (invoicesQuery.data ?? []).filter((i) => i.direction === "CLIENT");
-  const receivables = clientInvoices.reduce(
-    (s, i) => s + (Number(i.amount ?? 0) - Number(i.amount_paid ?? 0)),
-    0,
-  );
-  const vatYear = clientInvoices
-    .filter((i) => (i.issued_date ?? "").startsWith(String(new Date().getFullYear())))
-    .reduce((s, i) => s + Number(i.tax_amount ?? 0), 0);
-  const posPending = (posQuery.data ?? []).filter((p) => p.status === "PENDING_APPROVAL");
+  const summary = summaryQuery.data;
+  const awaitingCount = summary?.awaiting_count ?? 0;
+  const awaitingValue = Number(summary?.awaiting_value ?? 0);
+  const activeProjectsCount = summary?.active_projects_count ?? 0;
+  const activeProjectsValue = Number(summary?.active_projects_value ?? 0);
+  const receivables = Number(summary?.receivables ?? 0);
+  const vatYear = Number(summary?.vat_year_to_date ?? 0);
+  const posPendingCount = summary?.po_pending_count ?? 0;
 
   const stageOrder = ["NEW", "QUALIFIED", "PROPOSAL", "NEGOTIATION", "WON", "LOST", "ON_HOLD"];
   const byStage = stageOrder
@@ -196,24 +176,18 @@ function DashboardPage() {
         <Kpi
           icon={BadgeCheck}
           label={t("dash.awaiting")}
-          value={String(awaiting.length)}
-          hint={formatMoney(
-            awaiting.reduce((s, q) => s + Number(q.quoted_value ?? 0), 0),
-            lang,
-          )}
+          value={String(awaitingCount)}
+          hint={formatMoney(awaitingValue, lang)}
         />
         <Kpi
           icon={ClipboardList}
           label={t("dash.active_projects")}
-          value={String(activeProjects.length)}
-          hint={formatMoney(
-            activeProjects.reduce((s, p) => s + Number(p.contract_value ?? 0), 0),
-            lang,
-          )}
+          value={String(activeProjectsCount)}
+          hint={formatMoney(activeProjectsValue, lang)}
         />
         <Kpi icon={Wallet} label={t("dash.receivables")} value={formatMoney(receivables, lang)} />
         <Kpi icon={Percent} label={t("dash.vat_quarter")} value={formatMoney(vatYear, lang)} />
-        <Kpi icon={ShoppingCart} label={t("dash.po_pending")} value={String(posPending.length)} />
+        <Kpi icon={ShoppingCart} label={t("dash.po_pending")} value={String(posPendingCount)} />
       </div>
 
       {canSeeManagement && (

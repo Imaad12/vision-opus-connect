@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
+import { QK_PROJECTS, QK_PURCHASE_ORDERS } from "@/lib/shared-query-keys";
 
 // Backed by the backend's real supplier-PO domain (`/purchase-orders`,
 // `/purchase-requests`, `/purchase-orders/{id}/receipts`) -- the actual
@@ -96,12 +97,12 @@ function PurchaseOrdersPage() {
   const canReceive = me.can("purchasing.receive");
 
   const listQuery = useQuery({
-    queryKey: ["purchase-orders"],
+    queryKey: QK_PURCHASE_ORDERS,
     enabled: canView,
     queryFn: () => api.get<PurchaseOrder[]>("/purchase-orders"),
   });
 
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["purchase-orders"] });
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: QK_PURCHASE_ORDERS });
 
   const transition = useMutation({
     mutationFn: (args: { id: number; action: string }) =>
@@ -311,7 +312,7 @@ function NewPurchaseOrderDialog({
     queryFn: () => api.get<Vendor[]>("/vendors"),
   });
   const projectsQuery = useQuery({
-    queryKey: ["projects-picker-po"],
+    queryKey: QK_PROJECTS,
     enabled: open,
     queryFn: () => api.get<Project[]>("/projects"),
   });

@@ -6,6 +6,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { useMe } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import { formatMoney, useI18n } from "@/lib/i18n";
+import { QK_MANAGEMENT_CASH_FLOW, QK_MANAGEMENT_OPERATING_INCOME } from "@/lib/shared-query-keys";
 
 // The Management layer (Milestone 3): cash flow, operating income,
 // project profitability and vendor spend, all reading from
@@ -61,12 +62,12 @@ function ManagementPage() {
   const allowed = me.can("finance.reports");
 
   const cashFlowQuery = useQuery({
-    queryKey: ["mgmt-cash-flow"],
+    queryKey: QK_MANAGEMENT_CASH_FLOW,
     enabled: allowed,
     queryFn: () => api.get<CashFlow>("/management/cash-flow"),
   });
   const operatingIncomeQuery = useQuery({
-    queryKey: ["mgmt-operating-income"],
+    queryKey: QK_MANAGEMENT_OPERATING_INCOME,
     enabled: allowed,
     queryFn: () => api.get<OperatingIncome>("/management/operating-income"),
   });

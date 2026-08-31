@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
+import { QK_PROJECTS, QK_QUOTATIONS } from "@/lib/shared-query-keys";
 
 // This page is deliberately NOT built on the generic `ResourcePage`
 // (see resource-page.tsx / customers.tsx / suppliers.tsx / projects.tsx):
@@ -110,12 +111,12 @@ function QuotationsPage() {
   const canApprove = me.can("quotations.approve");
 
   const listQuery = useQuery({
-    queryKey: ["quotations"],
+    queryKey: QK_QUOTATIONS,
     enabled: canView,
     queryFn: () => api.get<QuotationVersion[]>("/quotations"),
   });
 
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["quotations"] });
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: QK_QUOTATIONS });
 
   const transition = useMutation({
     mutationFn: (args: { versionId: number; action: string; body?: unknown }) =>
@@ -320,7 +321,7 @@ function NewQuotationDialog({
   const [notes, setNotes] = useState("");
 
   const projectsQuery = useQuery({
-    queryKey: ["projects-picker"],
+    queryKey: QK_PROJECTS,
     enabled: open,
     queryFn: () => api.get<Project[]>("/projects"),
   });

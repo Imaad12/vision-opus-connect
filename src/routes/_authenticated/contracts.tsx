@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
+import { QK_PROJECTS } from "@/lib/shared-query-keys";
 
 // Backed by the backend's own Contract domain (`/contracts`), created
 // only from an already-AWARDED project (see the backend's
@@ -259,7 +260,7 @@ function NewContractDialog({
   const [notes, setNotes] = useState("");
 
   const projectsQuery = useQuery({
-    queryKey: ["projects-picker-for-contracts"],
+    queryKey: QK_PROJECTS,
     enabled: open,
     queryFn: () => api.get<Project[]>("/projects"),
   });
