@@ -30,8 +30,15 @@ tauri-plugin-log = "2"
 # this app once Supabase completes the OAuth redirect.
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
-# Session/refresh-token storage for the desktop client -- see the storage
-# adapter in src/integrations/supabase/client.ts and the "DESKTOP STORAGE"
-# section of DESKTOP_ARCHITECTURE.md for why this (not localStorage) is
-# used when running under Tauri.
-tauri-plugin-store = "2"
+# Windows Credential Manager / macOS Keychain / Linux Secret Service --
+# see src/keychain.rs. Selected per-target below so each platform only
+# links the backend it actually uses.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

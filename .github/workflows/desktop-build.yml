@@ -1,0 +1,180 @@
+name: Desktop build (CI artifacts, unsigned)
+
+# Build-only workflow: produces unsigned Windows and macOS Tauri
+# artifacts for internal testing. It does NOT create a GitHub Release
+# and does NOT publish anything -- see DESKTOP_ARCHITECTURE.md's
+# "Signing" and "Auto-updates" sections for what's still required before
+# any of this can be distributed to a real user. Neither app.identifier
+# nor the frontend/backend URLs are touched here; both stay whatever's
+# already configured in tauri.conf.json / .env at build time.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "vite.config.ts"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/desktop-build.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "vite.config.ts"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/desktop-build.yml"
+
+env:
+  # Same variables the web build already reads (see .env.example) --
+  # kept configurable, never hardcoded. The Supabase URL is the real,
+  # public project URL (not a secret); the publishable key is a real
+  # anon key, safe in CI logs by design (it's the same key already
+  # shipped in the web build's public JS bundle). VITE_API_URL points at
+  # localhost deliberately -- these are unsigned CI artifacts for local
+  # testing, not a build meant to reach the production backend.
+  VITE_SUPABASE_URL: "https://cvonhorkglqizsxdlulp.supabase.co"
+  VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+  # Repo variable (Settings -> Secrets and variables -> Actions -> Variables),
+  # not a secret -- an API base URL isn't sensitive. Falls back to
+  # localhost if unset, matching src/lib/api.ts's own default.
+  VITE_API_URL: ${{ vars.VITE_API_URL || 'http://localhost:8000' }}
+
+jobs:
+  # Cheap, fast checks that don't need a Rust toolchain -- run first so a
+  # frontend break fails in ~1 minute instead of after a 10+ minute
+  # Windows/macOS Rust compile.
+  frontend-checks:
+    name: Frontend typecheck + both build targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Web production build (Cloudflare/Nitro target -- unchanged)
+        run: bun run build
+
+      - name: Desktop production build (static/CSR target for Tauri)
+        run: bun run build:desktop
+
+  # Rust-side check + the keychain module's tests (see src-tauri/src/
+  # keychain.rs) -- runs on Linux because it's the cheapest runner and
+  # these tests use keyring's platform-independent mock backend, so they
+  # don't need a real Windows Credential Manager / macOS Keychain to be
+  # meaningful. Not a substitute for the platform bundle jobs below --
+  # this only proves the Rust code compiles and its logic is correct,
+  # not that bundling succeeds on each real target OS.
+  rust-checks:
+    name: Rust check + tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+  # The actual installer builds. No signing identity is configured
+  # (see DESKTOP_ARCHITECTURE.md's "Signing" section) -- Tauri produces
+  # unsigned artifacts, which is expected and fine for CI-artifact
+  # testing; Windows/macOS will show an "unknown publisher" warning on
+  # these builds until real certificates are added later.
+  build-desktop:
+    name: Build (${{ matrix.name }})
+    needs: [frontend-checks, rust-checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Windows x64"
+            os: windows-latest
+            rust-target: ""
+            artifact-name: vinco-windows-x64
+          - name: "macOS Apple Silicon (aarch64)"
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+            artifact-name: vinco-macos-aarch64
+          - name: "macOS Intel (x86_64)"
+            os: macos-latest
+            rust-target: x86_64-apple-darwin
+            artifact-name: vinco-macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # macOS Intel is cross-compiled from the same Apple Silicon runner
+      # (rustc/cargo support this natively for macOS targets -- no
+      # separate x86_64 runner needed). Windows needs no --target: the
+      # native x64 runner already produces x64 output.
+      - name: tauri build
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.rust-target }}" ]; then
+            bunx tauri build --target ${{ matrix.rust-target }}
+          else
+            bunx tauri build
+          fi
+
+      # Bundle output lives under src-tauri/target/release/bundle/ (no
+      # --target) or src-tauri/target/<triple>/release/bundle/ (with
+      # --target) -- NSIS .exe (+ optional MSI) for Windows, .app + .dmg
+      # for macOS. Uploading the whole bundle/ tree rather than a
+      # hardcoded filename: Tauri names artifacts from productName
+      # ("VINCO ERP") + version (see tauri.conf.json), which can differ
+      # slightly by bundler (NSIS vs. WiX, and macOS's arch suffix) --
+      # this glob finds whatever it actually produced instead of
+      # guessing.
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/*/release/bundle/**
+          if-no-files-found: error
+          retention-days: 14

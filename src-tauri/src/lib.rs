@@ -1,9 +1,15 @@
+mod keychain;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_deep_link::init())
-    .plugin(tauri_plugin_store::Builder::default().build())
+    .invoke_handler(tauri::generate_handler![
+      keychain::keychain_get,
+      keychain::keychain_set,
+      keychain::keychain_delete,
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

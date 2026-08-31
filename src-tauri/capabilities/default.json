@@ -9,7 +9,6 @@
     "core:default",
     "opener:default",
     "opener:allow-open-url",
-    "deep-link:default",
-    "store:default"
+    "deep-link:default"
   ]
 }
