@@ -39,12 +39,14 @@ from app.models import (
 from app.services.financial_service import (
     build_estimate_accuracy_report,
     build_project_financial_snapshot,
+    compute_total_actual_profit,
     create_estimate_revision,
     get_final_estimate_revision,
     get_latest_estimate_revision,
     get_original_estimate_revision,
     sum_estimate_revision_cost,
 )
+from app.services.project_service import list_projects_with_snapshots
 
 
 def _make_project(session: Session, name: str = "Villa Renovation") -> Project:
@@ -840,3 +842,161 @@ def test_relevant_quotation_version_chronological_order_also_holds_in_reverse_in
     snapshot = build_project_financial_snapshot(db_session, project)
 
     assert snapshot.quoted_value == Decimal("151955.00")
+
+
+# --- compute_total_actual_profit (bulk, O(1)-queries path for operating income) ---
+#
+# `compute_total_actual_profit` replaced a call to
+# `build_dashboard_summary(session).total_actual_profit` inside
+# `management_service.compute_operating_income` -- that path looped
+# `build_project_financial_snapshot` once per project (~7 queries each),
+# measured as the dominant, linearly-scaling cost of
+# `GET /management/operating-income` (57ms at 10 projects, 452ms at 100,
+# against real Postgres, while every other Dashboard-relevant endpoint
+# stayed flat). These tests pin its result equal to summing the slower,
+# already-trusted per-project snapshot path, so a future change to either
+# can't silently diverge.
+
+
+def test_compute_total_actual_profit_matches_per_project_snapshot_sum(db_session: Session) -> None:
+    awarded_with_variation = _make_project(db_session, "Awarded With Variation")
+    _award_project(db_session, awarded_with_variation, Decimal("1000000"), Decimal("1000000"))
+    db_session.add(
+        ProjectVariation(
+            project_id=awarded_with_variation.id,
+            approved_value_change=Decimal("50000"),
+            status=VariationStatus.APPROVED,
+        )
+    )
+    category = _make_category(db_session, "Materials")
+    db_session.add(
+        ActualCost(
+            project_id=awarded_with_variation.id,
+            cost_category_id=category.id,
+            amount=Decimal("400000"),
+            tax_amount=Decimal("20000"),
+            incurred_date=date(2026, 1, 1),
+        )
+    )
+
+    awarded_no_costs = _make_project(db_session, "Awarded No Costs Yet")
+    _award_project(db_session, awarded_no_costs, Decimal("200000"), Decimal("200000"))
+
+    never_awarded = _make_project(db_session, "Still Tendering")
+
+    db_session.commit()
+
+    total = compute_total_actual_profit(db_session)
+
+    pairs = list_projects_with_snapshots(db_session)
+    expected = sum((snapshot.actual_profit or Decimal("0") for _, snapshot in pairs), Decimal("0"))
+
+    assert total == expected
+    # 1,000,000 + 50,000 revised revenue - (400,000 - 20,000 recognized cost) = 670,000.
+    # awarded_no_costs has no ActualCost rows -> actual_cost is None -> actual_profit
+    # is None -> contributes 0, not its full 200,000 revenue.
+    # never_awarded has no contract_value -> actual_profit is None -> contributes 0.
+    assert total == Decimal("670000")
+
+
+def test_compute_total_actual_profit_ignores_proposed_and_rejected_variations(
+    db_session: Session,
+) -> None:
+    project = _make_project(db_session)
+    _award_project(db_session, project, Decimal("500000"), Decimal("500000"))
+    category = _make_category(db_session, "Labour")
+    db_session.add(
+        ActualCost(
+            project_id=project.id,
+            cost_category_id=category.id,
+            amount=Decimal("100000"),
+            incurred_date=date(2026, 1, 1),
+        )
+    )
+    db_session.add_all(
+        [
+            ProjectVariation(
+                project_id=project.id,
+                approved_value_change=Decimal("999999"),
+                status=VariationStatus.PROPOSED,
+            ),
+            ProjectVariation(
+                project_id=project.id,
+                approved_value_change=Decimal("999999"),
+                status=VariationStatus.REJECTED,
+            ),
+            ProjectVariation(
+                project_id=project.id, approved_value_change=Decimal("25000"), status=VariationStatus.APPROVED
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # actual_revenue = 500,000 + 25,000 (only the approved one) = 525,000
+    # actual_profit = 525,000 - 100,000 = 425,000
+    assert compute_total_actual_profit(db_session) == Decimal("425000")
+
+
+def test_compute_total_actual_profit_excludes_soft_deleted_projects(db_session: Session) -> None:
+    project = _make_project(db_session)
+    _award_project(db_session, project, Decimal("300000"), Decimal("300000"))
+    category = _make_category(db_session, "Materials")
+    db_session.add(
+        ActualCost(
+            project_id=project.id,
+            cost_category_id=category.id,
+            amount=Decimal("100000"),
+            incurred_date=date(2026, 1, 1),
+        )
+    )
+    db_session.commit()
+    assert compute_total_actual_profit(db_session) == Decimal("200000")
+
+    project.is_deleted = True
+    db_session.commit()
+    assert compute_total_actual_profit(db_session) == Decimal("0")
+
+
+def test_compute_total_actual_profit_query_count_is_constant_not_per_project(
+    db_session: Session,
+) -> None:
+    """The regression this function exists to prevent: query count must
+    not grow with the number of projects. Seeds 15 awarded projects (vs.
+    3 in the earlier equivalence test) specifically so a future change
+    that reintroduces a per-project query would be caught here even
+    though the old, slower `list_projects_with_snapshots` path would
+    still compute the identical number."""
+    category = _make_category(db_session, "Materials")
+    for i in range(15):
+        project = _make_project(db_session, f"Project {i}")
+        _award_project(db_session, project, Decimal("100000"), Decimal("100000"))
+        db_session.add(
+            ActualCost(
+                project_id=project.id,
+                cost_category_id=category.id,
+                amount=Decimal("40000"),
+                incurred_date=date(2026, 1, 1),
+            )
+        )
+    db_session.commit()
+
+    from sqlalchemy import event
+
+    query_count = 0
+
+    def _tick(*args, **kwargs) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _tick)
+    try:
+        total = compute_total_actual_profit(db_session)
+    finally:
+        event.remove(engine, "before_cursor_execute", _tick)
+
+    assert total == Decimal("15") * Decimal("60000")
+    # 3 queries total (projects, variations, actual costs) -- not one
+    # per project. A generous upper bound (not an exact pin) so an
+    # unrelated ORM/session detail doesn't make this test flaky.
+    assert query_count <= 5, f"expected O(1) queries, got {query_count} for 15 projects"

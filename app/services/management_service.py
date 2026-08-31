@@ -31,7 +31,7 @@ from app.core.financial_engine import (
     calculate_outstanding_balance,
 )
 from app.models import Invoice, Payment, PayrollRecord, PurchaseOrder, Vendor
-from app.services.dashboard_service import build_dashboard_summary
+from app.services.financial_service import compute_total_actual_profit
 from app.services.project_service import list_projects_with_snapshots
 
 ZERO: Final[Decimal] = Decimal("0")
@@ -217,7 +217,7 @@ def compute_operating_income(session: Session) -> OperatingIncomeSummary:
     `project_id`) -- this is the honest, currently-computable operating
     income, not a placeholder for a fuller P&L that would need a new
     expense category this milestone doesn't introduce."""
-    total_actual_profit = build_dashboard_summary(session).total_actual_profit
+    total_actual_profit = compute_total_actual_profit(session)
     total_payroll_paid = sum(
         (
             session.execute(

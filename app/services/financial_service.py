@@ -22,10 +22,12 @@ from app.core.enums import Currency, InvoiceDirection, InvoiceStatus, VariationS
 from app.core.financial_engine import (
     EstimateAccuracyReport,
     ProjectFinancialSnapshot,
+    calculate_actual_profit,
     calculate_amount_due_after_retention,
     calculate_net_of_tax,
     calculate_outstanding_balance,
     calculate_recognized_cost,
+    calculate_revised_contract_value,
 )
 from app.models import (
     ActualCost,
@@ -234,6 +236,70 @@ def build_project_financial_snapshot(session: Session, project: Project) -> Proj
         receivables_outstanding=receivables_outstanding,
         cash_received=cash_received,
     )
+
+
+def compute_total_actual_profit(session: Session) -> Decimal:
+    """Portfolio-wide `sum(actual_profit)` across every non-deleted
+    project -- the one figure `management_service.compute_operating_income`
+    actually needs.
+
+    `build_project_financial_snapshot` above computes this correctly, but
+    at the cost of ~7 queries scoped to one project each; calling it once
+    per project in a loop (`project_service.list_projects_with_snapshots`)
+    measured as the dominant cost of `GET /management/operating-income`
+    (linear in project count -- 57ms at 10 projects, 452ms at 100, against
+    real Postgres, while every other Dashboard-relevant endpoint stayed
+    flat regardless of project count).
+
+    `actual_profit = actual_revenue - actual_cost`, where `actual_revenue
+    = awarded_contract_value + approved_variation_value` (see
+    `app.core.financial_engine`). Neither term depends on quoted_value,
+    estimated_cost, estimate revisions, invoices, or payments -- so unlike
+    the full snapshot, this figure alone can be computed from exactly 3
+    queries covering *every* project, not one query per project. Every
+    number here still goes through the same `app.core.financial_engine`
+    functions `build_project_financial_snapshot` uses (`safe_subtract`,
+    `calculate_revised_contract_value`, `calculate_recognized_cost`,
+    `calculate_actual_profit`) -- this only changes how the rows feeding
+    them are fetched, not the arithmetic itself."""
+    projects = session.execute(
+        select(Project.id, Project.contract_value).where(Project.is_deleted.is_(False))
+    ).all()
+
+    variation_rows = session.execute(
+        select(ProjectVariation.project_id, ProjectVariation.approved_value_change).where(
+            ProjectVariation.is_deleted.is_(False),
+            ProjectVariation.status == VariationStatus.APPROVED,
+            ProjectVariation.approved_value_change.is_not(None),
+        )
+    ).all()
+    variations_by_project: dict[int, Decimal] = {}
+    for project_id, approved_value_change in variation_rows:
+        variations_by_project[project_id] = (
+            variations_by_project.get(project_id, ZERO) + approved_value_change
+        )
+
+    cost_rows = session.execute(
+        select(ActualCost.project_id, ActualCost.amount, ActualCost.tax_amount, ActualCost.is_tax_recoverable).where(
+            ActualCost.is_deleted.is_(False)
+        )
+    ).all()
+    recognized_costs_by_project: dict[int, list[Decimal]] = {}
+    for project_id, amount, tax_amount, is_tax_recoverable in cost_rows:
+        recognized = calculate_recognized_cost(amount, tax_amount, is_tax_recoverable)
+        if recognized is not None:
+            recognized_costs_by_project.setdefault(project_id, []).append(recognized)
+
+    total_actual_profit = ZERO
+    for project_id, contract_value in projects:
+        actual_revenue = calculate_revised_contract_value(
+            contract_value, variations_by_project.get(project_id)
+        )
+        actual_cost = _sum_or_none(recognized_costs_by_project.get(project_id, []))
+        actual_profit = calculate_actual_profit(actual_revenue, actual_cost)
+        total_actual_profit += actual_profit or ZERO
+
+    return total_actual_profit
 
 
 # --- Estimate revision history (for multi-year estimating-accuracy analysis) ---
