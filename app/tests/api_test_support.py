@@ -18,9 +18,40 @@ from sqlalchemy.pool import StaticPool
 from app.api.auth import AuthenticatedUser
 from app.api.deps import get_current_user, get_db, get_supabase_auth
 from app.api.main import create_app
+from app.api.permission_cache import clear_permission_cache
 from app.database.base import Base
 
 __all__ = ["FakeSupabaseAuth", "make_memory_engine", "make_api_client"]
+
+
+class _SelfInvalidatingSet(set):
+    """A `set` that clears `app.api.permission_cache`'s cache on any
+    mutation. `require_permission` now caches a permission decision for
+    `settings.permission_cache_ttl_seconds` (see that module) -- every
+    caller in this test file uses the fixed test user `id="user-1"`
+    (`make_api_client` below), so without this, a test that does
+    `api_client.granted.discard("x.create")` expecting the very next
+    request to see the permission as revoked would instead get a stale
+    cached "allowed" from before the discard. Real Supabase-backed
+    production behavior is unaffected: this class only ever wraps the
+    fake test double's `granted` set, never anything reachable outside
+    tests."""
+
+    def add(self, *args, **kwargs):
+        clear_permission_cache()
+        return super().add(*args, **kwargs)
+
+    def discard(self, *args, **kwargs):
+        clear_permission_cache()
+        return super().discard(*args, **kwargs)
+
+    def remove(self, *args, **kwargs):
+        clear_permission_cache()
+        return super().remove(*args, **kwargs)
+
+    def clear(self, *args, **kwargs):
+        clear_permission_cache()
+        return super().clear(*args, **kwargs)
 
 
 class FakeSupabaseAuth:
@@ -29,7 +60,7 @@ class FakeSupabaseAuth:
     calls on it after `get_current_user` has already run."""
 
     def __init__(self, granted: set[str]) -> None:
-        self.granted = granted
+        self.granted = _SelfInvalidatingSet(granted)
 
     def check_permission(self, _user: AuthenticatedUser, permission: str) -> bool:
         return permission in self.granted

@@ -127,5 +127,13 @@ class Settings(BaseSettings):
     #: concept to pin there.
     staging_schema: str = "vinco"
 
+    #: Seconds a Supabase RBAC `can()` decision may be reused for the
+    #: same (user, permission) pair before this process asks Supabase
+    #: again -- see app/api/permission_cache.py for the full TTL/
+    #: revocation/isolation/security writeup. 0 (or negative) disables
+    #: the cache entirely; every call then always hits Supabase, exactly
+    #: as before this setting existed.
+    permission_cache_ttl_seconds: float = 15.0
+
 
 settings = Settings()

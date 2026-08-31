@@ -6,12 +6,14 @@ a `Session` from `session_scope()`.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.timing import record as record_timing
 from app.core.config import normalize_postgres_url, settings
 from app.database.schema_isolation import pin_search_path_from_settings, verify_search_path
 
@@ -32,6 +34,28 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
 def _attach_dialect_listeners(engine: Engine) -> None:
     if engine.dialect.name == "sqlite":
         event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+
+
+def _before_cursor_execute(_conn, _cursor, _statement, _parameters, context, _executemany) -> None:
+    context._vinco_query_start = time.monotonic()
+
+
+def _after_cursor_execute(_conn, _cursor, _statement, _parameters, context, _executemany) -> None:
+    start = getattr(context, "_vinco_query_start", None)
+    if start is not None:
+        record_timing("db", time.monotonic() - start)
+
+
+def _attach_query_timing(engine: Engine) -> None:
+    """Accumulate this request's total time spent waiting on the
+    database (every individual statement's round trip, summed) into
+    `app.api.timing`'s per-request bucket -- see that module for why
+    this is a contextvar rather than something threaded through the
+    session/engine API. A no-op outside of a request being timed
+    (`record_timing` itself already guards that), so this has zero
+    effect on scripts/tests that use an engine directly."""
+    event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+    event.listen(engine, "after_cursor_execute", _after_cursor_execute)
 
 
 def _pin_and_verify_schema(engine: Engine) -> None:
@@ -71,12 +95,14 @@ def get_engine(database_url: str | None = None) -> Engine:
     if database_url is not None:
         engine = create_engine(normalize_postgres_url(database_url), future=True, pool_pre_ping=True)
         _attach_dialect_listeners(engine)
+        _attach_query_timing(engine)
         _pin_and_verify_schema(engine)
         return engine
 
     if _engine is None:
         _engine = create_engine(settings.resolved_database_url, future=True, pool_pre_ping=True)
         _attach_dialect_listeners(_engine)
+        _attach_query_timing(_engine)
         _pin_and_verify_schema(_engine)
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     return _engine

@@ -15,6 +15,8 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.auth import AuthenticatedUser, AuthError, SupabaseAuth
+from app.api.permission_cache import get_cached_permission, set_cached_permission
+from app.api.timing import timed
 from app.core.config import settings
 from app.database.session import session_scope
 from app.models import Company
@@ -62,7 +64,8 @@ def get_current_user(
         )
     token = authorization.split(" ", 1)[1].strip()
     try:
-        return auth.verify_token(token)
+        with timed("auth"):
+            return auth.verify_token(token)
     except AuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -89,18 +92,28 @@ def require_permission(permission: str):
     frontend -- copy the exact string from `app_permission`, don't invent
     a parallel vocabulary (see the frontend permission-string bug fixed
     separately in `purchase-orders.tsx`/`approvals.tsx`).
+
+    A short-TTL cache (app/api/permission_cache.py -- read that module's
+    docstring before touching this) is checked first; only a miss/expiry
+    reaches Supabase for real. The authorization decision itself is
+    still always Supabase's own `can()` -- this only avoids re-asking
+    the identical (user, permission) question within a bounded window.
     """
 
     def _dependency(
         user: AuthenticatedUser = Depends(get_current_user),
         auth: SupabaseAuth = Depends(get_supabase_auth),
     ) -> AuthenticatedUser:
-        try:
-            allowed = auth.check_permission(user, permission)
-        except AuthError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
-            ) from exc
+        allowed = get_cached_permission(user.id, permission)
+        if allowed is None:
+            try:
+                with timed("rbac"):
+                    allowed = auth.check_permission(user, permission)
+            except AuthError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
+                ) from exc
+            set_cached_permission(user.id, permission, allowed)
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
