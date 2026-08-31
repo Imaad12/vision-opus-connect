@@ -97,25 +97,57 @@ print(f"\nCurrent Alembic revision in {target_schema!r}: "
 cfg = Config("alembic.ini")
 script = ScriptDirectory.from_config(cfg)
 head = script.get_current_head()
-head_rev = script.get_revision(head)
-baseline_predecessor = head_rev.down_revision  # read dynamically, not hardcoded
+
+# 926e160784a0 ("postgresql baseline schema") is a fixed, permanent
+# historical revision: dialect-conditional, no-op on SQLite, creates
+# the ENTIRE schema from scratch on PostgreSQL -- see that migration's
+# own docstring for why (the 14 migrations before it contain SQLite-
+# only DDL that fails partway through if replayed against Postgres).
+# Its own predecessor (cb86207a716e) is the one fixed "skip to here"
+# stamp target for any fresh PostgreSQL schema, regardless of how many
+# migrations have been added on top of the baseline since (like this
+# one). Everything from the baseline onward is normal, dialect-
+# agnostic Alembic -- no further special-casing needed as the chain
+# grows.
+BASELINE_REVISION = "926e160784a0"
+
+all_revs = list(script.walk_revisions(base="base", head=head))
+all_revs.reverse()  # oldest first
+order = {r.revision: i for i, r in enumerate(all_revs)}
+baseline_idx = order[BASELINE_REVISION]
+baseline_predecessor = all_revs[baseline_idx].down_revision
 
 stamp_needed = None
 if current_rev == head:
     to_run = []
 elif current_rev is None:
-    # Fresh schema: the documented path is `stamp <predecessor>` (no DDL)
-    # then `upgrade head`, which then applies only head_rev for real.
-    to_run = [head_rev]
+    # Fresh schema: stamp the baseline's own predecessor (skips the
+    # SQLite-only pre-baseline chain without executing it), then apply
+    # the baseline AND everything after it, through head.
+    to_run = all_revs[baseline_idx:]
     stamp_needed = baseline_predecessor
-elif current_rev == baseline_predecessor:
-    to_run = [head_rev]
-else:
-    print(f"\n[UNSAFE] Unexpected current revision {current_rev!r} -- not empty, "
-          f"not {baseline_predecessor!r} (the baseline migration's prerequisite), "
-          f"and not head ({head!r}). Refusing to guess a safe path here -- this "
-          "needs a human to look at the actual revision chain before proceeding.")
+elif current_rev not in order:
+    print(f"\n[UNSAFE] Current revision {current_rev!r} is not part of this "
+          "migration chain at all. Refusing to guess a safe path -- this needs "
+          "a human to look at the actual revision chain before proceeding.")
     sys.exit(1)
+elif order[current_rev] == baseline_idx - 1:
+    # Exactly at the baseline's prerequisite -- same fresh-schema path,
+    # minus the stamp (already there).
+    to_run = all_revs[baseline_idx:]
+elif order[current_rev] < baseline_idx - 1:
+    print(f"\n[UNSAFE] Current revision {current_rev!r} is partway through the "
+          "SQLite-only pre-baseline chain on what appears to be a PostgreSQL "
+          f"database (target schema {target_schema!r}) -- those migrations are "
+          "known to fail if replayed against Postgres (see "
+          f"{BASELINE_REVISION}'s docstring). Refusing to guess a safe path "
+          "here -- this needs a human to look at the actual revision chain "
+          "before proceeding.")
+    sys.exit(1)
+else:
+    # At or after the baseline itself -- a completely normal walk
+    # forward to head, however many migrations that now spans.
+    to_run = all_revs[order[current_rev] + 1 :]
 
 print(f"\nMigration(s) that WILL run ({len(to_run)}):")
 for rev in to_run:

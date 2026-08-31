@@ -50,6 +50,20 @@ caller's JWT signature -- never a header or any client-supplied value a
 caller could forge to read another user's cached entry. Two different
 users' entries never collide by construction.
 
+## Memory growth
+Unbounded in principle (no eviction beyond the lazy TTL check on read --
+an expired entry isn't removed until something happens to look it up
+again), but bounded in practice by the actual key space: as of this
+writing there are 33 distinct permission strings used across every
+`require_permission(...)` call site in app/api/routers/*.py, so the
+cache can hold at most (active user count x 33) entries, each a tiny
+`(str, str) -> (bool, float)` mapping. For VINCO's realistic scale (an
+internal company ERP, not a multi-tenant SaaS product) this is at most
+a few thousand entries -- trivial memory, no eviction policy needed. If
+VINCO's user base or permission surface ever grows by orders of
+magnitude, revisit this; nothing here currently justifies the added
+complexity of an LRU cap.
+
 ## Process behavior
 A plain in-process dict guarded by a `threading.Lock` (FastAPI runs sync
 dependencies -- `require_permission`'s dependency function is sync -- in
