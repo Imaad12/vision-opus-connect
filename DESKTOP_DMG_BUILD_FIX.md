@@ -168,9 +168,10 @@ verified above (step 8 of your checklist).
 
 ## F. Commit pushed
 
-This round: `<filled in after commit>` — "Add a verbose build script to
-expose bundle_dmg.sh's real stdout/stderr" — pushed to `main`. Previous
-round: `083c264`.
+This round: `4687388` — "Add tauri:build:verbose to expose
+bundle_dmg.sh's real stdout/stderr" — pushed to `main`. Previous round:
+`083c264` (`bundle.macOS.dmg` config hardening + CLI version pin),
+`b6e0110` (commit-reference follow-up).
 
 ## What I need from you
 
