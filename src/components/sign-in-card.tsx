@@ -7,13 +7,55 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useI18n } from "@/lib/i18n";
-import { signInWithGoogleDesktop } from "@/lib/tauri-auth";
+import { signInDesktopDevAccount } from "@/lib/tauri-dev-auth";
+
+/**
+ * Desktop MVP only -- see DESKTOP_AUTH_MVP.md. No form, no button, no
+ * OAuth: the desktop build signs itself in automatically, this just shows
+ * that it's in progress (or, on failure, a plain retry -- e.g. the
+ * backend/Supabase is unreachable, or .env's dev credentials are wrong).
+ */
+function DesktopAutoSignInScreen({
+  busy,
+  error,
+  onRetry,
+}: {
+  busy: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+      <div className="grid size-10 place-items-center rounded-md bg-accent text-sm font-bold text-accent-foreground">
+        VC
+      </div>
+      {error ? (
+        <>
+          <p className="max-w-sm text-sm text-muted-foreground">{error}</p>
+          <Button onClick={onRetry}>Retry</Button>
+        </>
+      ) : (
+        <>
+          {busy ? <Loader2 className="size-5 animate-spin text-muted-foreground" /> : null}
+          <p className="text-sm text-muted-foreground">Loading VINCO ERP…</p>
+        </>
+      )}
+    </div>
+  );
+}
 
 export function SignInScreen() {
   const { t, lang, toggle } = useI18n();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  // Desktop MVP only (see DESKTOP_AUTH_MVP.md): Google OAuth is parked, so
+  // there is no login form to show here at all -- just an automatic sign-in
+  // as the desktop build's dedicated internal account, with a plain loading
+  // state while that's in flight, and a retry affordance if it fails (e.g.
+  // the backend/Supabase is unreachable). No button, no browser, no OAuth.
+  const [desktopAuthError, setDesktopAuthError] = useState<string | null>(null);
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => {
@@ -27,33 +69,37 @@ export function SignInScreen() {
 
   // On the web build this screen is rarely reached already-signed-in
   // (Supabase's own redirect already lands the user on /dashboard
-  // directly). On desktop it's the ONLY screen: the vinco://auth-callback
-  // deep-link handler (src/lib/tauri-auth.ts) establishes the session
-  // while this route is still showing, so `signedIn` flipping true is
-  // the actual signal to leave -- without this, sign-in would otherwise
-  // "complete" silently behind a still-visible login screen.
+  // directly). On desktop, the auto-sign-in effect below establishes the
+  // session while this route is still showing, so `signedIn` flipping
+  // true is the actual signal to leave.
   useEffect(() => {
     if (signedIn) void navigate({ to: "/dashboard" });
   }, [signedIn, navigate]);
 
+  useEffect(() => {
+    if (!isTauri() || signedIn) return;
+    let cancelled = false;
+    setBusy(true);
+    setDesktopAuthError(null);
+    signInDesktopDevAccount()
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : "Sign-in failed";
+        setDesktopAuthError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Re-runs after a failed attempt's Retry button bumps retryToken.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryToken]);
+
   const signIn = async () => {
     setBusy(true);
-    // Desktop: Google refuses to authenticate an embedded webview, so this
-    // opens the system browser instead and waits for the OS to hand the
-    // vinco://auth-callback deep link back to this app -- see
-    // src/lib/tauri-auth.ts. Web: unchanged, same in-window redirect as
-    // before.
-    if (isTauri()) {
-      try {
-        await signInWithGoogleDesktop();
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Sign-in failed");
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: window.location.origin + "/dashboard" },
@@ -67,6 +113,10 @@ export function SignInScreen() {
     // there is no further local state to update here before the page
     // navigates away.
   };
+
+  if (isTauri()) {
+    return <DesktopAutoSignInScreen busy={busy} error={desktopAuthError} onRetry={() => setRetryToken((n) => n + 1)} />;
+  }
 
   return (
     <div className="grid min-h-screen lg:grid-cols-2">

@@ -7,13 +7,11 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { isTauri } from "@tauri-apps/api/core";
 import { useEffect, type ReactNode } from "react";
 
 import { Toaster } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { I18nProvider } from "@/lib/i18n";
-import { initTauriDeepLinkAuth } from "@/lib/tauri-auth";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
@@ -135,13 +133,13 @@ function RootComponent() {
     return () => sub.subscription.unsubscribe();
   }, [router, queryClient]);
 
-  // Desktop only: registers the vinco://auth-callback deep-link listener
-  // once per app launch (see src/lib/tauri-auth.ts). A plain no-op import
-  // on the web build -- isTauri() is false there, so this never runs.
-  useEffect(() => {
-    if (!isTauri()) return;
-    void initTauriDeepLinkAuth();
-  }, []);
+  // Google OAuth (and its vinco://auth-callback deep-link listener,
+  // previously registered here via initTauriDeepLinkAuth) is parked for
+  // the desktop MVP -- see DESKTOP_AUTH_MVP.md and src/lib/tauri-auth.ts's
+  // module doc. Desktop instead auto-signs-in via
+  // src/lib/tauri-dev-auth.ts, triggered from the sign-in route itself
+  // (src/components/sign-in-card.tsx), not from here. Re-add a call to
+  // initTauriDeepLinkAuth() here when Google OAuth is reintroduced.
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -1,4 +1,19 @@
 /**
+ * PARKED (see DESKTOP_AUTH_MVP.md): nothing in this module is currently
+ * called. `__root.tsx` no longer invokes `initTauriDeepLinkAuth()`, and
+ * `sign-in-card.tsx` no longer calls `signInWithGoogleDesktop()` -- the
+ * desktop build instead auto-signs-in via `src/lib/tauri-dev-auth.ts`, no
+ * browser, no deep link, no PKCE. This file is left intact (including its
+ * tests) rather than deleted: reintroducing Google OAuth later is meant
+ * to be "call these two functions again," not "rebuild this from
+ * scratch." The Tauri-side infrastructure this depends on (the
+ * `tauri-plugin-deep-link`/`tauri-plugin-opener` registrations in
+ * `src-tauri/src/lib.rs`, the `vinco://` scheme in `tauri.conf.json`) is
+ * also left in place, unused but harmless, for the same reason.
+ *
+ * Everything below this point describes the flow as it worked before
+ * being parked, for whoever re-wires it:
+ *
  * Google sign-in for the desktop (Tauri) build.
  *
  * Google's OAuth policy disallows sign-in from an embedded webview (the
