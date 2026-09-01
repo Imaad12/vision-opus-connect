@@ -1,0 +1,93 @@
+name: Backend CI
+
+# The FastAPI/Alembic backend now lives in backend/ in this same
+# repository (merged from the former vision-contracting-profit repo via
+# `git subtree`, full history preserved) -- this workflow is new: the
+# backend previously had no CI at all, only manual `pytest` runs. Paths
+# scoped to backend/ so a frontend-only change doesn't trigger a Python
+# install + test run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  test:
+    name: pytest (SQLite, default suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # app/tests/test_ocr_extraction.py and test_document_preview.py
+      # import pytesseract/Pillow at collection time (not lazily) -- the
+      # [ocr] extra makes those importable, but pytesseract itself still
+      # shells out to a real `tesseract` binary; installed explicitly
+      # rather than assumed present on the runner image.
+      - name: Install tesseract-ocr
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Install backend dependencies
+        run: pip install -e ".[dev,ocr]"
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+  # Runs against a real disposable Postgres service container -- the only
+  # thing that can catch a bug in the migration *files themselves* (every
+  # other test builds its schema via Base.metadata.create_all(), which by
+  # construction can't: see backend/app/tests/test_migrations.py's own
+  # module doc for the real incident this class of test caught).
+  postgres-integration:
+    name: pytest against real PostgreSQL
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      VISION_TEST_POSTGRES_URL: postgresql+psycopg://postgres:testpass@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # app/tests/test_ocr_extraction.py and test_document_preview.py
+      # import pytesseract/Pillow at collection time (not lazily) -- the
+      # [ocr] extra makes those importable, but pytesseract itself still
+      # shells out to a real `tesseract` binary; installed explicitly
+      # rather than assumed present on the runner image.
+      - name: Install tesseract-ocr
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Install backend dependencies
+        run: pip install -e ".[dev,ocr]"
+
+      - name: Run Postgres-specific + migration-chain tests
+        run: python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.py app/tests/test_clients_api_against_real_postgres.py

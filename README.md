@@ -1,24 +1,187 @@
-# Vision Hub
+# VINCO ERP
 
-Build an internal ERP/CRM for Vision Contracting Co. in Saudi Arabia. It needs customers, contacts, leads, quotations, quotation approvals, projects, contracts, suppliers, purchase orders, invoices, VAT, document management, employee roles, dashboards and audit logs. Use Supabase for the database and authentication.
+Internal ERP for Vision Contracting Co.: customers, contacts, leads,
+quotations, approvals, projects, contracts, suppliers, purchase orders,
+invoices, payments, expenses, employees, finance/management reporting,
+and audit logs.
 
-This project was built with [Lovable](https://lovable.dev).
+One repository, two deployment targets, one source tree:
 
-## Build with Lovable
+```
+                        ┌─────────────────────────────┐
+   Browser  ──────────▶ │  frontend (this repo's root) │
+                        │  React / TanStack Start      │
+   Tauri desktop ─────▶ │  src/, src-tauri/             │
+                        └──────────────┬───────────────┘
+                                       │ HTTPS (Bearer: Supabase JWT)
+                                       ▼
+                        ┌─────────────────────────────┐
+                        │  backend/  (FastAPI)          │
+                        │  deployed to Render           │
+                        └──────────────┬───────────────┘
+                                       │
+                                       ▼
+                        ┌─────────────────────────────┐
+                        │  Supabase Postgres            │
+                        │  `vinco` schema (app data)     │
+                        │  `public` schema (Supabase      │
+                        │   Auth/RBAC + legacy tables)   │
+                        └─────────────────────────────┘
+```
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/439da9c1-6dc1-482f-98f0-e5d2405671f4).
+- **Web**: browser → this repo's frontend (deployed to Cloudflare Pages)
+  → the FastAPI backend (Render) → Supabase Postgres. Auth is normal
+  browser-based Supabase sign-in.
+- **Desktop**: the same frontend source, built as a Tauri shell → the
+  same production FastAPI backend → the same Supabase Postgres. Auth is
+  automatic sign-in as a dedicated internal Supabase account (no browser,
+  no OAuth) — see `DESKTOP_AUTH_MVP.md`. Session storage is a local JSON
+  file (`src-tauri/src/session_store.rs`), not the OS keychain — see that
+  file's module doc for why.
+- Both targets talk to the **same backend** and go through the **same**
+  Supabase JWT verification and RBAC checks (`backend/app/api/deps.py`).
+  Neither client has any special access the other doesn't.
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+## Repository layout
 
-## Development
+```
+.
+├── src/                 # Frontend: React, TanStack Start/Router, React Query
+├── src-tauri/            # Tauri desktop shell (Rust)
+├── backend/               # FastAPI backend + Alembic migrations
+│   ├── app/                # Routers, services, models, RBAC deps
+│   ├── migrations/          # Alembic migration chain
+│   ├── app/tests/            # pytest suite (SQLite by default, real
+│   │                           Postgres tests behind VISION_TEST_POSTGRES_URL)
+│   └── render.yaml            # Render Blueprint config for this service
+├── .github/workflows/
+│   ├── desktop-build.yml    # Frontend TS/tests, web build, desktop build,
+│   │                          Rust checks, Windows/macOS installer artifacts
+│   └── backend-ci.yml       # Backend pytest (SQLite + real-Postgres jobs)
+└── scripts/                # Build-time env-var checks (check-web-env.mjs,
+                              check-desktop-env.mjs) and desktop build helpers
+```
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+`backend/` was merged from the former standalone `vision-contracting-profit`
+repository via `git subtree` — its full commit history is preserved and
+browsable in this repo's log, not squashed or discarded.
+
+## Running things
+
+### Frontend (web)
 
 ```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
+bun install
+cp .env.example .env   # fill in real values, see below
+bun run dev             # http://localhost:8080
+bun run build            # production web build (Cloudflare/Nitro target)
+bun run test              # vitest
+bunx tsc --noEmit          # typecheck
 ```
+
+`bun run build` runs `scripts/check-web-env.mjs` first and **fails the
+build** if `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, or
+`VITE_API_URL` is missing — or, inside a real Cloudflare Pages build
+specifically, if `VITE_API_URL` still points at `localhost`. This repo
+has no `wrangler.toml`; the actual Cloudflare Pages project's build
+command and env vars live entirely in the Cloudflare dashboard for that
+project (Settings → Environment variables) — this check is what stops a
+misconfigured dashboard from silently shipping `localhost:8000` as the
+production API URL to every visitor's browser.
+
+### Desktop (Tauri)
+
+```sh
+bun run tauri:dev          # dev shell against http://localhost:8080
+bun run tauri:build         # release .app/.dmg/.exe (needs a Rust toolchain)
+```
+
+`bun run build:desktop` (called by `tauri:build`) runs
+`scripts/check-desktop-env.mjs` first, which additionally requires
+`VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` (the dedicated
+internal Supabase account desktop auto-login uses — see
+`DESKTOP_AUTH_MVP.md`).
+
+### Rust (`src-tauri/`)
+
+```sh
+cd src-tauri
+cargo check
+cargo test
+cargo build --release
+```
+
+### Backend
+
+```sh
+cd backend
+pip install -e ".[dev]"       # add ",ocr" too for the full test suite to collect
+alembic upgrade head        # SQLite by default (VISION_DATABASE_URL unset)
+uvicorn app.api.main:create_app --factory --reload   # http://localhost:8000
+python -m pytest -q          # full suite, SQLite
+```
+
+Real-Postgres-only tests (migration chain, dialect compatibility, a full
+`/clients` CRUD round trip against a database built only by the
+documented migration procedure) run behind an env var, against a
+**disposable** database only:
+
+```sh
+export VISION_TEST_POSTGRES_URL="postgresql+psycopg://user:pass@localhost:5432/some_throwaway_db"
+python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.py app/tests/test_clients_api_against_real_postgres.py
+```
+
+## Database
+
+- Production database is PostgreSQL (via Supabase). Local dev/tests
+  default to SQLite unless `VISION_DATABASE_URL` is set.
+- VINCO's own tables live in a dedicated `vinco` Postgres schema, isolated
+  from Supabase's own `public` schema (which owns Auth/RBAC tables and
+  pre-existing Lovable-era tables that collide by name with several of
+  VINCO's own) — see `backend/app/core/config.py` and
+  `backend/app/database/schema_isolation.py`.
+- A **fresh** Postgres database must be initialized with
+  `alembic stamp cb86207a716e && alembic upgrade head`, not a bare
+  `alembic upgrade head` — see
+  `backend/migrations/versions/926e160784a0_postgresql_baseline_schema.py`'s
+  own docstring for why, and `backend/app/tests/test_migrations.py` for
+  the regression test proving both the documented procedure and the
+  naive one's failure mode.
+
+## Environment variables
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` | frontend (web + desktop) | Same Supabase project both build targets use |
+| `VITE_API_URL` | frontend (web + desktop) | The FastAPI backend's base URL. Web: set in Cloudflare Pages dashboard. Desktop: baked in at `tauri:build` time from `.env`. Never silently defaults to `localhost` in a real production build (see `scripts/check-web-env.mjs`) |
+| `VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` | desktop only | The dedicated internal Supabase account desktop auto-login signs in as |
+| `VISION_DATABASE_URL` | backend | Unset = local SQLite. Set = PostgreSQL (Render secret in production) |
+| `VISION_SUPABASE_URL` / `VISION_SUPABASE_ANON_KEY` | backend | Verifies JWTs and checks permissions against this Supabase project |
+| `VISION_CORS_ALLOWED_ORIGINS` | backend | Comma-separated web origins. The desktop app's own fixed origins (`tauri://localhost`, `https://tauri.localhost`) are always allowed in code regardless of this value — see `backend/app/core/config.py` |
+| `VISION_STAGING_SCHEMA` | backend | Defaults to `vinco` — the isolated Postgres schema name |
+
+Never commit real values for any of these — `.env`/`.env.local` are
+gitignored; `.env.example` documents the shape only.
+
+## Deployment
+
+- **Backend**: Render, Docker runtime, deploys from `backend/`
+  (`backend/Dockerfile`, `backend/render.yaml`). See `backend/render.yaml`
+  for the exact build/start command and required env vars.
+- **Web frontend**: Cloudflare Pages, built from this repo's root
+  (`bun run build`). Project config lives entirely in the Cloudflare
+  dashboard, not in this repo.
+- **Desktop**: built via `bun run tauri:build` (locally or in
+  `.github/workflows/desktop-build.yml`'s CI matrix), producing unsigned
+  `.dmg`/`.exe` installer artifacts — not auto-published anywhere.
+
+## History note
+
+This project was originally scaffolded with [Lovable](https://lovable.dev).
+Some files still carry a `// This file is automatically generated. Do not
+edit it directly.` header from that scaffold (e.g.
+`src/integrations/supabase/client.ts`) — those specific files have since
+had deliberate, documented hand edits layered on top (see the comment at
+the top of each) for things Lovable's own generator doesn't know about,
+like desktop session storage. The application itself is no longer
+developed through the Lovable editor.

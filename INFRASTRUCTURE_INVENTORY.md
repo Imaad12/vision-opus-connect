@@ -1,10 +1,16 @@
 # VINCO — repository dependencies and domain/URL inventory
 
-Documentation only, per the desktop-stabilization pass's explicit instruction not to
-consolidate repositories or touch domains/Cloudflare/Supabase config yet. Nothing in
-this file changes any of it -- it's a map for that later, separate project.
+> **Superseded.** This was written when the frontend and backend were two
+> separate repositories, per that earlier pass's explicit instruction not
+> to consolidate yet. That consolidation has since happened: the backend
+> now lives at `backend/` in this same repository (merged via `git
+> subtree`, full history preserved) -- see the root `README.md`. The
+> couplings this file documents are still real (a renamed backend route
+> still silently breaks the frontend, etc.), just no longer *cross-repository*
+> ones. Kept as a record of what to check when changing either side, not
+> because the two-repo framing below is still accurate.
 
-## Repository dependencies
+## Repository dependencies (historical: written when these were two separate repos)
 
 Two repositories today: `vision-opus-connect` (this one -- frontend web + desktop)
 and `vision-contracting-profit` (backend -- FastAPI + PostgreSQL/Alembic). Every

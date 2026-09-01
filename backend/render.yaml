@@ -2,17 +2,24 @@ services:
   - type: web
     name: vinco-api
     runtime: docker
-    # Pinned explicitly: this file (and the Dockerfile/app/api it
-    # references) exists ONLY on this branch -- `main` has no Dockerfile
-    # and no `app/api` package at all, so this service cannot possibly
-    # build from `main`. If this service was ever pointed at `main` (or
-    # any commit before the FastAPI layer existed), every route 404s
-    # even though /health can still pass. Render's Blueprint sync uses
-    # this field; a manually-created (non-Blueprint) Web Service instead
-    # has its branch set directly in the dashboard under
-    # Settings -> Build & Deploy -- this field has no effect there, so
-    # that setting must be checked/changed by hand too.
-    branch: claude/postgres-productionization
+    # This backend now lives at backend/ inside the consolidated
+    # `vision-opus-connect` repository (merged via `git subtree` from the
+    # former standalone `vision-contracting-profit` repo, full history
+    # preserved -- see that repo's root README.md). Render's own service
+    # still points at the OLD standalone backend repo until manually
+    # repointed in the dashboard -- a `branch:` value in this file cannot
+    # change which GitHub repository a Render service is connected to,
+    # only which branch of its *current* one. The one manual step this
+    # consolidation needs: Render dashboard -> vinco-api service ->
+    # Settings -> Build & Deploy -> change the connected repository to
+    # vision-opus-connect, branch `main`, and set Root Directory to
+    # `backend`. `dockerfilePath: ./Dockerfile` below is already correct
+    # for that (resolves relative to Root Directory, i.e.
+    # backend/Dockerfile) and needs no change once Root Directory is set.
+    # Until that manual step happens, the old vision-contracting-profit
+    # repo's `claude/postgres-productionization` branch remains the real
+    # deploy source -- do not archive/delete it first.
+    branch: main
     dockerfilePath: ./Dockerfile
     plan: starter
     healthCheckPath: /health
