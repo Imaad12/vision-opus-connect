@@ -133,7 +133,8 @@ verified above.
 
 ## F. Commit pushed
 
-<!-- filled in after commit -->
+`083c264` — "Investigate macOS DMG packaging failure; harden bundler
+config" — pushed to `main`.
 
 ## What I still need from you
 
