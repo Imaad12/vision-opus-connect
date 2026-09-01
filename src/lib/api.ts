@@ -25,7 +25,6 @@ const API_BASE_URL = rawApiUrl && rawApiUrl.trim() !== "" ? rawApiUrl : "http://
 // with no dependency on dashboard access or on trusting a redeploy
 // actually picked up a new value.
 if (typeof window !== "undefined") {
-  // eslint-disable-next-line no-console
   console.info(`[vinco] API_BASE_URL = ${API_BASE_URL}`);
 }
 
@@ -44,15 +43,64 @@ async function authHeaders(): Promise<Record<string, string>> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(await authHeaders()),
-      ...init?.headers,
-    },
+// Without this, a hung backend connection (dropped network, a stuck
+// request on the server) leaves fetch() pending forever -- every
+// useQuery/useMutation built on `request()` would then spin its loading
+// state indefinitely, with no error to show and no way for the user to
+// recover short of restarting the app. 30s is generous for this app's
+// actual endpoints (dashboard's own aggregation queries, the slowest
+// path, complete in low single-digit seconds -- see the dashboard
+// performance work) while still bounding the worst case.
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// The backend (app/api/deps.py) only ever returns 401 for a missing or
+// invalid/expired bearer token -- never for a permission failure (that's
+// 403). So on 401 the right move is always the same: drop the stale
+// session so the app's existing SIGNED_OUT handling (__root.tsx's
+// onAuthStateChange -> router.invalidate()) redirects through /auth,
+// where the desktop build re-authenticates automatically (see
+// tauri-dev-auth.ts) and the web build shows its normal sign-in screen --
+// instead of every page on a stale/expired session showing the same
+// opaque "Missing bearer token" error with no way out.
+let handlingUnauthorized = false;
+function handleUnauthorized(): void {
+  if (handlingUnauthorized) return;
+  handlingUnauthorized = true;
+  void supabase.auth.signOut().finally(() => {
+    handlingUnauthorized = false;
   });
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(await authHeaders()),
+        ...init?.headers,
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      // Deliberately does not say "try again" for a write: whether the
+      // backend received and applied it before the connection died is
+      // unknown, and re-submitting blind risks a duplicate invoice/PO/
+      // payment/etc. A GET is always safe to just retry.
+      throw new ApiError(
+        0,
+        method === "GET"
+          ? "Request timed out. Check your connection and try again."
+          : "Request timed out. This may or may not have been saved -- check before retrying.",
+      );
+    }
+    throw err;
+  }
+
+  if (response.status === 401) handleUnauthorized();
 
   if (!response.ok) {
     let detail = response.statusText;

@@ -62,7 +62,11 @@ export async function signInDesktopDevAccount(): Promise<void> {
   logDevAuthDiagnostic("sign_in_started", {});
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
-    logDevAuthDiagnostic("sign_in_failed", { name: error.name, message: error.message, status: error.status });
+    logDevAuthDiagnostic("sign_in_failed", {
+      name: error.name,
+      message: error.message,
+      status: error.status,
+    });
     throw error;
   }
   logDevAuthDiagnostic("sign_in_succeeded", {});

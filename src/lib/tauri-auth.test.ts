@@ -141,7 +141,12 @@ describe("diagnostic logging", () => {
   it("logs the AuthError's name/message/status/code on a failed exchange, never a token", async () => {
     exchangeCodeForSession.mockResolvedValue({
       data: {},
-      error: { name: "AuthApiError", message: "Invalid API key", status: 401, code: "invalid_credentials" },
+      error: {
+        name: "AuthApiError",
+        message: "Invalid API key",
+        status: 401,
+        code: "invalid_credentials",
+      },
     });
 
     await handleAuthCallbackUrl(`${DESKTOP_OAUTH_REDIRECT_URL}?code=abc`);

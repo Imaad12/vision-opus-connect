@@ -393,6 +393,7 @@ export function ResourcePage({ config }: { config: ResourceConfig }) {
                           <Button
                             variant="ghost"
                             size="icon"
+                            disabled={deleteMutation.isPending}
                             onClick={() => {
                               if (window.confirm(t("common.confirm_delete")))
                                 deleteMutation.mutate(row);

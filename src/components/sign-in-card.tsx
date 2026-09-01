@@ -115,7 +115,13 @@ export function SignInScreen() {
   };
 
   if (isTauri()) {
-    return <DesktopAutoSignInScreen busy={busy} error={desktopAuthError} onRetry={() => setRetryToken((n) => n + 1)} />;
+    return (
+      <DesktopAutoSignInScreen
+        busy={busy}
+        error={desktopAuthError}
+        onRetry={() => setRetryToken((n) => n + 1)}
+      />
+    );
   }
 
   return (
@@ -131,10 +137,18 @@ export function SignInScreen() {
           <h2 className="text-3xl leading-tight font-semibold">{t("app.name")}</h2>
           <p className="mt-3 text-sm text-primary-foreground/75">{t("app.tagline")}</p>
           <ul className="mt-8 space-y-2 text-sm text-primary-foreground/70">
-            <li>· {t("nav.quotations")} — {t("nav.approvals")}</li>
-            <li>· {t("nav.projects")} — {t("nav.contracts")}</li>
-            <li>· {t("nav.purchase_orders")} — {t("nav.suppliers")}</li>
-            <li>· {t("nav.invoices")} — {t("nav.vat")}</li>
+            <li>
+              · {t("nav.quotations")} — {t("nav.approvals")}
+            </li>
+            <li>
+              · {t("nav.projects")} — {t("nav.contracts")}
+            </li>
+            <li>
+              · {t("nav.purchase_orders")} — {t("nav.suppliers")}
+            </li>
+            <li>
+              · {t("nav.invoices")} — {t("nav.vat")}
+            </li>
           </ul>
         </div>
         <p className="text-xs text-primary-foreground/50">Riyadh · Kingdom of Saudi Arabia</p>
