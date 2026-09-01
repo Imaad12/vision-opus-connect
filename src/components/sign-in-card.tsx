@@ -25,6 +25,17 @@ export function SignInScreen() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // On the web build this screen is rarely reached already-signed-in
+  // (Supabase's own redirect already lands the user on /dashboard
+  // directly). On desktop it's the ONLY screen: the vinco://auth-callback
+  // deep-link handler (src/lib/tauri-auth.ts) establishes the session
+  // while this route is still showing, so `signedIn` flipping true is
+  // the actual signal to leave -- without this, sign-in would otherwise
+  // "complete" silently behind a still-visible login screen.
+  useEffect(() => {
+    if (signedIn) void navigate({ to: "/dashboard" });
+  }, [signedIn, navigate]);
+
   const signIn = async () => {
     setBusy(true);
     // Desktop: Google refuses to authenticate an embedded webview, so this

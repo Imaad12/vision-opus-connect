@@ -3,6 +3,18 @@ mod keychain;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    // Must be registered first (the crate's own documented requirement).
+    // On Windows/Linux, a vinco:// launch while the app is already running
+    // starts a *second* process rather than notifying the first one --
+    // without this plugin that second process would just open its own
+    // (unauthenticated) window and the OAuth callback would never reach
+    // the original one. The "deep-link" feature makes it forward the
+    // second launch's URL into tauri-plugin-deep-link's normal
+    // `onOpenUrl` event automatically, so src/lib/tauri-auth.ts doesn't
+    // need to know this happened -- same event, same handler, on every
+    // platform. A no-op on macOS/iOS, which route repeat launches to the
+    // running instance at the OS level already.
+    .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_deep_link::init())
     .invoke_handler(tauri::generate_handler![

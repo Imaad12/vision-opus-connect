@@ -65,6 +65,9 @@ jobs:
       - name: Typecheck
         run: bunx tsc --noEmit
 
+      - name: Unit tests (incl. desktop OAuth callback parsing)
+        run: bun run test
+
       - name: Web production build (Cloudflare/Nitro target -- unchanged)
         run: bun run build
 

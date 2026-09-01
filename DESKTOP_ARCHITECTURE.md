@@ -125,56 +125,15 @@ literal success criterion.
 
 ## 6. Authentication approach
 
-**Problem:** Google's OAuth policy blocks sign-in from embedded webviews
-("disallowed_useragent") — Tauri's window is one, so the web build's
-in-window redirect (`signInWithOAuth` → `window.location = <google-url>`)
-cannot be reused inside Tauri as-is.
-
-**Recommended (and implemented) flow**, all in `src/lib/tauri-auth.ts`:
-
-1. `supabase.auth.signInWithOAuth({ provider: "google", options:
-   { redirectTo: "vinco://auth-callback", skipBrowserRedirect: true } })`
-   — asks Supabase for the Google authorize URL without navigating
-   anywhere.
-2. Open that URL in the **system browser** via `@tauri-apps/plugin-opener`
-   — a real, trusted browser context Google's policy allows.
-3. Google → Supabase completes the OAuth exchange and redirects to
-   `vinco://auth-callback#access_token=...&refresh_token=...`.
-4. The OS hands that URL to the already-running app via
-   `@tauri-apps/plugin-deep-link`'s `onOpenUrl` listener (registered once
-   in `__root.tsx`), which parses the fragment and calls
-   `supabase.auth.setSession({ access_token, refresh_token })` — the same
-   call the web client's own internals make after its redirect.
-
-**Session persistence / refresh tokens:** the Supabase JS client's
-`autoRefreshToken: true` already handles token refresh identically on
-both builds — that logic is entirely inside `@supabase/supabase-js` and
-was not touched. What differs is *where* the session is written to disk
-(§8).
-
-**Logout:** `supabase.auth.signOut()` is unchanged and works on both
-builds — it clears whatever `storage` adapter is configured, whichever
-one that is.
-
-**Deep-link/callback handling:** `tauri-plugin-deep-link` registers the
-`vinco://` scheme (declared in `tauri.conf.json`, self-registered at
-runtime on Windows/Linux, via `Info.plist` on macOS). No web server, no
-localhost callback port, no new backend endpoint.
-
-**Not privileged:** this flow only ever handles the same short-lived user
-access/refresh token pair the web build's `onAuthStateChange` already
-receives after every sign-in. It never touches Supabase's service-role
-key or any other privileged credential — those exist only in the FastAPI
-backend's server-side environment, never in any frontend build.
-
-**What is explicitly NOT done in this phase:** registering
-`vinco://auth-callback` as an authorized redirect URI in Google Cloud
-Console, or as an allowed redirect URL in Supabase Auth's dashboard.
-Without that one-time dashboard change on both sides, the flow reaches
-Google fine but the final redirect back to the app will fail — exactly
-as the web build's own redirect would if its URL weren't registered. This
-is a config change on Google's and Supabase's dashboards, not code, and
-is deliberately left for whenever real desktop distribution is approved.
+**Superseded — see `DESKTOP_OAUTH_FIX.md`.** The flow originally
+described here (implicit flow, tokens in the callback URL fragment,
+`onOpenUrl` only) shipped in the first .dmg and had a real bug: the
+callback never reached the app at all, landing the browser on the web
+dashboard instead. `DESKTOP_OAUTH_FIX.md` has the full diagnosis, the
+corrected PKCE-based flow, cold-start (`getCurrent()`) and
+already-running (`tauri-plugin-single-instance`) callback handling, and
+the exact Supabase dashboard change still required. §7 onward below are
+still current.
 
 ## 7. API configuration approach
 
@@ -296,8 +255,10 @@ running `bun run tauri:build`.
 
 JS (`package.json`): `@tauri-apps/cli` (dev), `@tauri-apps/api`,
 `@tauri-apps/plugin-deep-link`, `@tauri-apps/plugin-opener`, `cross-env`
-(dev). (`@tauri-apps/plugin-store` was added, then removed once §8's
-keychain hardening replaced it.)
+(dev), `vitest` (dev, `DESKTOP_OAUTH_FIX.md`). (`@tauri-apps/plugin-store`
+was added, then removed once §8's keychain hardening replaced it.) Rust:
+`tauri-plugin-single-instance` added alongside the OAuth fix — see that
+doc for why.
 
 Rust (`src-tauri/Cargo.toml`): `tauri`, `tauri-plugin-log` (already
 scaffolded by `tauri init`), `tauri-plugin-deep-link`,
@@ -388,11 +349,13 @@ not a code change.
 
 ## 14. Risks
 
-- **Google OAuth dashboard config is a hard external dependency.** The
+- **Supabase Auth dashboard config is a hard external dependency.** The
   deep-link flow is complete on the app side, but sign-in cannot fully
-  succeed until `vinco://auth-callback` is registered in Google Cloud
-  Console and Supabase Auth's redirect allow-list — a decision explicitly
-  left for whenever real distribution is approved (§6).
+  succeed until `vinco://auth-callback` is added to Supabase Auth's
+  redirect URL allow-list — this was in fact the exact root cause of the
+  first .dmg's login-loop bug; see `DESKTOP_OAUTH_FIX.md`. Google Cloud
+  Console needs no change (Google only ever redirects to Supabase's own
+  fixed HTTPS callback, already registered).
 - **CORS.** The desktop origin (`tauri://localhost` /
   `http://tauri.localhost`) needs adding to the backend's
   `CORS_ALLOWED_ORIGINS` before API calls succeed end-to-end from a real

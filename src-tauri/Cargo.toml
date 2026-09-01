@@ -30,6 +30,13 @@ tauri-plugin-log = "2"
 # this app once Supabase completes the OAuth redirect.
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
+# Windows/Linux only forward a second vinco:// launch to this plugin,
+# which (via the "deep-link" feature) re-emits it as the deep-link
+# plugin's normal event -- without it a second launch would just open an
+# unauthenticated second window instead of completing sign-in in the
+# first. Must stay the first .plugin() call in lib.rs (the crate's own
+# documented requirement).
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # Windows Credential Manager / macOS Keychain / Linux Secret Service --
 # see src/keychain.rs. Selected per-target below so each platform only
 # links the backend it actually uses.
