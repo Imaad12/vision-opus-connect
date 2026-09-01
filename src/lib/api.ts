@@ -28,14 +28,50 @@ if (typeof window !== "undefined") {
   console.info(`[vinco] API_BASE_URL = ${API_BASE_URL}`);
 }
 
+// Distinguishes what actually happened, since a raw browser fetch error
+// gives no HTTP status at all and every webview/browser reports it with
+// the same opaque, non-diagnostic message ("Load failed" in WKWebView,
+// "Failed to fetch" in Chrome) whether the cause was DNS, a dropped
+// connection, or a blocked CORS preflight -- there is no way for JS to
+// tell those apart, so `kind` names what IS known instead of guessing.
+export type ApiErrorKind = "http" | "timeout" | "network";
+
 export class ApiError extends Error {
   status: number;
+  kind: ApiErrorKind;
+  method: string;
+  path: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, kind: ApiErrorKind, method: string, path: string) {
     super(message);
     this.status = status;
+    this.kind = kind;
+    this.method = method;
+    this.path = path;
+  }
+
+  /** One-line, human-readable summary safe to render directly in the UI. */
+  describe(): string {
+    const where = `${this.method} ${this.path}`;
+    if (this.kind === "timeout") return `${where} — ${this.message}`;
+    if (this.kind === "network") {
+      return `${where} — no response from the server (${this.message}). This means the ` +
+        "request never got an HTTP response at all: check your network connection, that " +
+        "the API is reachable, and (for the desktop app) that its origin is allowed by " +
+        "the backend's CORS configuration.";
+    }
+    const hint = HTTP_STATUS_HINTS[this.status];
+    return `${where} — HTTP ${this.status}${hint ? ` (${hint})` : ""}: ${this.message}`;
   }
 }
+
+const HTTP_STATUS_HINTS: Record<number, string> = {
+  401: "session expired or invalid — signing out",
+  403: "insufficient permissions",
+  404: "endpoint not found on the deployed backend",
+  422: "invalid data",
+  500: "server error",
+};
 
 async function authHeaders(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession();
@@ -95,9 +131,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         method === "GET"
           ? "Request timed out. Check your connection and try again."
           : "Request timed out. This may or may not have been saved -- check before retrying.",
+        "timeout",
+        method,
+        path,
       );
     }
-    throw err;
+    // fetch() rejected with no Response at all: DNS failure, refused
+    // connection, TLS error, or a blocked CORS preflight all look
+    // identical from here (every browser/webview reports them with the
+    // same opaque message, e.g. WKWebView's bare "Load failed") -- there
+    // is no API to ask which one happened, so this names the endpoint
+    // and the raw browser message instead of pretending to know more.
+    const raw = err instanceof Error ? err.message : String(err);
+    throw new ApiError(0, raw, "network", method, path);
   }
 
   if (response.status === 401) handleUnauthorized();
@@ -111,7 +157,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // Non-JSON error body (e.g. a proxy/network failure page) -- fall
       // back to the status text rather than throwing a parse error.
     }
-    throw new ApiError(response.status, detail);
+    throw new ApiError(response.status, detail, "http", method, path);
   }
 
   if (response.status === 204) return undefined as T;

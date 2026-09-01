@@ -23,7 +23,7 @@ import { db, type Row } from "@/lib/db";
 import { formatDate, formatMoney, useI18n, type Lang } from "@/lib/i18n";
 
 function errorMessage(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) return e.describe();
   if (e instanceof Error) return e.message;
   if (e && typeof e === "object" && "message" in e)
     return String((e as { message: unknown }).message);

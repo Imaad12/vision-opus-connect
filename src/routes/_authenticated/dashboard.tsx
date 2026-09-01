@@ -14,7 +14,7 @@ import {
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { useMe } from "@/hooks/use-auth";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { db, type Row } from "@/lib/db";
 import { QK_MANAGEMENT_CASH_FLOW, QK_MANAGEMENT_OPERATING_INCOME } from "@/lib/shared-query-keys";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
@@ -117,8 +117,19 @@ function DashboardPage() {
   // Every KPI below quietly falls back to 0/empty on a failed fetch (a
   // network/CORS/backend-down failure looks identical to "no data yet"
   // otherwise) -- this is the one visible signal that something is
-  // actually broken, not just a company with nothing recorded yet.
-  const hasFetchError = leadsQuery.isError || summaryQuery.isError;
+  // actually broken, not just a company with nothing recorded yet. All
+  // four backend-routed queries are included (operatingIncome/cashFlow
+  // were previously left out, so a failure there degraded silently to
+  // "$0" with zero indication anything was wrong) and the first real
+  // error's own status/endpoint is shown, not just a generic phrase --
+  // "data may be incomplete" alone gave no way to tell a genuine outage
+  // from a permissions gap or a stale desktop build pointed at the wrong
+  // API URL.
+  const fetchErrors = [leadsQuery, summaryQuery, operatingIncomeQuery, cashFlowQuery]
+    .map((q) => q.error)
+    .filter((e): e is NonNullable<typeof e> => e != null);
+  const hasFetchError = fetchErrors.length > 0;
+  const firstFetchError = fetchErrors[0];
 
   const audit = useQuery({
     queryKey: ["dashboard-audit"],
@@ -168,6 +179,9 @@ function DashboardPage() {
       {hasFetchError && (
         <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           {t("common.load_failed")} — {t("dash.data_may_be_incomplete")}
+          {firstFetchError instanceof ApiError && (
+            <div className="mt-1 font-mono text-xs opacity-80">{firstFetchError.describe()}</div>
+          )}
         </div>
       )}
 

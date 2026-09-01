@@ -55,7 +55,7 @@ type Contract = {
 type Project = { id: number; name: string; project_code: string | null; status: string };
 
 function errorMessage(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  if (e instanceof ApiError) return e.describe();
   if (e instanceof Error) return e.message;
   return String(e);
 }

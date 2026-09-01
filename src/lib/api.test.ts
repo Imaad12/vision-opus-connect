@@ -106,4 +106,49 @@ describe("api client error handling", () => {
       message: expect.stringContaining("may or may not have been saved"),
     });
   });
+
+  // Regression for the VINCO desktop Customers page: a blocked CORS
+  // preflight and a genuine network outage both surface from fetch() as
+  // an opaque TypeError with no HTTP status at all (WKWebView's own
+  // message is literally "Load failed") -- this must be tagged distinctly
+  // from an HTTP error response and from a timeout, and describe() must
+  // name the endpoint instead of only repeating the same opaque text.
+  it("tags a raw fetch rejection (no Response) as a network-kind error, not an HTTP one", async () => {
+    global.fetch = vi.fn().mockRejectedValue(new TypeError("Load failed")) as typeof fetch;
+    await expect(api.get("/clients")).rejects.toMatchObject({
+      status: 0,
+      kind: "network",
+      method: "GET",
+      path: "/clients",
+    });
+  });
+
+  it("describe() names the endpoint and status for an HTTP error", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Missing permission: customers.view" }), {
+        status: 403,
+      }),
+    ) as typeof fetch;
+    try {
+      await api.get("/clients");
+      throw new Error("expected api.get to reject");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect((e as InstanceType<typeof ApiError>).describe()).toBe(
+        "GET /clients — HTTP 403 (insufficient permissions): Missing permission: customers.view",
+      );
+    }
+  });
+
+  it("describe() distinguishes a network failure from an HTTP error for the same endpoint", async () => {
+    global.fetch = vi.fn().mockRejectedValue(new TypeError("Load failed")) as typeof fetch;
+    try {
+      await api.get("/clients");
+      throw new Error("expected api.get to reject");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect((e as InstanceType<typeof ApiError>).describe()).toContain("no response from the server");
+      expect((e as InstanceType<typeof ApiError>).describe()).toContain("GET /clients");
+    }
+  });
 });
