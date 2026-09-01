@@ -53,6 +53,17 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
         <p className="mt-2 text-sm text-muted-foreground">
           Something went wrong on our end. You can try refreshing or head back home.
         </p>
+        {/* On desktop there's no reliable way to see console.error() after
+            the fact (no devtools/inspector in a release build, and
+            reportLovableError is a no-op outside the Lovable web editor --
+            confirmed, not assumed: window.__lovableEvents doesn't exist in
+            Tauri). Showing the real exception here directly is the only
+            dependable way to diagnose a crash on an installed .app -- this
+            is an internal tool, not a public product, so a raw error
+            message on screen is acceptable. */}
+        <p className="mt-3 rounded-md bg-muted px-3 py-2 text-start font-mono text-xs break-words text-muted-foreground">
+          {error.name}: {error.message}
+        </p>
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {

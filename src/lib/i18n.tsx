@@ -278,9 +278,18 @@ export function formatMoney(value: number | null | undefined, lang: Lang = "en")
 
 export function formatDate(value: string | null | undefined, lang: Lang = "en") {
   if (!value) return "—";
+  const date = new Date(value);
+  // Intl.DateTimeFormat.format() throws RangeError: Invalid time value for a
+  // non-empty-but-unparseable string (verified directly, not assumed) --
+  // e.g. a hand-typed "N/A"/"TBD" surviving in an older, loosely-typed date
+  // column from before this app's date inputs enforced a real date picker.
+  // A single bad row anywhere this renders (customers/documents/invoices/
+  // audit logs/etc, via resource-page.tsx's generic date column, or here
+  // directly) would otherwise crash the whole page it's on.
+  if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat(lang === "ar" ? "ar-SA" : "en-GB", {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).format(new Date(value));
+  }).format(date);
 }
