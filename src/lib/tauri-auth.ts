@@ -58,6 +58,19 @@ import { supabase } from "@/integrations/supabase/client";
 
 export const DESKTOP_OAUTH_REDIRECT_URL = "vinco://auth-callback";
 
+// Safe, secret-free diagnostics for the desktop OAuth handoff -- never a
+// code, token, or API key, only shape/outcome. This is the concrete
+// mechanism for turning a vague in-app error like "Invalid API key" into
+// evidence of exactly which step produced it (e.g. Supabase's AuthApiError
+// carries a `status` and `code` that the toast text alone doesn't show).
+// Always on, not dev-only: the failure this exists to diagnose only shows
+// up in a real installed build, which has no attached devtools console by
+// default -- these still reach the OS-level webview log (Console.app on
+// macOS, stdout on Windows/Linux when launched from a terminal).
+function logAuthDiagnostic(event: string, data: Record<string, unknown> = {}): void {
+  console.info(`[tauri-auth] ${event}`, data);
+}
+
 export async function signInWithGoogleDesktop(): Promise<void> {
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: "google",
@@ -83,13 +96,22 @@ export async function signInWithGoogleDesktop(): Promise<void> {
 export async function handleAuthCallbackUrl(url: string): Promise<void> {
   if (!url.startsWith(DESKTOP_OAUTH_REDIRECT_URL)) return;
 
-  let params: URLSearchParams;
+  let parsed: URL;
   try {
-    params = new URL(url).searchParams;
+    parsed = new URL(url);
   } catch {
+    logAuthDiagnostic("callback_received", { received: true, parseError: true });
     console.error("[tauri-auth] could not parse callback URL:", url);
     return;
   }
+  const params = parsed.searchParams;
+  logAuthDiagnostic("callback_received", {
+    received: true,
+    protocol: parsed.protocol,
+    pathname: parsed.pathname,
+    hasCode: params.has("code"),
+    hasError: params.has("error") || params.has("error_description"),
+  });
 
   // Google/Supabase report a failed authorization this way (consent
   // denied, misconfigured client, etc.) rather than omitting `code` --
@@ -107,8 +129,24 @@ export async function handleAuthCallbackUrl(url: string): Promise<void> {
     return;
   }
 
+  logAuthDiagnostic("exchange_started", { codeLength: code.length });
   const { error } = await supabase.auth.exchangeCodeForSession(code);
-  if (error) toast.error(error.message);
+  if (error) {
+    // AuthError (the type every Supabase JS auth call rejects/resolves
+    // with) always carries `status` (the HTTP status Supabase responded
+    // with) and `code` (a stable machine-readable string, e.g.
+    // "invalid_credentials") alongside `message`, though either can be
+    // `undefined` depending on where the error originated.
+    logAuthDiagnostic("exchange_failed", {
+      name: error.name,
+      message: error.message,
+      status: error.status,
+      code: error.code,
+    });
+    toast.error(error.message);
+    return;
+  }
+  logAuthDiagnostic("exchange_succeeded", {});
 }
 
 let deepLinkAuthInitialized = false;

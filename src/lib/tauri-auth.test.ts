@@ -97,3 +97,60 @@ describe("initTauriDeepLinkAuth", () => {
     expect(onOpenUrl).toHaveBeenCalledOnce();
   });
 });
+
+describe("diagnostic logging", () => {
+  // Guards the "no secrets in logs" requirement directly: every console.info
+  // call this module makes is inspected, not just the ones a given test set
+  // out to check, so a future change that accidentally logs a code/token
+  // fails this test even if no one thought to check for it specifically.
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+
+  function loggedPayloads(): Record<string, unknown>[] {
+    const calls = infoSpy.mock.calls as [unknown, Record<string, unknown>][];
+    return calls
+      .filter(([label]) => typeof label === "string" && label.startsWith("[tauri-auth]"))
+      .map(([, payload]) => payload);
+  }
+
+  it("logs callback shape and the exchange outcome, never the code itself", async () => {
+    const realCode = "super-secret-single-use-auth-code";
+    await handleAuthCallbackUrl(`${DESKTOP_OAUTH_REDIRECT_URL}?code=${realCode}`);
+
+    const payloads = loggedPayloads();
+    expect(payloads).toContainEqual(
+      expect.objectContaining({
+        received: true,
+        protocol: "vinco:",
+        hasCode: true,
+        hasError: false,
+      }),
+    );
+    expect(payloads).toContainEqual(expect.objectContaining({ codeLength: realCode.length }));
+    expect(payloads).toContainEqual(expect.objectContaining({}));
+
+    for (const payload of payloads) {
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain(realCode);
+    }
+  });
+
+  it("logs the AuthError's name/message/status/code on a failed exchange, never a token", async () => {
+    exchangeCodeForSession.mockResolvedValue({
+      data: {},
+      error: { name: "AuthApiError", message: "Invalid API key", status: 401, code: "invalid_credentials" },
+    });
+
+    await handleAuthCallbackUrl(`${DESKTOP_OAUTH_REDIRECT_URL}?code=abc`);
+
+    expect(loggedPayloads()).toContainEqual({
+      name: "AuthApiError",
+      message: "Invalid API key",
+      status: 401,
+      code: "invalid_credentials",
+    });
+  });
+});
