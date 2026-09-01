@@ -60,6 +60,26 @@ def test_staging_schema_defaults_to_vinco() -> None:
     assert Settings().staging_schema == "vinco"
 
 
+def test_cors_allowed_origins_list_always_includes_desktop_origins_even_when_env_overridden() -> None:
+    # Render's VISION_CORS_ALLOWED_ORIGINS fully replaces the default
+    # string (Settings only reads it, never appends to it) -- so if
+    # whoever configured it only listed the web app's own https:// domain
+    # (the natural thing to do, since `tauri://localhost` isn't a domain
+    # anyone would think to add there), the desktop build would be
+    # silently CORS-blocked. cors_allowed_origins_list must union the
+    # desktop origins in regardless of what the env var says.
+    settings = Settings(cors_allowed_origins="https://app.example.com")
+    origins = settings.cors_allowed_origins_list
+    assert "https://app.example.com" in origins
+    assert "tauri://localhost" in origins
+    assert "https://tauri.localhost" in origins
+
+
+def test_cors_allowed_origins_list_does_not_duplicate_desktop_origin_if_already_configured() -> None:
+    settings = Settings(cors_allowed_origins="https://app.example.com,tauri://localhost")
+    assert settings.cors_allowed_origins_list.count("tauri://localhost") == 1
+
+
 def test_pin_search_path_from_settings_is_a_no_op_for_sqlite(monkeypatch) -> None:
     # SET search_path / CREATE SCHEMA are PostgreSQL-only syntax; against
     # a SQLite engine they must never even be attempted, since

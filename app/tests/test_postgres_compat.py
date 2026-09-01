@@ -26,6 +26,8 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from sqlalchemy import create_engine, text
+
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from app.core.config import settings
 from app.core.enums import DEFAULT_CURRENCY
@@ -48,6 +50,29 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def pg_engine() -> Generator[Engine, None, None]:
+    # Reset the schema before building it via create_all, rather than
+    # assuming it's already empty or was last built by this same
+    # fixture. Found for real, not theoretical: running this file after
+    # test_migrations.py / test_clients_api_against_real_postgres.py
+    # against the same disposable database (exactly how a shared CI
+    # Postgres service would be used across test files in one job) left
+    # `vinco` populated by a real Alembic run, whose constraint names
+    # don't match SQLAlchemy's declarative naming convention -- create_all
+    # silently no-ops on the already-existing tables, and drop_all then
+    # fails at teardown with UndefinedObject trying to drop a constraint
+    # by a name that was never actually used. A full reset makes this
+    # file's outcome independent of whatever any other real-Postgres test
+    # file left behind.
+    reset_engine = create_engine(POSTGRES_TEST_URL, future=True)
+    try:
+        with reset_engine.connect() as conn:
+            schema = settings.staging_schema or "public"
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            conn.commit()
+    finally:
+        reset_engine.dispose()
+
     # `get_engine()` already pins an explicit `SET search_path` on every
     # new connection when VISION_STAGING_SCHEMA is set (see
     # app.database.schema_isolation) -- confirmed necessary because
