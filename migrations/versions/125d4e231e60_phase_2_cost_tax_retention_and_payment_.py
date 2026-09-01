@@ -24,7 +24,7 @@ def upgrade() -> None:
     with op.batch_alter_table('actual_costs', schema=None) as batch_op:
         batch_op.add_column(sa.Column('reference_number', sa.String(length=100), nullable=True))
         batch_op.add_column(sa.Column('tax_amount', sa.Numeric(precision=14, scale=2), nullable=True))
-        batch_op.add_column(sa.Column('is_tax_recoverable', sa.Boolean(), server_default=sa.text('1'), nullable=False))
+        batch_op.add_column(sa.Column('is_tax_recoverable', sa.Boolean(), server_default=sa.text('true'), nullable=False))
         batch_op.add_column(sa.Column('payment_status', sa.Enum('UNPAID', 'PARTIALLY_PAID', 'PAID', name='costpaymentstatus', native_enum=False), server_default='UNPAID', nullable=False))
         batch_op.add_column(sa.Column('notes', sa.Text(), nullable=True))
         batch_op.create_check_constraint('ck_actual_costs_tax_amount_range', 'tax_amount IS NULL OR (amount >= 0 AND tax_amount >= 0 AND tax_amount <= amount) OR (amount < 0 AND tax_amount <= 0 AND tax_amount >= amount)')
@@ -36,7 +36,7 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('notes', sa.Text(), nullable=True))
 
     with op.batch_alter_table('payments', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('is_retention_release', sa.Boolean(), server_default=sa.text('0'), nullable=False))
+        batch_op.add_column(sa.Column('is_retention_release', sa.Boolean(), server_default=sa.text('false'), nullable=False))
 
     # ### end Alembic commands ###
 

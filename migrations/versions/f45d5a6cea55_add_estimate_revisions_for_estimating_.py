@@ -27,7 +27,7 @@ def upgrade() -> None:
     sa.Column('quotation_version_id', sa.Integer(), nullable=True),
     sa.Column('revision_number', sa.Integer(), nullable=False),
     sa.Column('effective_date', sa.Date(), nullable=True),
-    sa.Column('is_final', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+    sa.Column('is_final', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('currency', sa.Enum('AED', 'USD', 'EUR', 'GBP', 'SAR', name='currency', native_enum=False), nullable=False),
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),

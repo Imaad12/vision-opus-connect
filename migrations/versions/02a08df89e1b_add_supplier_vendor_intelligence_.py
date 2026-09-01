@@ -59,7 +59,7 @@ def upgrade() -> None:
             server_default='AED',
             nullable=False,
         ))
-        batch_op.add_column(sa.Column('is_active', sa.Boolean(), server_default=sa.text('1'), nullable=False))
+        batch_op.add_column(sa.Column('is_active', sa.Boolean(), server_default=sa.text('true'), nullable=False))
         batch_op.create_index(batch_op.f('ix_vendors_tax_number'), ['tax_number'], unique=False)
 
 

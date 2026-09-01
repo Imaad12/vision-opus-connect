@@ -48,7 +48,7 @@ def upgrade() -> None:
     sa.Column('department', sa.String(length=150), nullable=True),
     sa.Column('phone', sa.String(length=50), nullable=True),
     sa.Column('email', sa.String(length=200), nullable=True),
-    sa.Column('is_primary', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+    sa.Column('is_primary', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
