@@ -20,7 +20,7 @@ vi.mock("@/integrations/supabase/client", () => ({
   },
 }));
 
-const { api, ApiError } = await import("./api");
+const { api, ApiError, assertApiUrlConfiguredInProduction } = await import("./api");
 
 const originalFetch = global.fetch;
 
@@ -150,5 +150,24 @@ describe("api client error handling", () => {
       expect((e as InstanceType<typeof ApiError>).describe()).toContain("no response from the server");
       expect((e as InstanceType<typeof ApiError>).describe()).toContain("GET /clients");
     }
+  });
+});
+
+// Regression for a web deployment silently pointing every visitor's
+// browser at localhost: API_BASE_URL's own fallback is fine for local
+// dev, but must never survive unnoticed into a real production build
+// with VITE_API_URL simply never configured (e.g. a Cloudflare Pages
+// project whose env vars were never set).
+describe("assertApiUrlConfiguredInProduction", () => {
+  it("throws when no URL is configured and this is a production build", () => {
+    expect(() => assertApiUrlConfiguredInProduction(false, true)).toThrow(/VITE_API_URL is not set/);
+  });
+
+  it("does not throw when a URL is configured, even in production", () => {
+    expect(() => assertApiUrlConfiguredInProduction(true, true)).not.toThrow();
+  });
+
+  it("does not throw when no URL is configured outside production (local dev)", () => {
+    expect(() => assertApiUrlConfiguredInProduction(false, false)).not.toThrow();
   });
 });

@@ -16,7 +16,41 @@ import { supabase } from "@/integrations/supabase/client";
 // relative fetch (against whatever origin served the page) instead of
 // hitting the backend at all. Blank must be treated as unset too.
 const rawApiUrl = import.meta.env["VITE_API_URL"] as string | undefined;
-const API_BASE_URL = rawApiUrl && rawApiUrl.trim() !== "" ? rawApiUrl : "http://localhost:8000";
+const hasApiUrl = Boolean(rawApiUrl && rawApiUrl.trim() !== "");
+
+// scripts/check-web-env.mjs (and check-desktop-env.mjs's equivalent)
+// already fail the BUILD if this is missing -- this is defense in depth
+// for the one thing that check can't see: whatever actually invokes the
+// build in Cloudflare's own dashboard. Neither this repo nor this build
+// controls that command (no wrangler.toml -- see
+// INFRASTRUCTURE_INVENTORY.md), so if it ever bypasses `bun run build`
+// (and its env-check prefix) the localhost fallback below would
+// otherwise ship silently to every real visitor's browser. Refusing
+// outright, the same way src/integrations/supabase/client.ts already
+// throws on a missing Supabase URL/key -- caught by the same root error
+// boundary, which renders `error.name: error.message` directly on
+// screen instead of every page quietly failing with an opaque "Load
+// failed" and no indication why. Exported as a plain function (rather
+// than inlined) so this logic is unit-testable without fighting
+// module-load-time import.meta.env semantics.
+export function assertApiUrlConfiguredInProduction(hasUrl: boolean, isProd: boolean): void {
+  if (!hasUrl && isProd) {
+    throw new Error(
+      "VITE_API_URL is not set in this production build. Refusing to silently default to " +
+        "http://localhost:8000 -- that would be reachable from nobody's browser but the " +
+        "machine that built it. Set VITE_API_URL wherever this build's environment is " +
+        "configured (the Cloudflare Pages dashboard's Settings -> Environment variables for " +
+        "the web deploy) and rebuild.",
+    );
+  }
+}
+
+// import.meta.env.PROD is false under vitest (mode "test") and under
+// plain `vite dev`, so local development keeps the existing localhost
+// default unaffected.
+assertApiUrlConfiguredInProduction(hasApiUrl, import.meta.env.PROD);
+
+const API_BASE_URL = hasApiUrl ? (rawApiUrl as string) : "http://localhost:8000";
 
 // Deliberately visible in the browser console (not a secret -- just the
 // backend base URL) so a build-time env-injection problem is provable
