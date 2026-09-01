@@ -1,0 +1,332 @@
+# API Architecture
+
+## 1. Purpose
+
+This backend has, until now, had exactly one caller: the PySide6 desktop
+UI, talking to `app/services/*` in-process. The VINCO frontend (a
+TanStack Start/React app, currently reading and writing an independent
+Supabase/Postgres database directly — see the frontend integration
+inspection report) is being migrated to call this backend instead of its
+own database for every domain this backend already owns. `app/api/`
+is the thin HTTP layer that makes that possible.
+
+**Nothing about the business-logic layering changes.** A route handler
+calls the same `app/services/*.py` function the desktop UI already
+calls, with the same `Session`, the same validation, the same
+`ValidationError`. The API package owns exactly three things: turning an
+HTTP request into a function call, turning a return value into JSON, and
+deciding whether the caller is allowed to make that call at all.
+
+## 2. Identity and permissions: delegated to Supabase, not duplicated
+
+This backend has no `User`, `Role`, or `Permission` model, and this
+integration does not add one. The VINCO frontend already has a complete,
+working RBAC system, live, in its Supabase project: `user_roles`,
+`role_permissions`, `user_permissions`, `user_scopes`, `profiles`, and
+the `has_permission`/`can`/`has_full_scope`/`is_project_member` SQL
+functions the frontend's own Row-Level-Security policies are built on.
+
+Building a second, parallel role/permission model in this backend would
+create exactly the failure mode this codebase's other safety conventions
+exist to prevent elsewhere: two independently-editable sources of truth
+for the same fact, silently drifting apart. So instead:
+
+- **`app/api/auth.py: SupabaseAuth.verify_token`** verifies a bearer
+  token's signature and expiry against the same Supabase project's JWKS
+  (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`). This establishes
+  *identity* only — who is making the request, and whether the token is
+  genuine and unexpired. It never touches permissions.
+- **`SupabaseAuth.check_permission`** asks Supabase's own `can(_perm)`
+  Postgres function, over PostgREST (`POST {SUPABASE_URL}/rest/v1/rpc/can`),
+  forwarding the *caller's own verified token* as the request's bearer
+  credential — never a service-role key. Postgres evaluates `can()` as
+  that user (`auth.uid()` resolves from the forwarded token), so the
+  result is exactly what the frontend's RLS already enforces for that
+  user, not a re-implementation of it.
+- **`app/api/deps.py: require_permission(permission)`** is a dependency
+  factory every protected route uses, e.g.
+  `Depends(require_permission("customers.view"))`. The permission string
+  is always copied verbatim from the frontend's `app_permission` Postgres
+  enum — see the naming-mismatch bug already found and fixed in
+  `purchase-orders.tsx`/`approvals.tsx` for what happens when a second,
+  informal vocabulary drifts from the real one.
+
+A verification failure is always **401** (we don't know who you are); a
+permission-check failure is always **403** (we know who you are, and
+you're not allowed). The two are never conflated.
+
+**Known gap:** the frontend's RLS also scopes some tables to rows a
+non-full-scope user owns or created (`owner_id`/`created_by`, e.g.
+`customers_select`). The backend's existing models (`Client`, etc.) have
+no such columns. Today, any caller who passes the permission check sees
+every row, not just their own. This is a real scope gap to close — most
+likely by adding `owner_id`/`created_by` to the relevant backend models —
+not something papered over by this integration. Tracked here rather than
+silently assumed away.
+
+## 3. Company/tenant context
+
+`get_or_create_default_company` (already used by `project_service`)
+still applies: this remains a single-company system, and
+`app/api/deps.py: get_current_company` just resolves that one row. When
+multi-company support is needed, this is the one dependency that changes
+to resolve a company from the caller's context instead of assuming there
+is only one.
+
+## 4. Why Supabase stays, for now, and what "no Lovable dependency" means
+
+**Lovable** (the code-generation/hosting/sync product) and **Supabase**
+(the Postgres + Auth + Storage service the generated frontend happens to
+use) are different things. The direction is:
+
+```
+VINCO frontend -> this backend's API -> our own database
+```
+
+Lovable is not in that picture at all — nothing in this design requires
+Lovable's editor, its git sync, or its OAuth relay to be reachable at
+runtime. Supabase, however, is deliberately *kept* for identity/RBAC in
+this phase: it is not a new paid dependency (it's already in production
+use), replacing it is a substantial, separate identity-system project of
+its own, and attempting it inside this integration would violate "don't
+introduce another paid SaaS dependency merely to replace Lovable" in the
+opposite direction — trading a working system for a half-built one.
+Migrating identity/RBAC into this backend's own database (so Supabase can
+eventually be retired too) is a later, explicitly-scoped phase, not an
+implicit side effect of connecting the frontend to this API.
+
+The business data itself (customers, projects, quotations, purchase
+orders, invoices, ...) already lives only in this backend's database
+(currently SQLite) and is never read from or written to Supabase's
+Postgres by this API — that duplication is exactly what this integration
+exists to eliminate. Moving that database from SQLite to a
+self-hosted/owned Postgres instance is also a later, separate step (the
+service layer and ORM models don't change either way); this phase does
+not require it.
+
+## 5. Request flow
+
+```
+VINCO frontend (bearer token from Supabase Auth)
+  -> FastAPI route (app/api/routers/*.py)
+       -> require_permission(...)   [401 / 403, via Supabase]
+       -> get_db()                   [Session, same transaction semantics as the desktop UI]
+       -> app/services/*.py          [existing business logic, unchanged]
+       -> Pydantic response model    [app/api/schemas.py]
+```
+
+`ValidationError` raised by a service function is caught at the route and
+returned as HTTP 422 with the service's own message; a top-level
+exception handler in `app/api/main.py` catches any instance that reaches
+it uncaught, so a future route that forgets the `try`/`except` still
+fails as a 422, never a 500.
+
+## 6. What exists today
+
+| Route | Permission | Service |
+|---|---|---|
+| `GET /health` | none | — |
+| `GET /company/me` | any authenticated user (matches `company_settings_select`'s `USING (true)`) | `project_service.get_or_create_default_company` |
+| `GET /clients`, `GET /clients/{id}` | `customers.view` | `client_service` |
+| `POST /clients` | `customers.create` | `client_service.create_client` |
+| `PUT /clients/{id}` | `customers.edit` | `client_service.update_client` |
+| `GET /vendors`, `GET /vendors/{id}` | `suppliers.view` | `vendor_service` (new, mirrors `client_service`) |
+| `POST /vendors` | `suppliers.create` | `vendor_service.create_vendor` |
+| `PUT /vendors/{id}` | `suppliers.edit` | `vendor_service.update_vendor` |
+| `GET /projects`, `GET /projects/{id}` | `projects.view` | `project_service` |
+| `POST /projects` | `projects.create` | `project_service.create_project` |
+| `PUT /projects/{id}` | `projects.edit` | `project_service.update_project` |
+| `GET /quotations` | `quotations.view` | `quotation_service.list_quotation_versions` |
+| `GET /quotations/{id}`, `GET /quotations/{id}/versions` | `quotations.view` | `quotation_service` |
+| `POST /projects/{id}/quotations` | `quotations.create` | `quotation_service.create_quotation` |
+| `POST /quotations/{id}/revisions` | `quotations.create` | `quotation_service.create_quotation_revision` |
+| `GET /quotation-versions/{id}`, `.../boq-lines` | `quotations.view` | `quotation_service` (BOQ lines: read-only) |
+| `POST /quotation-versions/{id}/submit` | `quotations.submit` | `quotation_service.mark_submitted` |
+| `POST /quotation-versions/{id}/lose`, `.../withdraw` | `quotations.edit` | `quotation_service.mark_lost` / `mark_withdrawn` |
+| `POST /quotation-versions/{id}/award` | `quotations.approve` | `quotation_service.mark_awarded` |
+| `GET /projects/{id}/quotations` | `quotations.view` | `quotation_service.list_quotations_for_project` |
+| `GET /projects/{id}/contract`, `GET /contracts/{id}` | `contracts.view` | new `contract_service` |
+| `POST /projects/{id}/contracts` | `contracts.create` | `contract_service.create_contract` (project must be `AWARDED`) |
+| `POST /contracts/{id}/activate`, `.../complete`, `.../terminate` | `contracts.edit` | `contract_service` |
+
+`QuotationRead` now nests `project: {id, name, project_code, client: {id, name}}`,
+read from the same eager-loaded relationships `list_quotation_versions`
+already uses — this is what lets a quotation list show project/client
+names without a second round trip.
+
+`Contract` (new model) is created once, only from an `AWARDED` project,
+copying `value`/`currency` from `Project` at that moment rather than
+referencing it live — see the model's docstring. No amendment/versioning
+states; a post-signing value change is a `ProjectVariation`, same as it
+already is for `Project.contract_value` itself.
+
+Run locally: `uvicorn app.api.main:app --reload`, configured via
+`VISION_SUPABASE_URL` and `VISION_SUPABASE_ANON_KEY` (both already
+public/client-side values in the frontend's `.env` — no new secret is
+introduced).
+
+### 6.1 Known field/shape gaps (not papered over)
+
+- **Vendors/`suppliers.tsx`**: the frontend form collects `category`,
+  `cr_number`, `city`, `payment_terms_days` (a number), a three-state
+  `status`, `rating`, `iban`, `address`, `name_ar` — none of which exist
+  on `Vendor`. The API exposes exactly what `Vendor` has
+  (`vendor_type`, `name`, contact fields, `tax_number`, `payment_terms`
+  as free text, `is_active`, `notes`). Wiring the frontend's supplier
+  *form* needs one of: extend `Vendor` with the missing columns, or trim
+  the form. Not decided here.
+- **Projects/`projects.tsx`**: the frontend form also collects
+  `manager_id`, `location`, `budget_cost`, `progress_percent`, and a
+  directly-editable `contract_value`. `contract_value` is deliberately
+  never settable through `create_project`/`update_project` — it is set
+  exactly once by `quotation_service.mark_awarded` — so an API that
+  accepted it from this form and silently dropped it would be worse than
+  not wiring the field at all. `ProjectStatus`'s real values differ
+  entirely from the frontend's; returned as-is, not silently renamed.
+- **Quotations/`quotations.tsx`**: the frontend models one flat
+  `quotations` row per quote plus separate `quotation_items`/
+  `quotation_approvals` tables. The backend keeps `Quotation` (identity)
+  and `QuotationVersion` (the priced, dated, status-carrying, *immutable*
+  revision) separate by design — collapsing that to fit the frontend's
+  flat shape would remove the audit trail `quotation_service` exists to
+  protect. This API exposes the real versioned shape; reconciling it
+  with the existing quotation UI is the next dedicated piece of work,
+  not something to shortcut here. There is also no distinct "approval"
+  step in the backend beyond submit/award — `QuotationStatus` doesn't
+  have one — so no approval endpoint was invented.
+
+## 6.2 Procurement (Milestone 1)
+
+The naming collision is resolved: the client-award-evidence concept is
+`ClientAwardEvidence` (see `PO_ARCHITECTURE.md`'s naming note), and
+`PurchaseOrder` now means the real ERP concept -- an outbound order to a
+vendor. New domain, following the same pattern as everything above (new
+models, `purchase_request_service.py`/`purchase_order_service.py`/
+`receipt_service.py`, `app/api/schemas_procurement.py`,
+`app/api/routers/{purchase_requests,purchase_orders,receipts}.py`):
+
+| Route | Permission | Service |
+|---|---|---|
+| `GET/POST /purchase-requests`, `GET /purchase-requests/{id}` | `purchasing.request` | `purchase_request_service` |
+| `POST /purchase-requests/{id}/submit` | `purchasing.request` | " |
+| `POST /purchase-requests/{id}/approve`, `.../reject` | `purchasing.po_approve` | " |
+| `GET/POST /purchase-orders`, `GET /purchase-orders/{id}` | `purchasing.po_create` | `purchase_order_service` |
+| `PUT /purchase-orders/{id}/lines` | `purchasing.po_create` | " (recomputes subtotal/VAT/total; DRAFT only) |
+| `POST /purchase-orders/{id}/submit` | `purchasing.po_create` | " |
+| `POST /purchase-orders/{id}/approve`, `.../reject`, `.../cancel` | `purchasing.po_approve` | " |
+| `GET/POST /purchase-orders/{id}/receipts`, `GET /receipts/{id}` | `purchasing.receive` | `receipt_service` |
+| `POST /receipts/{id}/cancel` | `purchasing.receive` | " (reverses received quantities) |
+
+`PurchaseOrderStatus` mirrors the frontend's existing `po_status` values
+(`DRAFT/PENDING_APPROVAL/APPROVED/REJECTED/PARTIALLY_RECEIVED/RECEIVED/
+CANCELLED`) deliberately, so the existing Purchase Orders page needs a
+data-source swap, not a new status vocabulary. No warehouse/inventory
+concepts (locations, bins, on-hand stock) -- a `Receipt` only moves
+`PurchaseOrderLine.received_quantity` and the PO's own status.
+
+## 6.3 Finance, CRM, People (Milestone 2)
+
+Finance reuses the `Invoice`/`Payment`/`ActualCost` models already added
+in Phase 1/2 -- this slice is their first CRUD/lifecycle service+API
+layer, not a schema change. CRM (`Contact`, `Lead`) and People
+(`Employee`, `PayrollRecord`) are new models, all following the same
+model → service → schema → router pattern as everything above.
+
+| Route | Permission | Service |
+|---|---|---|
+| `GET/POST /invoices`, `GET /invoices/{id}`, `PUT /invoices/{id}` | `finance.invoices` | `invoice_service` |
+| `POST /invoices/{id}/issue`, `.../cancel` | `finance.invoices` | " |
+| `GET/POST /payments`, `GET /payments/{id}` | `finance.payments` | `payment_service` |
+| `GET/POST /expenses`, `GET /expenses/{id}`, `PUT /expenses/{id}` | `finance.expenses` | `cost_service` (existing `ActualCost` CRUD, extended) |
+| `GET /cost-categories` | `finance.expenses` | `lookup_service` (existing, newly exposed) |
+| `GET/POST /contacts`, `GET /contacts/{id}`, `PUT /contacts/{id}` | `contacts.view/create/edit` | `contact_service` |
+| `GET/POST /leads`, `GET /leads/{id}`, `PUT /leads/{id}` | `leads.view/create/edit` | `lead_service` |
+| `GET/POST /employees`, `GET /employees/{id}`, `PUT /employees/{id}` | `employees.view` / `employees.manage` | `employee_service` |
+| `GET/POST /payroll-records`, `GET /payroll-records/{id}` | `employees.manage` | `payroll_service` |
+| `POST /payroll-records/{id}/approve`, `.../pay` | `employees.manage` | " |
+
+Design notes:
+
+- **Invoice status is derived, not client-set.** `recompute_invoice_status`
+  runs after every payment create/void and moves
+  `ISSUED -> PARTIALLY_PAID -> PAID` from `amount_paid` vs.
+  `amount - retention_amount` (`app.core.financial_engine`'s existing
+  `calculate_amount_due_after_retention`/`calculate_outstanding_balance`).
+  `DRAFT`/`CANCELLED`/`DISPUTED` are untouched by that recompute --
+  `OVERDUE` and `DISPUTED` are deliberately never set automatically
+  (there is no scheduler here to compare `due_date` to "now"); both are
+  only ever reachable via an explicit `PUT /invoices/{id}`.
+- **`Lead` is independent of `Project.status`**, which also starts at
+  `LEAD`/`TENDERING`. A lead may never become a project; winning one is
+  recorded via `status=WON` plus an optional, manually-set
+  `converted_project_id` -- there is no automatic lead-to-project
+  conversion, matching the existing manual award-to-contract pattern.
+- **The HR `Employee` model is unrelated to the frontend's existing
+  `/employees` page**, which manages Supabase's own
+  `profiles`/`user_roles`/`user_scopes` (application login identity and
+  RBAC) and stays there deliberately. `employees.view`/`employees.manage`
+  existed in the frontend's `app_permission` enum but were unused before
+  this slice (that page instead checks `admin.users`/`admin.roles`) --
+  this is their real, intended resource. The frontend page for this is
+  new (`/hr-employees`), not a rewire of `/employees`.
+- **`PayrollRecord` has no frontend page yet** -- built as a real, tested
+  backend domain (`DRAFT -> APPROVED -> PAID`, `net_amount` always
+  server-computed as `gross_amount - deductions`) since Milestone 2 named
+  "employees/payroll" as in scope, without inventing a UI ahead of a
+  concrete page request.
+- **No delete/remove anywhere in this slice.** `finance.invoices`/
+  `finance.payments`/`finance.expenses` have no separate delete
+  permission in the real `app_permission` enum, `leads` has no
+  `leads.delete` (winning/losing is `status`, not deletion), and a
+  recorded `Payment` is a financial event, not an editable/removable
+  draft.
+
+## 6.4 Management layer (Milestone 3)
+
+New `management_service.py` -- pure aggregation over rows the services
+above already validate and write; no new financial formula, only new
+groupings of existing ones (`app.core.financial_engine`'s retention/
+outstanding-balance/net-of-tax functions, reused verbatim).
+
+| Route | Permission | Notes |
+|---|---|---|
+| `GET /management/dashboard-summary` | any authenticated user | `dashboard_service.build_dashboard_summary`, unchanged since Phase 3 -- now fed by real `Invoice`/`Payment` rows since Milestone 2 |
+| `GET /management/project-profitability` | `finance.reports` | Real (actual, not quoted/estimated) profit/margin per project, most profitable first; a project with no revenue yet sorts last, not first |
+| `GET /management/vendor-spend` | `finance.reports` | Per-vendor PO commitment / invoiced / paid / outstanding-payable, mirroring the client-side invoice math per project, grouped by vendor instead |
+| `GET /management/cash-flow` | `finance.reports` | Portfolio cash in (client `Payment`s) vs. cash out (vendor `Payment`s) -- from recorded payments, never invoice face values |
+| `GET /management/operating-income` | `finance.reports` | `total_actual_profit - total_payroll_paid` (only `PayrollRecord`s with `status=PAID`) |
+
+`GET /management/dashboard-summary` is deliberately ungated beyond
+authentication, same rule as `GET /company/me` -- it's a portfolio
+headline count, not a financial detail. The other four use
+`finance.reports`, the permission the frontend nav already treats as the
+general finance-reporting read grant (see `nav.invoices` etc. in
+app-shell.tsx, which all already accept it as an alternative to their own
+domain permission).
+
+**Operating income is deliberately narrow**: there is no general
+company-overhead/G&A expense concept in this system (every `ActualCost`
+row requires a `project_id`), so "operating income" here is exactly
+`total actual profit - total paid payroll` -- an honest, currently-
+computable figure, not a placeholder for a fuller P&L that would need a
+new expense category this milestone doesn't introduce.
+
+Also fixed this milestone (not new API, a correctness fix): the
+frontend's `approvals.tsx` had been reading Supabase's `quotations`/
+`purchase_orders`/`expenses` tables directly, all three of which stopped
+receiving new rows once those pages were cut over to this backend across
+Phase A/Milestone 1/Milestone 2 -- the queue had been silently empty.
+Rebuilt against `GET /quotations`, `POST /quotation-versions/{id}/award`/
+`.../lose`, and `GET/POST /purchase-orders/{id}/approve`/`.../reject`.
+There is no Expenses section anymore: `ActualCost`/`cost_service` has no
+submit/approve lifecycle (only a plain `payment_status`), so the
+"approved by a second person" expense workflow the old UI implied does
+not exist server-side -- a real gap, not silently wired to nothing.
+
+## 7. Next slices
+
+Vendor invoices already ride on the same `Invoice`/`direction=VENDOR`
+model exposed above -- no further work needed there. The quotation-shape
+and vendor/project-field reconciliations noted in §6.1 remain open.
+A dedicated expense approval lifecycle (see §6.4) would close the last
+"second-person approval" gap called out across Finance.

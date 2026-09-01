@@ -1,0 +1,11 @@
+.venv
+.git
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.db
+*.db-journal
+vision_contracting_profit.egg-info
+node_modules
+.claude
