@@ -9,7 +9,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { isTauri } from '@tauri-apps/api/core';
 
-import { tauriSecureStorage } from '@/lib/tauri-storage';
+import { tauriDesktopStorage } from '@/lib/tauri-storage';
 
 import type { Database } from './types';
 
@@ -59,7 +59,7 @@ function createSupabaseClient() {
       fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
     },
     auth: {
-      storage: isTauri() ? tauriSecureStorage : typeof window !== 'undefined' ? localStorage : undefined,
+      storage: isTauri() ? tauriDesktopStorage : typeof window !== 'undefined' ? localStorage : undefined,
       persistSession: true,
       autoRefreshToken: true,
       // Supabase JS already auto-detects and exchanges a `?code=` on page

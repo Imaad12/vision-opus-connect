@@ -27,7 +27,7 @@
  *      pointed at the app's own `vinco://auth-callback` deep link instead
  *      of an `https://` page. `client.ts` sets `flowType: 'pkce'`, so
  *      this call also generates a PKCE code_verifier and stores it via
- *      `tauriSecureStorage` (the OS keychain) before returning the URL --
+ *      `tauriDesktopStorage` (a local JSON file) before returning the URL --
  *      a short-lived single-use `code` travels through the browser and
  *      the OS, never the actual access/refresh tokens.
  *   2. Open that URL in the user's REAL system browser

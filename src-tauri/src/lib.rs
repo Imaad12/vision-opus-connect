@@ -1,4 +1,4 @@
-mod keychain;
+mod session_store;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,10 +17,11 @@ pub fn run() {
     .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_deep_link::init())
+    .manage(session_store::SessionStoreState::new())
     .invoke_handler(tauri::generate_handler![
-      keychain::keychain_get,
-      keychain::keychain_set,
-      keychain::keychain_delete,
+      session_store::session_store_get,
+      session_store::session_store_set,
+      session_store::session_store_delete,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

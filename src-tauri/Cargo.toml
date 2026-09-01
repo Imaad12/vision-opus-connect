@@ -37,15 +37,12 @@ tauri-plugin-deep-link = "2"
 # first. Must stay the first .plugin() call in lib.rs (the crate's own
 # documented requirement).
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-# Windows Credential Manager / macOS Keychain / Linux Secret Service --
-# see src/keychain.rs. Selected per-target below so each platform only
-# links the backend it actually uses.
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", default-features = false, features = ["windows-native"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", default-features = false, features = ["apple-native"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+# Desktop session storage is a plain JSON file under the OS per-app data
+# directory (see src/session_store.rs) -- no extra dependency needed
+# beyond serde_json (already required above) and Tauri's own path
+# resolver. Previously backed by the `keyring` crate (Windows Credential
+# Manager / macOS Keychain / Linux Secret Service); removed because an
+# unsigned/ad-hoc-signed build's macOS Keychain authorization prompt
+# reappeared on every single rebuild (see session_store.rs's module docs
+# for why), with no code-level fix short of a stable code-signing
+# identity, which isn't available in this build pipeline yet.

@@ -154,9 +154,28 @@ var on Render (already a comma-separated list, see
 final desktop distribution shape is decided. Tauri's origin is
 `tauri://localhost` (macOS/Linux) / `http://tauri.localhost` (Windows).
 
-## 8. Desktop storage — hardened to the OS credential store
+## 8. Desktop storage — hardened to the OS credential store (superseded, see below)
 
-**Status: implemented, not just recommended.** The original scaffold used
+> **Superseded.** The OS-keychain approach this section describes was
+> replaced: on an unsigned/ad-hoc-signed build, macOS ties a Keychain
+> item's "always allow" grant to the requesting app's code-signing
+> identity, and an ad-hoc signature's identity changes with every
+> rebuild — so the OS authorization prompt reappeared on every single
+> new build, with no code-level fix short of a stable code-signing
+> certificate (a one-time manual macOS-side setup step, not yet done).
+> `src-tauri/src/keychain.rs` was replaced by
+> `src-tauri/src/session_store.rs` — the same three-command shape
+> (`session_store_get`/`_set`/`_delete`), now backed by a plain JSON
+> file under the OS per-app data directory instead of `keyring`/OS
+> Keychain. This is the same protection level the web build's
+> `localStorage` already has (OS-user-level file permissions), just
+> without the OS-managed encryption-at-rest and access prompt a real
+> keychain additionally provides. `src/lib/tauri-storage.ts`'s export
+> is now `tauriDesktopStorage`. The rest of this section is kept as a
+> historical record of why OS-keychain storage was chosen originally;
+> it no longer describes the current implementation.
+
+**Status: implemented, not just recommended (historical).** The original scaffold used
 `@tauri-apps/plugin-store` (a JSON file under the OS per-app data
 directory) as a deliberately named first step, with real OS-keychain
 protection explicitly called out as the follow-up rather than guessed at.
