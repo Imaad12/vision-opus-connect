@@ -11,9 +11,10 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.enums import DocumentSourceType, ExtractionStatus, ImportReviewStatus, ClientAwardEvidenceMatchStatus
-from app.models import ImportedDocument
+from app.models import ImportBatch, ImportedDocument
 from app.services.import_service import (
     compute_file_hash,
+    create_import_batch,
     ingest_client_award_evidence_batch,
     ingest_quotation_batch,
     list_imported_documents,
@@ -194,3 +195,71 @@ def test_source_files_remain_byte_identical_after_batch_ingestion(db_session: Se
 
     assert path.read_bytes() == original_bytes
     assert compute_file_hash(path) == original_hash
+
+
+# --- Durable ImportBatch tracking (scale groundwork) ----------------------------
+
+
+def test_ingesting_with_a_batch_tags_every_newly_staged_document(db_session: Session, tmp_path: Path) -> None:
+    batch = create_import_batch(db_session, label="2018 archive box 3")
+    paths = [_write_quotation(tmp_path, f"q_{i}.txt", reference=f"Q-B-{i}") for i in range(5)]
+
+    ingest_quotation_batch(db_session, paths, batch=batch)
+
+    documents = list_imported_documents(db_session)
+    assert len(documents) == 5
+    assert all(d.batch_id == batch.id for d in documents)
+
+
+def test_ingesting_without_a_batch_leaves_batch_id_null(db_session: Session, tmp_path: Path) -> None:
+    path = _write_quotation(tmp_path, "q.txt", reference="Q-NOBATCH")
+
+    ingest_quotation_batch(db_session, [path])
+
+    documents = list_imported_documents(db_session)
+    assert documents[0].batch_id is None
+
+
+def test_batch_records_its_own_outcome_counts(db_session: Session, tmp_path: Path) -> None:
+    batch = create_import_batch(db_session)
+    good = [_write_quotation(tmp_path, f"q_{i}.txt", reference=f"Q-C-{i}") for i in range(3)]
+    missing = tmp_path / "does_not_exist.txt"
+
+    ingest_quotation_batch(db_session, [*good, missing], batch=batch)
+
+    # Re-run with an added duplicate of one already-staged file plus a new one.
+    more = [good[0], _write_quotation(tmp_path, "q_new.txt", reference="Q-C-NEW")]
+    ingest_quotation_batch(db_session, more, batch=batch)
+
+    db_session.refresh(batch)
+    assert batch.staged_count == 1  # only q_new.txt, the second call's own new file
+    assert batch.skipped_duplicate_count == 1  # good[0], already terminally processed
+    assert batch.failed_count == 0  # the missing file was only in the first call
+    assert batch.completed_at is not None
+
+
+def test_resuming_a_document_never_reassigns_its_original_batch(db_session: Session, tmp_path: Path) -> None:
+    """A document staged under batch A, then swept up again by a later
+    batch B's re-run (e.g. the same growing file list passed to both),
+    must keep pointing at batch A -- re-running ingestion must never
+    silently move a document's batch attribution."""
+    batch_a = create_import_batch(db_session, label="A")
+    path = _write_quotation(tmp_path, "q.txt", reference="Q-STAY")
+    ingest_quotation_batch(db_session, [path], batch=batch_a)
+
+    batch_b = create_import_batch(db_session, label="B")
+    ingest_quotation_batch(db_session, [path], batch=batch_b)
+
+    documents = list_imported_documents(db_session)
+    assert len(documents) == 1
+    assert documents[0].batch_id == batch_a.id
+
+
+def test_create_import_batch_defaults_counts_to_zero_and_is_not_yet_completed(db_session: Session) -> None:
+    batch = create_import_batch(db_session)
+    assert batch.staged_count == 0
+    assert batch.resumed_count == 0
+    assert batch.skipped_duplicate_count == 0
+    assert batch.failed_count == 0
+    assert batch.completed_at is None
+    assert isinstance(batch, ImportBatch)

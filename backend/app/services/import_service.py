@@ -57,6 +57,7 @@ from app.models import (
     BOQLineItem,
     Company,
     ImportAuditLogEntry,
+    ImportBatch,
     ImportedBoqLineCandidate,
     ImportedDocument,
     ImportedDocumentSegment,
@@ -1601,7 +1602,23 @@ class BatchIngestionSummary:
         return sum(1 for o in self.outcomes if o.action == "failed")
 
 
-def _ingest_batch(session: Session, paths: Iterable[Path | str], *, stage_fn, run_fn) -> BatchIngestionSummary:
+def create_import_batch(session: Session, *, label: str | None = None) -> ImportBatch:
+    """Starts a new, durable `ImportBatch` row -- pass its result to
+    `ingest_quotation_batch`/`ingest_client_award_evidence_batch` so the
+    files ingested under it stay queryable afterward (see `ImportBatch`'s
+    own docstring for why this exists). Calling this is entirely
+    optional: every existing caller that ingests without a batch keeps
+    working exactly as before, with `ImportedDocument.batch_id = NULL`.
+    """
+    batch = ImportBatch(label=label)
+    session.add(batch)
+    session.flush()
+    return batch
+
+
+def _ingest_batch(
+    session: Session, paths: Iterable[Path | str], *, stage_fn, run_fn, batch: ImportBatch | None = None
+) -> BatchIngestionSummary:
     outcomes: list[FileIngestionOutcome] = []
     for raw_path in paths:
         path = Path(raw_path)
@@ -1626,25 +1643,49 @@ def _ingest_batch(session: Session, paths: Iterable[Path | str], *, stage_fn, ru
                 continue
 
             document = stage_fn(session, path)
+            # Only a genuinely new document is tagged -- a resumed one
+            # keeps whichever batch (if any) first staged it, since
+            # re-running a batch must never silently reassign a document
+            # to a *different* batch id.
+            if batch is not None:
+                document.batch_id = batch.id
+                session.flush()
             outcomes.append(FileIngestionOutcome(path=path, action="staged", document_id=document.id))
         except Exception as exc:  # noqa: BLE001 - one bad file must never abort a historical batch
             logger.exception("Batch ingestion failed for %s", path)
             outcomes.append(FileIngestionOutcome(path=path, action="failed", document_id=None, error=str(exc)))
 
-    return BatchIngestionSummary(outcomes=outcomes)
+    summary = BatchIngestionSummary(outcomes=outcomes)
+    if batch is not None:
+        batch.staged_count = summary.staged_count
+        batch.resumed_count = summary.resumed_count
+        batch.skipped_duplicate_count = summary.skipped_duplicate_count
+        batch.failed_count = summary.failed_count
+        batch.completed_at = datetime.now(UTC)
+        session.flush()
+    return summary
 
 
-def ingest_quotation_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
+def ingest_quotation_batch(
+    session: Session, paths: Iterable[Path | str], *, batch: ImportBatch | None = None
+) -> BatchIngestionSummary:
     """Stage/resume every quotation file in `paths`, in order, committing
     nothing beyond what `stage_document`/`run_extraction` already persist
     per file. Safe to call repeatedly over the same (or a growing) file
     list — see module-level docstring on why that alone is the resume
     mechanism. Human review/confirmation is unaffected: this only reaches
-    up to extraction, never confirms anything."""
-    return _ingest_batch(session, paths, stage_fn=stage_document, run_fn=run_extraction)
+    up to extraction, never confirms anything.
+
+    `batch`, if given (see `create_import_batch`), tags every newly
+    staged document with it and records this call's outcome counts on
+    the batch row -- purely additive bookkeeping, no change to the
+    staging/extraction logic itself."""
+    return _ingest_batch(session, paths, stage_fn=stage_document, run_fn=run_extraction, batch=batch)
 
 
-def ingest_client_award_evidence_batch(session: Session, paths: Iterable[Path | str]) -> BatchIngestionSummary:
+def ingest_client_award_evidence_batch(
+    session: Session, paths: Iterable[Path | str], *, batch: ImportBatch | None = None
+) -> BatchIngestionSummary:
     """PO-side equivalent of `ingest_quotation_batch`. Matching against
     existing quotations happens per file exactly as it already does via
     `run_po_extraction` (immediate exact-match check); a PO staged before
@@ -1652,7 +1693,9 @@ def ingest_client_award_evidence_batch(session: Session, paths: Iterable[Path | 
     `client_award_evidence_service.reconcile_unmatched_client_award_evidence` is
     triggered by that quotation's own later import — unchanged from the
     prior round, not re-implemented here."""
-    return _ingest_batch(session, paths, stage_fn=stage_client_award_evidence_document, run_fn=run_po_extraction)
+    return _ingest_batch(
+        session, paths, stage_fn=stage_client_award_evidence_document, run_fn=run_po_extraction, batch=batch
+    )
 
 
 __all__ = [
@@ -1680,6 +1723,7 @@ __all__ = [
     "reject_import",
     "FileIngestionOutcome",
     "BatchIngestionSummary",
+    "create_import_batch",
     "ingest_quotation_batch",
     "ingest_client_award_evidence_batch",
 ]

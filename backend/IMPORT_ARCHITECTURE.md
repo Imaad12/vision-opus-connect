@@ -1549,3 +1549,203 @@ the value's page, not merely the absence of a competing value) would
 justify revisiting this, and no such signal has been identified. Until
 then, `VN/QU/318/18`-shaped cases are accepted as human-review workload,
 per §23.6's original framing, not treated as a defect to keep chasing.
+
+## 25. Scale-to-10,000s assessment and groundwork (H1/H2)
+
+A new ticket asked for this pipeline to scale to 10,000s of historical
+documents, with an explicit instruction to audit what exists before
+writing any code, never rebuild the working extraction/OCR pipeline, and
+implement only what's genuinely missing. This section is that audit,
+plus the narrow, additive groundwork actually implemented as a result —
+not a rewrite, and not a start on object storage or a background worker
+(§25.3 explains why those are named but deliberately not attempted here).
+
+### 25.1 What already exists, works, and is real-archive-validated
+
+Everything in §1-24 above: format-specific importers, deterministic
+label-based extraction, offline Tesseract OCR with DPI auto-tuning,
+sequential quotation-boundary segmentation, SHA-256 exact-duplicate
+detection, the RAW -> CANDIDATE -> REVIEW -> CONFIRMED pipeline (never
+bypassed -- `confirm_import`/`reject_import` are still the only
+functions that ever write a `Quotation`/`BOQ`/`Client`/`Project` row),
+categorical (never fabricated-percentage) confidence, the
+identity-corroboration safety gate (proven, by a real reverted
+experiment in §24, to be load-bearing and not safely relaxable on the
+evidence available), full extraction/edit provenance via
+`ImportAuditLogEntry` plus per-field `raw_values`/`field_confidence`,
+resumable hash-based batch ingestion (`ingest_quotation_batch`/
+`ingest_client_award_evidence_batch`, §22), a review-triage split
+(`review_service.py`), and read-only historical analytics over
+*confirmed* data only (`analytics_service.py`, `ANALYTICS_ARCHITECTURE.md`).
+This is not lightly tested: §16-24 document repeated real-archive runs
+(4 real archives, 60+ real pages by §23) with honestly reported
+successes *and* failures, including one deliberately reverted
+safety-relaxation experiment (§24). None of this needed to change, and
+none of it did.
+
+### 25.2 What is genuinely missing for the new goal, and why it matters
+
+Confirmed directly against the code, not assumed:
+
+- **No HTTP API surface at all.** Searching `app/api/routers/` finds no
+  import/document/OCR/batch/review/analytics route anywhere -- every
+  function in `import_service.py`/`review_service.py`/
+  `analytics_service.py` is reachable only from the PySide6 desktop UI
+  (`app/ui/imports/`), which talks to a database on the same machine.
+  The rest of this backend is explicitly being migrated to serve the
+  hosted web VINCO frontend (`API_ARCHITECTURE.md`) -- this pipeline
+  is the one major piece of business functionality with no path to that
+  frontend at all. This is the single largest real gap for the new
+  goal, since "review 10,000s of documents" as described in the ticket
+  (a shared team workflow, an import dashboard, a review queue) implies
+  multi-user, remote access -- not one person's desktop app.
+- **No durable batch record.** Before this round, `ingest_quotation_batch`
+  returned an in-memory `BatchIngestionSummary` the caller had to hold
+  onto -- nothing about a batch run was ever persisted. A large
+  historical run (hours or days of wall-clock OCR time, per §18.5's own
+  throughput table) had no way to be inspected, filtered, or reported on
+  after the call that started it returned. **Addressed this round** --
+  see §25.4.
+- **No object storage.** `ImportedDocument.original_path` is a bare
+  filesystem path string, and the model's own docstring is explicit that
+  the original file is never moved, copied, or uploaded anywhere -- by
+  design, for a single-desktop-user workflow. At hosted, multi-user
+  scale, "a path on someone's laptop" is not a resolvable reference for
+  a document a different reviewer opens from the web app days later. A
+  real fix needs an actual Supabase Storage bucket (private, signed
+  URLs, mirroring this backend's existing RLS-respecting patterns) --
+  **not attempted this round**, since it requires an infrastructure
+  decision (bucket provisioning, credentials, an upload path for
+  10,000s of files) this sandbox cannot make or verify end-to-end, and
+  it is not on the critical path for the ticket's own next step (a
+  100-500-document controlled pilot, §25.5).
+- **No background worker / job queue.** `_ingest_batch` still runs
+  synchronously in a plain Python loop inside whatever process calls it
+  -- correct and safe at Phase 4's original "a handful of documents"
+  scale (§16), and still functionally correct at any scale (nothing
+  about it is unbounded per-call or memory-heavy), but a caller
+  triggering it over HTTP for a truly large batch would block that
+  request for however long §18.5's throughput table says the whole
+  batch takes. **Not attempted this round** -- deliberately, per the
+  ticket's own Phase ordering (a pilot must run and be evaluated before
+  committing to a specific worker architecture; building one now would
+  be guessing at requirements a real pilot run should inform) and
+  because the ticket's own "smallest compatible" instruction argues for
+  building it once the API surface that would trigger it exists, not
+  before.
+- **No formal three-state customer-match classification.** H7 asks for
+  MATCHED / POSSIBLE MATCH / NEW. The PO-matching side already has
+  exactly this shape (`ClientAwardEvidenceMatchStatus.MATCHED` /
+  `AMBIGUOUS` / `UNMATCHED`, exact-reference-only, never fuzzy -- see
+  `PO_ARCHITECTURE.md`), but `import_matching.py`'s customer/project
+  matching (`suggest_client_matches`/`suggest_project_matches`) only
+  returns an advisory candidate list for the reviewer to pick from or
+  ignore -- never classified into named states, and never anything that
+  could auto-merge (a real, if less formally labeled, safety property).
+  Not addressed this round: extending it correctly (VAT number/phone/
+  email equality, still never fuzzy, per this codebase's consistent
+  position across §10.2 and §24) is a genuine, scoped follow-up, but
+  lower priority than making the pipeline reachable and reportable at
+  all (§25.2's first two points), and is extraction-adjacent work this
+  ticket's own instruction says to treat cautiously.
+
+### 25.3 The evidence that most changes the picture: extraction quality, not architecture, is today's real ceiling
+
+§21.4 (this document's own most recent quality finding, before this
+round) already answered "is quotation ingestion practically usable at
+scale" honestly: **not yet, for a majority of real documents** -- 11 of
+15 segments in that run were `BLOCKED`, each for a specific, named,
+mostly-not-narrowly-fixable reason (cross-document splices, illegible
+scans, the leading-OCR-noise-before-label limitation). §23's later,
+larger 4-archive/36-segment run found the same shape: 25 of 36 still
+`BLOCKED` after further fixes, and §23.3 confirms the *dominant* cause
+is not a bug at all but a deliberately conservative safety gate. This
+matters directly for how "scale" should be pursued: building a bigger
+pipe (object storage, a worker queue, a full API) before this ceiling is
+either raised or explicitly accepted as the steady-state review cost
+would optimize for "documents pushed through OCR," which Part H15
+explicitly warns against -- the goal is "trustworthy historical ERP
+records produced." The ticket's own Phase 6 (a 100-500-document
+controlled pilot before any further scaling) is the right next step
+precisely because it is the fastest way to learn, on live business
+documents, whether this archive-specific quality picture generalizes --
+and no amount of infrastructure work this round could substitute for
+that pilot's result.
+
+### 25.4 What was actually implemented this round, and why it's safe
+
+Two additive pieces, both reviewed against every constraint above (no
+OCR/extraction code touched, no new migration on top of existing
+migration history beyond one small additive table+column, nothing that
+changes RAW -> CANDIDATE -> REVIEW -> CONFIRMED):
+
+- **`ImportBatch`** (new table, migration `0316ad9e1d33`) + an optional
+  `batch` argument threaded through `ingest_quotation_batch`/
+  `ingest_client_award_evidence_batch`/`create_import_batch`
+  (`import_service.py`). Every existing caller is unaffected -- omitting
+  `batch` behaves exactly as before, `ImportedDocument.batch_id` stays
+  `NULL`. When a batch is passed, newly staged documents are tagged with
+  it and the batch's own outcome counts (staged/resumed/skipped-
+  duplicate/failed -- read directly off the existing, unmodified
+  `BatchIngestionSummary`) are persisted once the call completes. A
+  document resumed by a *later* batch call keeps its original batch id
+  (tested directly -- `test_resuming_a_document_never_reassigns_its_
+  original_batch`) rather than being silently reassigned. This is what
+  H3's "batch IDs" and H12's "filter by batch" need underneath them, and
+  it is durable in a way an in-memory `BatchIngestionSummary` never was
+  -- a very large run interrupted partway through now has a real row to
+  query, not just whatever the caller happened to still be holding.
+- **`app/services/import_dashboard_service.py`** (new module):
+  `compute_import_dashboard_summary(session, batch_id=None)` -- six
+  plain `COUNT` queries (never `len(session.query(...).all())`, which
+  would not survive to 10,000s of rows) partitioning `ImportedDocument`
+  by the existing `ExtractionStatus`/`ImportReviewStatus` enums into
+  exactly H12's requested buckets (Total/Processing/Needs review/Failed,
+  plus Confirmed/Rejected split out and a PO-vs-quotation count),
+  optionally scoped to one batch, with `duplicates` read from that
+  batch's own `skipped_duplicate_count` (the only place that number is
+  ever recorded, since a duplicate file never gets its own
+  `ImportedDocument` row at all). Deliberately does **not** report
+  Customers/Contacts/Leads/Invoices candidate counts the ticket's
+  dashboard mockup lists -- this pipeline does not extract those
+  entities today (see §25.2), and reporting a fabricated zero or omitted
+  category for something never built would misrepresent what the system
+  actually does.
+
+Both are covered by new, passing tests (`test_batch_ingestion.py`'s new
+cases, `test_import_dashboard_service.py`) -- 12 new tests, full suite
+830 passed / 7 skipped (the pre-existing real-Postgres-only skips,
+unrelated). No existing test changed. The migration round-trips cleanly
+against fresh SQLite (upgrade -> downgrade -> upgrade verified).
+
+### 25.5 What this enables next, and what still needs a human decision
+
+This round makes a batch's outcome durable and queryable, and gives any
+future caller (a script, a notebook, or a future API route) one function
+to call for dashboard-shaped numbers -- but it does not, by itself, make
+the pipeline reachable from the web app; nothing changed in `app/api/`.
+The recommended next sequence, matching the ticket's own Phase ordering:
+
+1. **A thin `app/api/routers/imports.py`** exposing exactly this existing
+   service layer over HTTP (mirroring every other router in this repo --
+   translate request -> call the existing service function -> serialize
+   the response, no new business logic) -- this alone would let Phase 6's
+   100-500-document controlled pilot be run and monitored from the web
+   app instead of requiring desktop access, without touching a single
+   line of extraction/OCR code.
+2. **Run that pilot** (Phase 6, explicitly not "ingest all 10,000s") and
+   measure, on real current-business documents (not only the historical
+   archives already tested), whether §25.3's quality ceiling holds,
+   improves, or needs to be accepted as the steady-state review cost.
+3. **Only then** decide on object storage (needs real bucket/credential
+   provisioning this sandbox cannot do) and a background worker (needs a
+   deployment-specific choice -- a task queue, a scheduled job, or
+   something simpler -- that should be sized to what the pilot actually
+   shows, not guessed at now).
+
+None of steps 1-3 were started this round beyond the durable-batch/
+dashboard groundwork in §25.4, on the judgment that guessing at an API
+shape or a storage/worker architecture ahead of a real pilot's findings
+would risk exactly the "uncontrolled OCR rewrite" the ticket explicitly
+warned against -- and that a small, safe, fully-tested piece of real
+groundwork is worth more than a larger, unvalidated one.

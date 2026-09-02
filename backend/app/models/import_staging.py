@@ -51,6 +51,57 @@ if TYPE_CHECKING:
     from app.models.vendor import Vendor
 
 
+class ImportBatch(Base, TimestampMixin):
+    """One `ingest_quotation_batch`/`ingest_client_award_evidence_batch`
+    call, made durable and queryable (see IMPORT_ARCHITECTURE.md's
+    scale-groundwork section) -- previously that function's own
+    `BatchIngestionSummary` return value was the *only* record of what
+    happened, discarded the moment the caller finished with it. A large
+    historical-ingestion run (H1's 10,000s-of-documents goal) needs to be
+    inspectable well after the call that started it returns, and the
+    import dashboard needs a stable id to filter documents by.
+
+    Deliberately minimal: this table stores exactly what
+    `BatchIngestionSummary` already computed in memory (staged/resumed/
+    skipped-duplicate/failed counts) plus an optional human label -- no
+    new business concept, no new safety rule, and no change whatsoever to
+    `_ingest_batch`'s existing per-file resumability/dedup logic, which
+    remains the sole source of truth for those counts. A document not
+    explicitly ingested through a batch call (e.g. a single ad-hoc import
+    from the desktop UI) simply has `batch_id = NULL` -- entirely
+    unaffected, exactly as before this model existed.
+
+    `skipped_duplicate_count` is the only place "how many files in this
+    run were exact-hash duplicates of an already-staged document" is ever
+    recorded — a duplicate never gets its own `ImportedDocument` row (see
+    `_ingest_batch`), so this count cannot be reconstructed later from
+    `ImportedDocument` state alone.
+    """
+
+    __tablename__ = "import_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Optional human-facing name ("2018 archive box 3") -- purely
+    #: descriptive, never parsed or matched against anything.
+    label: Mapped[str | None] = mapped_column(String(255))
+    staged_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    resumed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_duplicate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Set once `_ingest_batch` returns for this batch -- `None` means the
+    #: batch was created but the ingestion call that should populate it
+    #: never completed (e.g. the process was killed mid-run). A future
+    #: caller resuming a large run can detect this and safely re-run
+    #: ingestion for the same batch: `_ingest_batch`'s per-file
+    #: resumability means re-running is always safe regardless.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    documents: Mapped[list["ImportedDocument"]] = relationship("ImportedDocument", back_populates="batch")
+
+    def __repr__(self) -> str:
+        return f"ImportBatch(id={self.id!r}, label={self.label!r})"
+
+
 class ImportedDocument(Base, TimestampMixin):
     """A source file the user imported, and everything known about it so
     far. Never modifies, moves, or copies the original file — `original_path`
@@ -60,6 +111,9 @@ class ImportedDocument(Base, TimestampMixin):
     __tablename__ = "imported_documents"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    #: NULL for a document staged outside a batch call (e.g. the desktop
+    #: UI's single-file "Import Documents" action) -- see `ImportBatch`.
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("import_batches.id"))
 
     source_type: Mapped[DocumentSourceType] = mapped_column(
         SAEnum(DocumentSourceType, native_enum=False),
@@ -180,6 +234,7 @@ class ImportedDocument(Base, TimestampMixin):
     resulting_client_award_evidence: Mapped["ClientAwardEvidence | None"] = relationship(
         "ClientAwardEvidence", foreign_keys=[resulting_client_award_evidence_id]
     )
+    batch: Mapped["ImportBatch | None"] = relationship("ImportBatch", back_populates="documents")
 
     def __repr__(self) -> str:
         return (

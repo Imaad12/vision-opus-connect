@@ -15,6 +15,7 @@ from app.models.document import GoogleDriveDocument
 from app.models.employee import Employee, PayrollRecord
 from app.models.import_staging import (
     ImportAuditLogEntry,
+    ImportBatch,
     ImportedBoqLineCandidate,
     ImportedDocument,
     ImportedDocumentSegment,
@@ -48,6 +49,7 @@ __all__ = [
     "PayrollRecord",
     "GoogleDriveDocument",
     "ImportAuditLogEntry",
+    "ImportBatch",
     "ImportedBoqLineCandidate",
     "ImportedDocument",
     "ImportedDocumentSegment",
