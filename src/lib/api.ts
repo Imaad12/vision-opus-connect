@@ -128,14 +128,25 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // 403). So on 401 the right move is always the same: drop the stale
 // session so the app's existing SIGNED_OUT handling (__root.tsx's
 // onAuthStateChange -> router.invalidate()) redirects through /auth,
-// where the desktop build re-authenticates automatically (see
-// tauri-dev-auth.ts) and the web build shows its normal sign-in screen --
-// instead of every page on a stale/expired session showing the same
-// opaque "Missing bearer token" error with no way out.
+// where the VINCO login screen (web and desktop alike, see
+// sign-in-card.tsx) shows instead of every page on a stale/expired
+// session showing the same opaque "Missing bearer token" error with no
+// way out.
+export const SESSION_EXPIRED_FLAG_KEY = "vinco.session-expired";
+
 let handlingUnauthorized = false;
 function handleUnauthorized(): void {
   if (handlingUnauthorized) return;
   handlingUnauthorized = true;
+  // Best-effort: sessionStorage can throw in a locked-down/private
+  // context -- never let that block actually signing the stale session
+  // out, just skip showing the specific "session expired" message on
+  // the next login screen.
+  try {
+    sessionStorage.setItem(SESSION_EXPIRED_FLAG_KEY, "1");
+  } catch {
+    // ignored, see above
+  }
   void supabase.auth.signOut().finally(() => {
     handlingUnauthorized = false;
   });

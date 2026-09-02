@@ -29,6 +29,25 @@ export const dict: Dict = {
   "auth.open_workspace": { en: "Open workspace", ar: "فتح النظام" },
   "auth.username": { en: "Username", ar: "اسم المستخدم" },
   "auth.password": { en: "Password", ar: "كلمة المرور" },
+  "auth.show_password": { en: "Show password", ar: "إظهار كلمة المرور" },
+  "auth.hide_password": { en: "Hide password", ar: "إخفاء كلمة المرور" },
+  "auth.error.empty": { en: "Enter your username and password.", ar: "أدخل اسم المستخدم وكلمة المرور." },
+  "auth.error.invalid_credentials": {
+    en: "Invalid username or password.",
+    ar: "اسم المستخدم أو كلمة المرور غير صحيحة.",
+  },
+  "auth.error.inactive": {
+    en: "This account is inactive. Contact your administrator.",
+    ar: "هذا الحساب غير مفعّل. تواصل مع مسؤول النظام.",
+  },
+  "auth.error.network": {
+    en: "Unable to connect. Check your internet connection and try again.",
+    ar: "تعذر الاتصال. تحقق من اتصالك بالإنترنت وحاول مرة أخرى.",
+  },
+  "auth.session_expired": {
+    en: "Your session expired. Please sign in again.",
+    ar: "انتهت صلاحية الجلسة. الرجاء تسجيل الدخول مرة أخرى.",
+  },
 
   "users.title": { en: "Users & Access", ar: "المستخدمون والصلاحيات" },
   "users.description": {
@@ -50,6 +69,10 @@ export const dict: Dict = {
   "users.activate": { en: "Activate", ar: "تفعيل" },
   "users.deactivate": { en: "Deactivate", ar: "إيقاف" },
   "users.reset_password": { en: "Reset Password", ar: "إعادة تعيين كلمة المرور" },
+  "users.confirm_deactivate": {
+    en: "Deactivate this account? They will be signed out immediately and unable to log in until reactivated.",
+    ar: "إيقاف هذا الحساب؟ سيتم تسجيل خروجه فوراً ولن يتمكن من الدخول حتى تتم إعادة تفعيله.",
+  },
 
   "nav.dashboard": { en: "Dashboard", ar: "لوحة المعلومات" },
   "nav.crm": { en: "CRM", ar: "علاقات العملاء" },

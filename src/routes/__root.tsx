@@ -144,14 +144,6 @@ function RootComponent() {
     return () => sub.subscription.unsubscribe();
   }, [router, queryClient]);
 
-  // Google OAuth (and its vinco://auth-callback deep-link listener,
-  // previously registered here via initTauriDeepLinkAuth) is parked for
-  // the desktop MVP -- see DESKTOP_AUTH_MVP.md and src/lib/tauri-auth.ts's
-  // module doc. Desktop instead auto-signs-in via
-  // src/lib/tauri-dev-auth.ts, triggered from the sign-in route itself
-  // (src/components/sign-in-card.tsx), not from here. Re-add a call to
-  // initTauriDeepLinkAuth() here when Google OAuth is reintroduced.
-
   return (
     <QueryClientProvider client={queryClient}>
       <I18nProvider>

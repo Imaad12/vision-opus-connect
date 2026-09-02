@@ -7,6 +7,25 @@ and audit logs.
 
 ## For VINCO users
 
+### Install VINCO
+
+**Windows:** download `VINCO Setup.exe` from the latest
+[GitHub Release](../../releases) (or copy it from a USB drive) and run
+it — no other software or setup required. **Mac:** download `VINCO.dmg`
+the same way, open it, and drag VINCO into Applications. Both installers
+are standalone: nothing else needs to be installed, and no repository
+checkout, dev tools, or internet access to this repository is needed to
+run VINCO once it's installed. If macOS shows an "unidentified
+developer" warning (installer isn't code-signed yet — see
+`DESKTOP_ARCHITECTURE.md`), right-click the app → Open once to bypass it.
+
+**Updating:** when a new version is released, download the newest
+installer the same way and run it again — it installs over the previous
+version. There's no separate uninstall step and no in-app auto-updater;
+just install the new one and open VINCO like normal.
+
+### Sign in
+
 Open VINCO (desktop app or the web address your administrator gave you)
 and sign in with the username and password your administrator created
 for you:
@@ -82,15 +101,14 @@ One repository, two deployment targets, one source tree:
   underneath (see "Native login" below), but nothing Supabase-specific is
   ever shown to them.
 - **Desktop**: the same frontend source, built as a Tauri shell → the
-  same production FastAPI backend → the same Supabase Postgres. Auth is
-  **currently still** automatic sign-in as a dedicated internal Supabase
-  account (no browser, no OAuth) — see `DESKTOP_AUTH_MVP.md`. Migrating
-  desktop to the same native VINCO login the web build now uses is a
-  deliberate later step (not done automatically alongside adding native
-  login), once that path is proven — see `DESKTOP_AUTH_MVP.md`'s
-  migration note. Session storage is a local JSON file
+  same production FastAPI backend → the same Supabase Postgres. Shows the
+  exact same VINCO username/password login screen as web — no
+  `isTauri()` branching in `sign-in-card.tsx`, no OAuth, no browser
+  handoff, no callback URL. Session storage is a local JSON file
   (`src-tauri/src/session_store.rs`), not the OS keychain — see that
-  file's module doc for why.
+  file's module doc for why. (`DESKTOP_AUTH_MVP.md` documents the earlier
+  MVP state, where desktop auto-signed-in as one shared internal account;
+  that has been fully replaced, not merely superseded in docs.)
 - Both targets talk to the **same backend** and go through the **same**
   Supabase JWT verification and RBAC checks (`backend/app/api/deps.py`).
   Neither client has any special access the other doesn't.
@@ -119,10 +137,12 @@ user is allowed to do) permissions, not new ones.
 VINCO's four role labels (Employee/Admin/Super User/Super Admin) map onto
 Supabase's existing role set — Employee→`employee`, Admin→
 `general_manager`, Super Admin→`super_admin`, all already-existing roles.
-Super User needs one **optional, one-time, manual** SQL step
-(`backend/scripts/native_auth_rbac.sql`, run once in the Supabase SQL
-Editor) to become a real, independently-enforced role; until that's run,
-assigning "Super User" fails with a clear error explaining exactly that.
+Super User is added by the normal Supabase migration system, like every
+other schema change — `supabase/migrations/20260902000000_add_super_user_role.sql`
+and `..._20260902000001_grant_super_user_permissions.sql`, applied via
+`supabase db push` — not a bespoke manual script. Until those two
+migrations have been pushed to the project, assigning "Super User" fails
+with a clear error explaining exactly that.
 
 ## Repository layout
 
@@ -179,10 +199,10 @@ bun run tauri:build         # release .app/.dmg/.exe (needs a Rust toolchain)
 ```
 
 `bun run build:desktop` (called by `tauri:build`) runs
-`scripts/check-desktop-env.mjs` first, which additionally requires
-`VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` (the dedicated
-internal Supabase account desktop auto-login uses — see
-`DESKTOP_AUTH_MVP.md`).
+`scripts/check-desktop-env.mjs` first, which requires the same
+`VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` the web build
+needs — nothing desktop-specific, since desktop shows the same native
+login screen as web.
 
 ### Rust (`src-tauri/`)
 
@@ -236,7 +256,7 @@ python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.
 |---|---|---|
 | `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` | frontend (web + desktop) | Same Supabase project both build targets use |
 | `VITE_API_URL` | frontend (web + desktop) | The FastAPI backend's base URL. Web: set in Cloudflare Pages dashboard. Desktop: baked in at `tauri:build` time from `.env`. Never silently defaults to `localhost` in a real production build (see `scripts/check-web-env.mjs`) |
-| `VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` | desktop only | The dedicated internal Supabase account desktop auto-login signs in as |
+| `VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` | desktop only, optional | Only used by `src/lib/tauri-dev-auth.ts`, a retired manual dev utility never called by any live UI — not required by `check-desktop-env.mjs` or any build |
 | `VISION_DATABASE_URL` | backend | Unset = local SQLite. Set = PostgreSQL (Render secret in production) |
 | `VISION_SUPABASE_URL` / `VISION_SUPABASE_ANON_KEY` | backend | Verifies JWTs and checks permissions against this Supabase project |
 | `VISION_SUPABASE_SERVICE_ROLE_KEY` | backend | Only used by the native user-management routes (`/users/*`) to create/edit Supabase Auth identities. A real secret — never commit a value, never expose to the frontend |
@@ -255,8 +275,17 @@ gitignored; `.env.example` documents the shape only.
   (`bun run build`). Project config lives entirely in the Cloudflare
   dashboard, not in this repo.
 - **Desktop**: built via `bun run tauri:build` (locally or in
-  `.github/workflows/desktop-build.yml`'s CI matrix), producing unsigned
-  `.dmg`/`.exe` installer artifacts — not auto-published anywhere.
+  `.github/workflows/desktop-build.yml`'s CI matrix on every push to
+  `main`), producing unsigned `.dmg`/`.exe` installer artifacts. Pushing
+  a version tag (`git tag v1.2.0 && git push origin v1.2.0`) additionally
+  triggers `.github/workflows/release.yml`, which builds all three
+  platform targets and attaches them to a new GitHub Release named
+  `VINCO v1.2.0`, renamed to the plain filenames ("VINCO Setup.exe",
+  "VINCO (Apple Silicon).dmg", "VINCO (Intel).dmg") the root README's
+  install instructions point employees at. This repo's Linux-only
+  sandbox cannot itself produce or sign a real Windows `.exe`/macOS
+  `.dmg` — both workflows' actual Windows/macOS output must be verified
+  by watching them run on GitHub Actions, not assumed from a local build.
 
 ## History note
 

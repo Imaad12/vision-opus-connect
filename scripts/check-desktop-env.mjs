@@ -14,16 +14,20 @@ import { loadEnv } from "vite";
 
 import { checkSupabaseKey } from "./supabase-env-checks.mjs";
 
-const REQUIRED = [
-  "VITE_SUPABASE_URL",
-  "VITE_SUPABASE_PUBLISHABLE_KEY",
-  // Desktop MVP auto-login (see DESKTOP_AUTH_MVP.md): with no login
-  // screen, a build missing these can never reach the dashboard at all --
-  // failing the build now is strictly better than shipping a .dmg that
-  // launches straight into an unrecoverable "sign-in failed" loop.
-  "VITE_DESKTOP_DEV_EMAIL",
-  "VITE_DESKTOP_DEV_PASSWORD",
-];
+// VITE_API_URL deliberately not required here (unlike check-web-env.mjs):
+// api.ts's own localhost fallback is fine for a desktop dev build, and a
+// real desktop release build's value is a deployment concern, checked
+// manually rather than blocking every local `tauri:dev` run.
+const REQUIRED = ["VITE_SUPABASE_URL", "VITE_SUPABASE_PUBLISHABLE_KEY"];
+
+// VITE_DESKTOP_DEV_EMAIL / VITE_DESKTOP_DEV_PASSWORD (src/lib/
+// tauri-dev-auth.ts) are NOT required: desktop now uses the same native
+// VINCO username/password login form as web (src/components/
+// sign-in-card.tsx) by default -- nothing in the UI calls the old
+// auto-login path anymore, on any build, so a production desktop build
+// no longer needs these at all. They remain optional/unused inputs for
+// anyone still invoking signInDesktopDevAccount() by hand as a dev
+// utility.
 
 const mode = process.env["NODE_ENV"] === "development" ? "development" : "production";
 const env = { ...loadEnv(mode, process.cwd(), ""), ...process.env };
@@ -35,19 +39,12 @@ if (missing.length > 0) {
     `\n[check-desktop-env] Missing required env var(s): ${missing.join(", ")}\n\n` +
       "The desktop build bakes these into the app bundle at build time via\n" +
       "Vite's import.meta.env.\n\n" +
-      "If VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY are missing:\n" +
-      "the build still succeeds and produces a working-looking .app/.dmg,\n" +
+      "The build still succeeds and produces a working-looking .app/.dmg,\n" +
       "but the app crashes immediately on launch -- TanStack's root error\n" +
       'boundary shows "This page didn\'t load" -- because the Supabase\n' +
       "client throws the first time it's touched.\n\n" +
-      "If VITE_DESKTOP_DEV_EMAIL / VITE_DESKTOP_DEV_PASSWORD are missing:\n" +
-      "the desktop MVP has no login screen to fall back to (see\n" +
-      "DESKTOP_AUTH_MVP.md) -- the app would launch straight into a\n" +
-      '"sign-in failed" retry loop with no way to authenticate.\n\n' +
       "Fix: copy .env.example to .env in the project root and fill in\n" +
-      "real values (see DESKTOP_AUTH_MVP.md for how to create the\n" +
-      "desktop MVP's dedicated Supabase account), then re-run\n" +
-      "`bun run tauri:build`.\n",
+      "real values, then re-run `bun run tauri:build`.\n",
   );
   process.exit(1);
 }

@@ -44,15 +44,15 @@ env:
   # not a secret -- an API base URL isn't sensitive. Falls back to
   # localhost if unset, matching src/lib/api.ts's own default.
   VITE_API_URL: ${{ vars.VITE_API_URL || 'http://localhost:8000' }}
-  # Desktop MVP auto-login (see DESKTOP_AUTH_MVP.md) -- required by
-  # scripts/check-desktop-env.mjs, same as the Supabase vars above. Real
-  # secrets for the dedicated internal Supabase account, not placeholders:
-  # add VITE_DESKTOP_DEV_EMAIL / VITE_DESKTOP_DEV_PASSWORD under Settings
-  # -> Secrets and variables -> Actions once that account exists, or this
-  # job's frontend-checks/build-desktop steps will fail the same
-  # (deliberate) way a missing .env does locally.
-  VITE_DESKTOP_DEV_EMAIL: ${{ secrets.VITE_DESKTOP_DEV_EMAIL }}
-  VITE_DESKTOP_DEV_PASSWORD: ${{ secrets.VITE_DESKTOP_DEV_PASSWORD }}
+  # VITE_DESKTOP_DEV_EMAIL/PASSWORD deliberately NOT set here: desktop now
+  # shows the same native VINCO username/password login as web by
+  # default, and scripts/check-desktop-env.mjs no longer requires them
+  # (they only matter for src/lib/tauri-dev-auth.ts's manual dev-utility
+  # shortcut, not any build path). This previously-required-but-never-
+  # actually-configured secret pair was the exact reason the
+  # frontend-checks / build-desktop steps below had been failing on
+  # every run since desktop auto-login was first introduced -- removing
+  # the requirement (not adding the secret) is the real fix.
 
 jobs:
   # Cheap, fast checks that don't need a Rust toolchain -- run first so a

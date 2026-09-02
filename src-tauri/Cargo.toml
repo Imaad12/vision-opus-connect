@@ -23,20 +23,22 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
-# Google OAuth must run in the system browser, not this window's webview --
-# Google blocks sign-in from embedded/non-standard user agents (see
-# src/lib/tauri-auth.ts). tauri-plugin-opener launches the system browser;
-# tauri-plugin-deep-link registers the vinco:// scheme the OS hands back to
-# this app once Supabase completes the OAuth redirect.
+# tauri-plugin-opener is a small general-purpose "open this in the
+# system default app" utility, kept for any future need to open a link
+# or file externally. Desktop uses native VINCO username/password login
+# (see src/components/sign-in-card.tsx) -- no OAuth, no browser handoff,
+# no vinco:// callback URL, no PKCE, so the deep-link plugin that used to
+# exist solely to receive that callback has been removed entirely,
+# rather than left registered-but-unused: an OS-level URL-scheme
+# registration that runs on every launch is real production behavior,
+# not inert dead code, and this build has no feature left that needs it.
 tauri-plugin-opener = "2"
-tauri-plugin-deep-link = "2"
-# Windows/Linux only forward a second vinco:// launch to this plugin,
-# which (via the "deep-link" feature) re-emits it as the deep-link
-# plugin's normal event -- without it a second launch would just open an
-# unauthenticated second window instead of completing sign-in in the
-# first. Must stay the first .plugin() call in lib.rs (the crate's own
-# documented requirement).
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Prevents a second launch from opening a second window; must stay the
+# first .plugin() call in lib.rs (the crate's own documented
+# requirement). No "deep-link" feature: that feature only exists to
+# forward a second launch's URL to the deep-link plugin, which this app
+# no longer has.
+tauri-plugin-single-instance = { version = "2" }
 # Desktop session storage is a plain JSON file under the OS per-app data
 # directory (see src/session_store.rs) -- no extra dependency needed
 # beyond serde_json (already required above) and Tauri's own path

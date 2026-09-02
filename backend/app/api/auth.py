@@ -284,8 +284,9 @@ class SupabaseAdmin:
 
         Raises `SupabaseAdminError` (not silently succeeding) if `role`
         isn't a value the `app_role` Postgres enum actually has --
-        e.g. `super_user`, until the one-time migration SQL
-        (`scripts/native_auth_rbac.sql`) that adds it has been run.
+        e.g. `super_user`, until the Supabase migrations that add it
+        (`supabase/migrations/20260902000000_add_super_user_role.sql`
+        and the one immediately after it) have been applied.
         """
         delete_response = self._http_client.delete(
             f"{self._project_url}/rest/v1/user_roles",
@@ -307,7 +308,9 @@ class SupabaseAdmin:
             raise SupabaseAdminError(
                 f"Failed to assign role {role!r} to {user_id} -- if this is a role that "
                 "doesn't exist yet in the app_role Postgres enum (e.g. 'super_user'), the "
-                "one-time migration SQL must be run first. "
+                "supabase/migrations/20260902000000_add_super_user_role.sql and "
+                "20260902000001_grant_super_user_permissions.sql migrations must be applied "
+                "first (supabase db push). "
                 f"({insert_response.status_code} {insert_response.text})"
             )
 

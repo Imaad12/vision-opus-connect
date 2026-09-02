@@ -1,0 +1,136 @@
+name: VINCO release (GitHub Release artifacts)
+
+# Triggered by pushing a version tag (e.g. `v1.2.0`) -- builds the same
+# three installer targets as desktop-build.yml, renames each to the
+# plain employee-facing filename ("VINCO Setup.exe" / "VINCO.dmg") the
+# root README's install instructions point at, and attaches them to a
+# GitHub Release named "VINCO <tag>". Still unsigned (see
+# DESKTOP_ARCHITECTURE.md's "Signing" section) -- that's a real,
+# documented distribution limitation, not something this workflow can
+# fix without a purchased code-signing certificate.
+#
+# This workflow only builds and publishes; it does not run the frontend/
+# Rust check suites (desktop-build.yml already gates every push/PR to
+# main on those) -- a tag is expected to point at a commit that's
+# already green on main.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and (re)publish a release for"
+        required: true
+
+env:
+  VITE_SUPABASE_URL: "https://cvonhorkglqizsxdlulp.supabase.co"
+  VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+  VITE_API_URL: ${{ vars.VITE_API_URL || 'http://localhost:8000' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Windows x64"
+            os: windows-latest
+            rust-target: ""
+            final-name: "VINCO Setup.exe"
+            find-pattern: "src-tauri/target/release/bundle/nsis/*-setup.exe"
+          - name: "macOS Apple Silicon (aarch64)"
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+            final-name: "VINCO (Apple Silicon).dmg"
+            find-pattern: "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg"
+          - name: "macOS Intel (x86_64)"
+            os: macos-latest
+            rust-target: x86_64-apple-darwin
+            final-name: "VINCO (Intel).dmg"
+            find-pattern: "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: tauri build
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.rust-target }}" ]; then
+            bunx tauri build --target ${{ matrix.rust-target }}
+          else
+            bunx tauri build
+          fi
+
+      # Tauri names the raw bundle from productName ("VINCO ERP") + version
+      # + arch -- fine internally, but the README's install instructions
+      # point employees at a plain "VINCO Setup.exe" / "VINCO.dmg", so
+      # rename the one real installer file to that before publishing.
+      # Deliberately not renamed inside tauri.conf.json's productName
+      # itself: that would also rename the macOS .app bundle, the
+      # installer wizard's window title, and the Windows registry
+      # uninstall entry -- all already correctly "VINCO ERP", and safer
+      # left alone than changed for a cosmetic release-asset filename.
+      - name: Rename installer for release
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$(ls ${{ matrix.find-pattern }} | head -n1)"
+          mkdir -p release-out
+          cp "$src" "release-out/${{ matrix.final-name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: release-out/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: "VINCO ${{ inputs.tag || github.ref_name }}"
+          files: release-assets/*
+          body: |
+            Unsigned internal build (see DESKTOP_ARCHITECTURE.md's
+            "Signing" section) -- Windows/macOS will show an "unknown
+            publisher"/"unidentified developer" warning until a real
+            code-signing certificate is added. Safe to proceed past that
+            warning for internal VINCO installs.
+
+            **Install:** download the file for your platform below and
+            run it. See the root README's "Install VINCO" section for
+            details.

@@ -41,12 +41,14 @@ USERNAME_EMAIL_DOMAIN = "vinco.local"
 
 #: VINCO's simplified role label -> the real Supabase app_role enum
 #: value that actually drives permission enforcement. `super_user` maps
-#: to the literal string "super_user", which is NOT yet a value the
-#: Postgres app_role enum has -- assigning it fails loudly (see
-#: SupabaseAdmin.set_user_role) until the one-time migration SQL
-#: (backend/scripts/native_auth_rbac.sql) has been run once, adding it
-#: with a deliberately curated permission set (every existing permission
-#: except admin.*) -- see that script for the exact grants and why.
+#: to the literal string "super_user", which requires the two Supabase
+#: migrations `supabase/migrations/20260902000000_add_super_user_role.sql`
+#: and `..._20260902000001_grant_super_user_permissions.sql` to have been
+#: applied (`supabase db push`, same as every other migration in that
+#: directory) -- assigning it before that fails loudly (see
+#: SupabaseAdmin.set_user_role) rather than silently doing the wrong
+#: thing. Those two migrations grant it a deliberately curated
+#: permission set (every existing permission except admin.*).
 ROLE_TO_SUPABASE_ROLE: dict[str, str] = {
     "employee": "employee",
     "admin": "general_manager",

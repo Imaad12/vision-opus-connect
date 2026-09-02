@@ -223,7 +223,13 @@ function UsersAccessPage() {
                       variant="outline"
                       size="sm"
                       disabled={updateMutation.isPending}
-                      onClick={() => updateMutation.mutate({ id: u.id, is_active: !u.is_active })}
+                      onClick={() => {
+                        // Only the destructive direction (locking someone
+                        // out) needs confirmation -- reactivating is safe
+                        // to do straight away.
+                        if (u.is_active && !window.confirm(t("users.confirm_deactivate"))) return;
+                        updateMutation.mutate({ id: u.id, is_active: !u.is_active });
+                      }}
                     >
                       {u.is_active ? t("users.deactivate") : t("users.activate")}
                     </Button>

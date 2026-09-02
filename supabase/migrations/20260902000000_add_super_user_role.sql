@@ -1,0 +1,14 @@
+-- VINCO native user management: adds the "Super User" role (full
+-- business/application access, distinct from "Super Admin" which
+-- additionally has system/user administration -- admin.*).
+--
+-- Split into its own migration file (rather than combined with the
+-- permission grants in 20260902000001) because PostgreSQL does not
+-- allow a newly added enum value to be used in the same transaction
+-- that adds it, and each migration file runs in its own transaction --
+-- the immediately-following file's INSERTs need this one committed
+-- first.
+--
+-- Purely additive: adds one new value to the existing app_role enum.
+-- Never alters, drops, or renames anything that exists today.
+ALTER TYPE public.app_role ADD VALUE IF NOT EXISTS 'super_user';

@@ -45,12 +45,5 @@
         "windowSize": { "width": 660, "height": 400 }
       }
     }
-  },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["vinco"]
-      }
-    }
   }
 }

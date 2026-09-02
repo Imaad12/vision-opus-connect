@@ -1,13 +1,18 @@
 /**
- * Desktop MVP auto-login -- TEMPORARY, internal-development only.
+ * RETIRED from the live desktop login path -- kept only as a manual dev
+ * utility (e.g. to invoke by hand from devtools during `bun run
+ * tauri:dev`), never called automatically by any UI on any build. See
+ * DESKTOP_AUTH_MVP.md's "The real future system" section.
  *
- * Google OAuth (src/lib/tauri-auth.ts) is parked for now: no browser
- * redirect, no vinco://auth-callback, no PKCE. Until VINCO has its own
- * username/password/role system for the desktop app (see
- * DESKTOP_AUTH_MVP.md), the desktop build instead signs in automatically,
- * at launch, as ONE dedicated internal Supabase account -- so the app can
+ * Originally: desktop MVP auto-login. Google OAuth (src/lib/tauri-auth.ts)
+ * was parked (no browser redirect, no vinco://auth-callback, no PKCE),
+ * and until VINCO had its own username/password/role system for the
+ * desktop app, the desktop build instead signed in automatically, at
+ * launch, as ONE dedicated internal Supabase account -- so the app could
  * open straight to the dashboard while still going through the exact same
- * backend/RBAC path every other session already uses.
+ * backend/RBAC path every other session already uses. Desktop now uses
+ * the same native VINCO login form as web (src/components/sign-in-card.tsx,
+ * src/lib/vinco-auth.ts) by default.
  *
  * This is deliberately NOT a new auth architecture:
  *   - The credential pair is a normal Supabase email/password login

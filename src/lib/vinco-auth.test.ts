@@ -1,9 +1,9 @@
 /**
  * Covers the native VINCO username/password sign-in helper -- the
  * username-to-synthetic-email convention it and the backend must agree
- * on, and that a Supabase sign-in failure (wrong password, unknown
- * username, or a deactivated/banned account -- Supabase reports all
- * three the same way) surfaces as one generic, non-enumerating message.
+ * on, and that different failure classes (wrong password, banned/
+ * inactive account, network-level failure, empty fields) are classified
+ * distinctly rather than collapsed into one opaque error.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -47,16 +47,44 @@ describe("signInWithUsernamePassword", () => {
     expect(result).toEqual({ ok: true });
   });
 
-  it("returns a generic message on failure, not Supabase's raw error text", async () => {
-    signInWithPassword.mockResolvedValue({ error: { message: "Invalid login credentials" } });
+  it("classifies a plain wrong-password/unknown-username error as invalid_credentials", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthApiError", status: 400, message: "Invalid login credentials" },
+    });
     const result = await signInWithUsernamePassword("jdoe", "wrong-password");
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.message).toBe("Incorrect username or password.");
+    expect(result).toEqual({ ok: false, kind: "invalid_credentials" });
+  });
+
+  it("classifies a user_banned code as inactive", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: {
+        name: "AuthApiError",
+        status: 400,
+        code: "user_banned",
+        message: "User is banned",
+      },
+    });
+    const result = await signInWithUsernamePassword("jdoe", "correct-horse-battery");
+    expect(result).toEqual({ ok: false, kind: "inactive" });
+  });
+
+  it("classifies an AuthRetryableFetchError as network", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthRetryableFetchError", message: "fetch failed" },
+    });
+    const result = await signInWithUsernamePassword("jdoe", "correct-horse-battery");
+    expect(result).toEqual({ ok: false, kind: "network" });
   });
 
   it("rejects empty username/password without calling Supabase at all", async () => {
     const result = await signInWithUsernamePassword("", "");
-    expect(result.ok).toBe(false);
+    expect(result).toEqual({ ok: false, kind: "empty" });
+    expect(signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects a blank/whitespace-only username without calling Supabase", async () => {
+    const result = await signInWithUsernamePassword("   ", "somepassword");
+    expect(result).toEqual({ ok: false, kind: "empty" });
     expect(signInWithPassword).not.toHaveBeenCalled();
   });
 });

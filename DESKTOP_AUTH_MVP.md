@@ -1,4 +1,21 @@
-# VINCO Desktop — MVP authentication (Google OAuth parked)
+# VINCO Desktop — MVP authentication (Google OAuth parked) [SUPERSEDED]
+
+**Superseded.** This document describes an intermediate MVP state (desktop
+auto-signs-in as one dedicated internal account) that no longer exists.
+Desktop now shows the same native VINCO username/password login as web,
+by default, for every user — see the root `README.md`'s "Native login and
+user management" section and `src/components/sign-in-card.tsx`. The
+Google OAuth infrastructure this document describes as "parked, not
+deleted" (`src/lib/tauri-auth.ts`, `tauri-plugin-deep-link`, the
+`vinco://` scheme) has since been removed entirely, not merely left
+unused — an OS-level URL-scheme registration that runs on every desktop
+launch is real production behavior, and nothing in the finished product
+needs it. `src/lib/tauri-dev-auth.ts` (the auto-login function this
+document introduced) is likewise retired from every live path; it
+remains only as a manual, never-auto-invoked dev utility.
+Kept below for historical context only — do not follow its setup steps.
+
+---
 
 Google OAuth for the desktop app is parked, not deleted. This document
 covers: what changed, the mechanism that replaced it, how to set it up,

@@ -1,8 +1,24 @@
 # VINCO Desktop (Tauri 2) — Architecture
 
-Status: local proof-of-concept scaffolded and build-verified in this repo
-(`src-tauri/`). Not deployed, not signed, not distributed. Production
-Cloudflare/Render/Supabase/Google OAuth configuration is untouched.
+**Current state:** desktop shows the same native VINCO username/password
+login as web by default (`src/components/sign-in-card.tsx`, no
+`isTauri()` branching) — see the root `README.md`'s "Native login and
+user management" section. Google OAuth for desktop, and everything it
+required (`src/lib/tauri-auth.ts`, `tauri-plugin-deep-link`, the
+`vinco://` URL scheme in `tauri.conf.json`/`lib.rs`, PKCE) has been
+**removed entirely**, not merely parked — see `DESKTOP_AUTH_MVP.md`'s own
+superseded banner for that history. Session storage is the plain-JSON
+`session_store.rs` file described in §8's "Superseded" callout below, not
+the original OS-keychain design §8 otherwise describes historically. CI
+builds unsigned Windows/macOS installer artifacts on every push (see
+`.github/workflows/desktop-build.yml`); this is otherwise still an
+internal-testing build, not yet code-signed/notarized for public
+distribution.
+
+The rest of this document is a running history of how desktop auth and
+storage evolved — later "Superseded"/"Current state" notes correct
+earlier sections rather than the whole file being rewritten each time.
+Where a section conflicts with the banner above, the banner is current.
 
 ```
                   VINCO API
