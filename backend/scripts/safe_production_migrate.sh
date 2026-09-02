@@ -9,7 +9,16 @@
 # docstring). This script only ever creates/inspects the target schema
 # named below; it issues no DDL against any other schema.
 #
-# Run this from the repo root with your venv already active. It:
+# Self-contained: does not require SQLAlchemy/Alembic/psycopg to already
+# be installed anywhere, and does not assume a bare `python3` on your
+# PATH satisfies this project's Python 3.12+ requirement. Bootstraps its
+# own virtual environment at backend/.venv on first run (the same
+# `pip install -e ".[dev]"` the README already documents for a normal
+# checkout, just automated) and runs every step through that venv
+# explicitly. Safe to run from anywhere -- it resolves its own location
+# and backend/ regardless of your current directory.
+#
+# It:
 #   1. Reads VISION_DATABASE_URL hidden if not already set in your shell.
 #   2. Resolves the target schema from settings.staging_schema (defaults
 #      to "vinco"; override by exporting VISION_STAGING_SCHEMA first).
@@ -37,6 +46,71 @@
 
 set -uo pipefail
 
+# Resolves correctly no matter where this script is invoked from (a
+# relative `./scripts/...` from backend/, an absolute path, a symlink
+# via PATH) -- BASH_SOURCE is bash's own reliable "path to this script"
+# mechanism; readlink/realpath aren't used since neither is guaranteed
+# present on a stock macOS install.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+VENV_DIR="$BACKEND_DIR/.venv"
+
+# alembic.ini's `prepend_sys_path = .` (so `import app...` resolves) is
+# relative to the process's CWD, not to alembic.ini's own location --
+# every alembic/python invocation below must run with backend/ as CWD
+# regardless of where the caller started this script from.
+cd "$BACKEND_DIR"
+
+# --- Bootstrap: backend/.venv with this project's own dependencies ---
+#
+# Requires Python 3.12+ (backend/pyproject.toml's `requires-python`) --
+# tried in this order since a stock macOS/Linux `python3` is frequently
+# an older system Python (this exact failure mode was reproduced
+# directly: a fresh checkout where `python3` resolves to 3.11 fails
+# pip's own "requires a different Python" check) that would otherwise
+# fail deep inside bootstrap with a confusing error instead of a clear
+# one here.
+find_system_python() {
+  for candidate in python3.13 python3.12 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+venv_is_bootstrapped() {
+  [ -x "$VENV_DIR/bin/python3" ] && "$VENV_DIR/bin/python3" -c \
+    'import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ("sqlalchemy", "alembic", "psycopg")) else 1)' \
+    >/dev/null 2>&1
+}
+
+if ! venv_is_bootstrapped; then
+  if [ ! -x "$VENV_DIR/bin/python3" ]; then
+    SYSTEM_PYTHON="$(find_system_python)" || {
+      echo "[UNSAFE] No python3 found on PATH at all. Install Python 3.12+ " \
+           "(e.g. 'brew install python@3.12' on macOS) and re-run." >&2
+      exit 1
+    }
+    if ! "$SYSTEM_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)'; then
+      FOUND_VERSION="$("$SYSTEM_PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
+      echo "[UNSAFE] Found '$SYSTEM_PYTHON' but it's Python $FOUND_VERSION -- this " \
+           "project requires 3.12+. Install a newer Python (e.g. 'brew install " \
+           "python@3.12' on macOS) and re-run." >&2
+      exit 1
+    fi
+    echo "[bootstrap] Creating virtual environment at $VENV_DIR (using $SYSTEM_PYTHON) ..."
+    "$SYSTEM_PYTHON" -m venv "$VENV_DIR"
+  fi
+  echo "[bootstrap] Installing backend dependencies into $VENV_DIR (pip install -e .) ..."
+  "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
+  "$VENV_DIR/bin/python3" -m pip install --quiet -e "$BACKEND_DIR"
+fi
+
+PY="$VENV_DIR/bin/python3"
+ALEMBIC="$VENV_DIR/bin/alembic"
+
 if [ -z "${VISION_DATABASE_URL:-}" ]; then
   read -rs -p "Paste VISION_DATABASE_URL (hidden, not saved to history): " VISION_DATABASE_URL
   echo
@@ -47,7 +121,7 @@ export STAMP_FILE
 STAMP_FILE="$(mktemp)"
 trap 'rm -f "$STAMP_FILE"' EXIT
 
-python3 <<'PYEOF'
+"$PY" <<'PYEOF'
 import os
 import re
 import sys
@@ -211,13 +285,13 @@ if [ "$RC" -eq 0 ]; then
   echo "=== Safety checks passed. Applying. ==="
   if [ -n "$STAMP_TARGET" ]; then
     echo "--- alembic stamp $STAMP_TARGET ---"
-    alembic stamp "$STAMP_TARGET" || { echo "Stamp failed -- stopping, upgrade head was NOT run."; exit 1; }
+    "$ALEMBIC" stamp "$STAMP_TARGET" || { echo "Stamp failed -- stopping, upgrade head was NOT run."; exit 1; }
   fi
   echo "--- alembic upgrade head ---"
-  alembic upgrade head
+  "$ALEMBIC" upgrade head
   echo
   echo "=== Final Alembic revision ==="
-  alembic current
+  "$ALEMBIC" current
 elif [ "$RC" -eq 3 ]; then
   echo
   echo "Nothing to do -- already at head."
