@@ -5,6 +5,52 @@ quotations, approvals, projects, contracts, suppliers, purchase orders,
 invoices, payments, expenses, employees, finance/management reporting,
 and audit logs.
 
+## For VINCO users
+
+Open VINCO (desktop app or the web address your administrator gave you)
+and sign in with the username and password your administrator created
+for you:
+
+```
+VINCO
+
+Username
+[________________]
+
+Password
+[________________]
+
+[ Sign In ]
+```
+
+That's it — no Google account, no separate login screen, nothing else to
+set up.
+
+## For administrators
+
+Go to **Settings → Users & Access** to create accounts and manage roles.
+For each person you add: a display name, a username, a temporary
+password (they can be given a new one later from the same screen), and a
+role:
+
+| Role | Access |
+|---|---|
+| Employee | Limited, day-to-day operational access |
+| Admin | Broad operational/management access |
+| Super User | Full application access |
+| Super Admin | Everything Super User has, plus user/system administration |
+
+You can deactivate an account at any time (they immediately lose access,
+without deleting their history), and reset anyone's password from the
+same screen. Only people with the Admin/Super Admin permission see this
+page at all.
+
+---
+
+The rest of this document is for developers working on VINCO itself.
+
+## Architecture
+
 One repository, two deployment targets, one source tree:
 
 ```
@@ -30,17 +76,53 @@ One repository, two deployment targets, one source tree:
 ```
 
 - **Web**: browser → this repo's frontend (deployed to Cloudflare Pages)
-  → the FastAPI backend (Render) → Supabase Postgres. Auth is normal
-  browser-based Supabase sign-in.
+  → the FastAPI backend (Render) → Supabase Postgres. Employees see a
+  VINCO-branded username/password login (`src/components/sign-in-card.tsx`,
+  `src/lib/vinco-auth.ts`) — Supabase Auth still verifies the password
+  underneath (see "Native login" below), but nothing Supabase-specific is
+  ever shown to them.
 - **Desktop**: the same frontend source, built as a Tauri shell → the
   same production FastAPI backend → the same Supabase Postgres. Auth is
-  automatic sign-in as a dedicated internal Supabase account (no browser,
-  no OAuth) — see `DESKTOP_AUTH_MVP.md`. Session storage is a local JSON
-  file (`src-tauri/src/session_store.rs`), not the OS keychain — see that
+  **currently still** automatic sign-in as a dedicated internal Supabase
+  account (no browser, no OAuth) — see `DESKTOP_AUTH_MVP.md`. Migrating
+  desktop to the same native VINCO login the web build now uses is a
+  deliberate later step (not done automatically alongside adding native
+  login), once that path is proven — see `DESKTOP_AUTH_MVP.md`'s
+  migration note. Session storage is a local JSON file
+  (`src-tauri/src/session_store.rs`), not the OS keychain — see that
   file's module doc for why.
 - Both targets talk to the **same backend** and go through the **same**
   Supabase JWT verification and RBAC checks (`backend/app/api/deps.py`).
   Neither client has any special access the other doesn't.
+
+### Native login and user management
+
+Employees sign in with a VINCO username and password — no Supabase UI,
+no OAuth, no browser redirect. Underneath, Supabase Auth still does the
+real work (password verification, JWT issuance): a native account's
+Supabase email is always `<username>@vinco.local`, a synthetic address
+never shown to anyone and never reachable — see
+`src/lib/vinco-auth.ts`/`backend/app/services/user_service.py`'s module
+docs for the exact convention both sides share.
+
+Creating an account, resetting a password, or (de)activating one are
+admin-level operations no ordinary user token can perform — the backend
+holds a Supabase **service-role key** for exactly this
+(`backend/app/api/auth.py`'s `SupabaseAdmin`), used only by
+`backend/app/api/routers/users.py`'s routes (`VISION_SUPABASE_SERVICE_ROLE_KEY`,
+a Render secret, empty by default). RBAC enforcement itself is
+completely unchanged — every request still goes through
+`require_permission`/Supabase's own `can()`, gated behind the existing
+`admin.users` (create/edit/deactivate) and `admin.roles` (change what a
+user is allowed to do) permissions, not new ones.
+
+VINCO's four role labels (Employee/Admin/Super User/Super Admin) map onto
+Supabase's existing role set — Employee→`employee`, Admin→
+`general_manager`, Super Admin→`super_admin`, all already-existing roles.
+Super User needs one **optional, one-time, manual** SQL step
+(`backend/scripts/native_auth_rbac.sql`, run once in the Supabase SQL
+Editor) to become a real, independently-enforced role; until that's run,
+assigning "Super User" fails with a clear error explaining exactly that.
 
 ## Repository layout
 
@@ -157,6 +239,7 @@ python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.
 | `VITE_DESKTOP_DEV_EMAIL` / `VITE_DESKTOP_DEV_PASSWORD` | desktop only | The dedicated internal Supabase account desktop auto-login signs in as |
 | `VISION_DATABASE_URL` | backend | Unset = local SQLite. Set = PostgreSQL (Render secret in production) |
 | `VISION_SUPABASE_URL` / `VISION_SUPABASE_ANON_KEY` | backend | Verifies JWTs and checks permissions against this Supabase project |
+| `VISION_SUPABASE_SERVICE_ROLE_KEY` | backend | Only used by the native user-management routes (`/users/*`) to create/edit Supabase Auth identities. A real secret — never commit a value, never expose to the frontend |
 | `VISION_CORS_ALLOWED_ORIGINS` | backend | Comma-separated web origins. The desktop app's own fixed origins (`tauri://localhost`, `https://tauri.localhost`) are always allowed in code regardless of this value — see `backend/app/core/config.py` |
 | `VISION_STAGING_SCHEMA` | backend | Defaults to `vinco` — the isolated Postgres schema name |
 

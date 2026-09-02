@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_jwt_audience: str = "authenticated"
 
+    #: A deliberate, narrow exception to "this backend never sees a
+    #: service-role key" (app/api/auth.py's own module docstring):
+    #: creating a native VINCO user (a real Supabase Auth identity plus a
+    #: `public.user_roles` row) is an admin-level operation no anon-key/
+    #: user-token request can ever perform, by design -- see
+    #: `SupabaseAdmin` in app/api/auth.py, used ONLY by
+    #: app/services/user_service.py's user-management functions, never
+    #: for verifying a token or checking a permission (that path is
+    #: still exactly SupabaseAuth, unchanged). Empty by default: every
+    #: SupabaseAdmin method fails loudly and immediately if this isn't
+    #: configured, rather than silently no-op-ing. Never logged, never
+    #: returned in any API response -- see user_service.py.
+    supabase_service_role_key: str = ""
+
     #: Browser origins allowed to call this API cross-origin (the frontend
     #: dev server and, in production, the deployed web app's real domain).
     #: Comma-separated in the environment, e.g.

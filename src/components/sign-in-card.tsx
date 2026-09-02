@@ -1,19 +1,29 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Building2, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Loader2 } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
 import { useI18n } from "@/lib/i18n";
 import { signInDesktopDevAccount } from "@/lib/tauri-dev-auth";
+import { signInWithUsernamePassword } from "@/lib/vinco-auth";
 
 /**
  * Desktop MVP only -- see DESKTOP_AUTH_MVP.md. No form, no button, no
  * OAuth: the desktop build signs itself in automatically, this just shows
  * that it's in progress (or, on failure, a plain retry -- e.g. the
  * backend/Supabase is unreachable, or .env's dev credentials are wrong).
+ *
+ * Deliberately unchanged by the native VINCO username/password login
+ * added alongside this: the instruction that introduced native login was
+ * explicit that desktop must keep this automatic flow until the new
+ * login path has been proven, then migrate as a separate, later step --
+ * not something to flip silently as a side effect of adding the web
+ * form below. See DESKTOP_AUTH_MVP.md's migration note.
  */
 function DesktopAutoSignInScreen({
   busy,
@@ -57,6 +67,11 @@ export function SignInScreen() {
   const [desktopAuthError, setDesktopAuthError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
 
+  // Web only: native VINCO username/password form state.
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => {
       if (data.session) setSignedIn(true);
@@ -98,20 +113,20 @@ export function SignInScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryToken]);
 
-  const signIn = async () => {
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setFormError(null);
     setBusy(true);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin + "/dashboard" },
-    });
-    if (error) {
-      setBusy(false);
-      toast.error(error.message ?? "Sign-in failed");
+    const result = await signInWithUsernamePassword(username, password);
+    setBusy(false);
+    if (!result.ok) {
+      setFormError(result.message);
+      toast.error(result.message);
       return;
     }
-    // On success, Supabase redirects the browser to Google immediately --
-    // there is no further local state to update here before the page
-    // navigates away.
+    // supabase.auth.onAuthStateChange above flips `signedIn`, which the
+    // navigate effect then acts on -- no direct navigate() call needed
+    // here.
   };
 
   if (isTauri()) {
@@ -158,7 +173,9 @@ export function SignInScreen() {
         <div className="w-full max-w-sm">
           <div className="mb-8 flex items-center justify-between">
             <div className="flex items-center gap-2 lg:hidden">
-              <Building2 className="size-5 text-primary" />
+              <div className="grid size-8 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">
+                VC
+              </div>
               <span className="text-sm font-semibold">{t("app.short")}</span>
             </div>
             <Button variant="ghost" size="sm" onClick={toggle} className="ms-auto">
@@ -166,18 +183,45 @@ export function SignInScreen() {
             </Button>
           </div>
 
-          <h1 className="text-2xl font-semibold">{t("auth.open_workspace")}</h1>
+          <h1 className="text-2xl font-semibold">{t("app.name")}</h1>
           <p className="mt-2 text-sm text-muted-foreground">{t("auth.company_only")}</p>
 
           {signedIn ? (
             <Button className="mt-8 w-full gap-2" onClick={() => navigate({ to: "/dashboard" })}>
-              {t("nav.dashboard")} <ArrowRight className="size-4" />
+              {t("nav.dashboard")}
             </Button>
           ) : (
-            <Button className="mt-8 w-full gap-2" onClick={signIn} disabled={busy}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {busy ? t("auth.signing_in") : t("auth.signin")}
-            </Button>
+            <form className="mt-8 space-y-4" onSubmit={handleSubmit}>
+              <div className="space-y-1.5">
+                <Label htmlFor="vinco-username">{t("auth.username")}</Label>
+                <Input
+                  id="vinco-username"
+                  autoComplete="username"
+                  autoFocus
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={busy}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="vinco-password">{t("auth.password")}</Label>
+                <Input
+                  id="vinco-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                  required
+                />
+              </div>
+              {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
+              <Button type="submit" className="w-full gap-2" disabled={busy}>
+                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+                {busy ? t("auth.signing_in") : t("auth.signin")}
+              </Button>
+            </form>
           )}
 
           <p className="mt-6 text-xs text-muted-foreground" dir={lang === "ar" ? "rtl" : "ltr"}>

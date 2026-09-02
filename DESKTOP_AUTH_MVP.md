@@ -117,23 +117,35 @@ account only in an explicit development mode) instead of unconditionally
 auto-signing-in on desktop. Everything else -- the PKCE flow, the deep
 link handling, the keychain storage -- needs no changes to work again.
 
-## The real future system (not built now, by design)
+## The real future system
 
-The desktop app's eventual, real authentication is meant to be:
+The username/password login described above is now built --
+`src/lib/vinco-auth.ts` (web) plus `backend/app/api/routers/users.py` /
+`backend/app/services/user_service.py` (native account creation/role
+management, "Settings → Users & Access" in the app). See the root
+`README.md`'s "Native login and user management" section for the full
+picture. Enforced through the exact same `require_permission`/`can()`
+path this document confirmed is untouched by the original MVP -- a real
+per-user login just replaces *how* a session is obtained, exactly as
+predicted above.
 
-- **Username, password, role** -- entered by the person using the app,
-  authenticated against the backend, not auto-signed-in as a shared
-  account.
-- Roles reuse the same vocabulary already live in Supabase's
-  `user_roles`: Admin, Management, Finance, Sales, Procurement, Projects,
-  HR, Viewer.
-- Enforced through the exact same `require_permission`/`can()` path this
-  document confirmed is untouched -- a real per-user login just replaces
-  *how* a session is obtained, the same way this MVP mechanism does,
-  without changing what the backend checks.
-
-This is intentionally not designed in detail here -- it's the next
-project, not a continuation of this one.
+**What's still exactly as this document originally described, and
+deliberately not changed by adding native login:** the desktop build's
+*default* sign-in is still this file's automatic dedicated-account flow,
+not the new native login. That migration -- desktop asking for a VINCO
+username/password instead of auto-signing-in -- was explicitly sequenced
+as a separate, later step once the new login path is proven in real use
+(first on web), not something to flip silently as a side effect of
+building the login system itself. When that migration happens: replace
+`signInDesktopDevAccount()`'s call site in `sign-in-card.tsx`'s
+`isTauri()` branch with the same login form the web branch already
+renders (`signInWithUsernamePassword` from `src/lib/vinco-auth.ts`
+handles both identically -- nothing platform-specific about it), then
+retire `tauri-dev-auth.ts` and its `VITE_DESKTOP_DEV_EMAIL`/
+`VITE_DESKTOP_DEV_PASSWORD` build-time requirement once no build depends
+on it. The dedicated internal account itself can remain as a fallback/
+migration-safety account for a period rather than being deleted
+immediately.
 
 ## Files changed
 

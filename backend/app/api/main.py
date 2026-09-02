@@ -34,6 +34,7 @@ from app.api.routers import (
     purchase_requests,
     quotations,
     receipts,
+    users,
     vendors,
 )
 from app.core.config import settings
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(employees.router)
     app.include_router(payroll.router)
     app.include_router(management.router)
+    app.include_router(users.router)
 
     return app
 

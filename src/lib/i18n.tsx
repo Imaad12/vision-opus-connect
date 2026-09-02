@@ -19,7 +19,7 @@ export const dict: Dict = {
     en: "Internal ERP & CRM — sales, delivery, procurement and finance in one place.",
     ar: "نظام داخلي متكامل — المبيعات والتنفيذ والمشتريات والمالية في مكان واحد.",
   },
-  "auth.signin": { en: "Sign in with Google", ar: "الدخول بحساب Google" },
+  "auth.signin": { en: "Sign In", ar: "تسجيل الدخول" },
   "auth.signout": { en: "Sign out", ar: "تسجيل الخروج" },
   "auth.company_only": {
     en: "Company accounts only. Access is granted by your administrator.",
@@ -27,6 +27,29 @@ export const dict: Dict = {
   },
   "auth.signing_in": { en: "Signing in…", ar: "جارٍ الدخول…" },
   "auth.open_workspace": { en: "Open workspace", ar: "فتح النظام" },
+  "auth.username": { en: "Username", ar: "اسم المستخدم" },
+  "auth.password": { en: "Password", ar: "كلمة المرور" },
+
+  "users.title": { en: "Users & Access", ar: "المستخدمون والصلاحيات" },
+  "users.description": {
+    en: "Create and manage VINCO accounts, roles, and access.",
+    ar: "إنشاء وإدارة حسابات VINCO والأدوار والصلاحيات.",
+  },
+  "users.add": { en: "Add User", ar: "إضافة مستخدم" },
+  "users.username": { en: "Username", ar: "اسم المستخدم" },
+  "users.display_name": { en: "Display name", ar: "الاسم المعروض" },
+  "users.role": { en: "Role", ar: "الدور" },
+  "users.last_login": { en: "Last login", ar: "آخر دخول" },
+  "users.confirm_password": { en: "Confirm password", ar: "تأكيد كلمة المرور" },
+  "users.new_password": { en: "New password", ar: "كلمة مرور جديدة" },
+  "users.password_mismatch": { en: "Passwords do not match.", ar: "كلمتا المرور غير متطابقتين." },
+  "users.password_too_short": {
+    en: "Password must be at least 8 characters.",
+    ar: "يجب أن تتكون كلمة المرور من 8 أحرف على الأقل.",
+  },
+  "users.activate": { en: "Activate", ar: "تفعيل" },
+  "users.deactivate": { en: "Deactivate", ar: "إيقاف" },
+  "users.reset_password": { en: "Reset Password", ar: "إعادة تعيين كلمة المرور" },
 
   "nav.dashboard": { en: "Dashboard", ar: "لوحة المعلومات" },
   "nav.crm": { en: "CRM", ar: "علاقات العملاء" },
@@ -52,6 +75,7 @@ export const dict: Dict = {
   "nav.employees": { en: "Employees & roles", ar: "الموظفون والأدوار" },
   "nav.audit": { en: "Audit log", ar: "سجل التغييرات" },
   "nav.settings": { en: "Company settings", ar: "إعدادات الشركة" },
+  "nav.users_access": { en: "Users & Access", ar: "المستخدمون والصلاحيات" },
 
   "common.search": { en: "Search…", ar: "بحث…" },
   "common.new": { en: "New", ar: "جديد" },

@@ -92,7 +92,19 @@ def run_migrations_online() -> None:
     # connecting, so VISION_STAGING_SCHEMA (never the connection string
     # itself) is how the intended schema travels to this process; pin it
     # and verify it actually took before running any migration DDL.
-    if settings.staging_schema:
+    #
+    # `staging_schema` defaults to "vinco" for every environment,
+    # SQLite included (see Settings.staging_schema / test_config.py) --
+    # `CREATE SCHEMA`/`SET search_path` are PostgreSQL-only syntax, so
+    # this must stay dialect-gated the same way
+    # `pin_search_path_from_settings` (the app's own runtime engine
+    # path) already is, or a bare `alembic upgrade head` against a
+    # fresh SQLite database -- exactly what a new checkout's README
+    # documents -- fails outright with `OperationalError: near
+    # "SCHEMA": syntax error` before a single migration runs. Confirmed
+    # this was a real, live bug, not a hypothetical: reproduced against
+    # a genuinely fresh SQLite file before adding this guard.
+    if settings.staging_schema and connectable.dialect.name == "postgresql":
         pin_search_path(connectable, settings.staging_schema)
         actual_schema = verify_search_path(connectable, settings.staging_schema)
         if actual_schema != settings.staging_schema:

@@ -14,7 +14,7 @@ from functools import lru_cache
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.auth import AuthenticatedUser, AuthError, SupabaseAuth
+from app.api.auth import AuthenticatedUser, AuthError, SupabaseAdmin, SupabaseAuth
 from app.api.permission_cache import get_cached_permission, set_cached_permission
 from app.api.timing import timed
 from app.core.config import settings
@@ -25,6 +25,7 @@ from app.services.project_service import get_or_create_default_company
 __all__ = [
     "get_db",
     "get_supabase_auth",
+    "get_supabase_admin",
     "get_current_user",
     "get_current_company",
     "require_permission",
@@ -49,6 +50,20 @@ def get_supabase_auth() -> SupabaseAuth:
         project_url=settings.supabase_url,
         anon_key=settings.supabase_anon_key,
         audience=settings.supabase_jwt_audience,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_supabase_admin() -> SupabaseAdmin:
+    """Process-wide `SupabaseAdmin` instance -- see that class's own
+    docstring (app/api/auth.py) for the narrow, deliberate reason this
+    backend holds a service-role key at all. Only ever depended on by
+    `app/api/routers/users.py`'s routes, each already gated behind
+    `require_permission("admin.users")`/`"admin.roles"` before this
+    dependency is even resolved."""
+    return SupabaseAdmin(
+        project_url=settings.supabase_url,
+        service_role_key=settings.supabase_service_role_key,
     )
 
 

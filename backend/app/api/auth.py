@@ -20,7 +20,22 @@ Instead:
     from that token via Postgres's request context and evaluates the
     exact same role/permission/override rows the frontend's Row-Level
     Security already enforces. This backend never re-implements that
-    logic and never sees a service-role key.
+    logic.
+
+UPDATE (native VINCO user management): this backend now *does* hold a
+service-role key -- a deliberate, narrow exception, confined entirely to
+`SupabaseAdmin` below and only ever invoked from
+`app/services/user_service.py`'s admin-user-management functions, never
+from `verify_token`/`check_permission`. Creating a Supabase Auth
+identity, resetting a password, or (de)activating an account are
+admin-level operations no anon-key/user-token request can ever perform,
+by Supabase's own design -- there is no way to build a "create other
+users" feature on top of Supabase Auth without a service-role key
+somewhere, and server-side, behind a permission-gated endpoint, is the
+correct and Supabase-documented place for it (never the frontend -- see
+`API_ARCHITECTURE.md`). RBAC enforcement itself is completely
+unchanged: `require_permission`/`can()` still decide every authorization
+question exactly as before.
 
 See API_ARCHITECTURE.md for the full rationale and the migration path
 away from Supabase once VINCO has its own identity store.
@@ -34,7 +49,12 @@ from typing import Any
 import httpx
 import jwt
 
-__all__ = ["AuthenticatedUser", "AuthError", "SupabaseAuth"]
+__all__ = ["AuthenticatedUser", "AuthError", "SupabaseAuth", "SupabaseAdmin"]
+
+#: Supabase's own convention for an effectively-permanent ban (there is
+#: no dedicated "disabled forever" value in the Admin API -- a very long
+#: duration is the documented way to express it). ~100 years.
+_PERMANENT_BAN_DURATION = "876000h"
 
 
 class AuthError(Exception):
@@ -140,3 +160,164 @@ class SupabaseAuth:
         if not isinstance(result, bool):
             raise AuthError(f"Unexpected response from can({permission!r}): {result!r}")
         return result
+
+
+class SupabaseAdminError(Exception):
+    """Raised when a `SupabaseAdmin` operation fails -- a distinct
+    exception from `AuthError` (which callers map to 401) since these
+    are always either a genuine server-side failure (500) or a caller
+    mistake the route maps to a specific 4xx (e.g. duplicate username,
+    unknown role) -- never "who are you" or "are you allowed", both of
+    which `require_permission` has already settled before any
+    `SupabaseAdmin` method is ever called."""
+
+
+class SupabaseAdmin:
+    """Admin-level Supabase operations, authenticated with the
+    service-role key -- see this module's docstring for why this class
+    exists and the narrow boundary around it. Used only by
+    `app/services/user_service.py`.
+
+    Never logs a password or the service-role key itself (only status
+    codes / response bodies on failure, and Supabase's own admin API
+    never echoes the password back in a response body).
+    """
+
+    def __init__(
+        self,
+        *,
+        project_url: str,
+        service_role_key: str,
+        http_client: httpx.Client | None = None,
+    ) -> None:
+        if not project_url or not service_role_key:
+            raise SupabaseAdminError(
+                "Supabase admin operations are not configured (VISION_SUPABASE_URL / "
+                "VISION_SUPABASE_SERVICE_ROLE_KEY) -- refusing to attempt a user-management "
+                "operation with no way to authenticate it."
+            )
+        self._project_url = project_url.rstrip("/")
+        self._service_role_key = service_role_key
+        self._http_client = http_client or httpx.Client(timeout=10.0)
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._service_role_key}",
+            "apikey": self._service_role_key,
+            "Content-Type": "application/json",
+        }
+
+    def create_auth_user(self, *, email: str, password: str, full_name: str) -> str:
+        """Creates a real Supabase Auth identity. `email_confirm: true`
+        skips Supabase's normal email-verification flow entirely --
+        correct here since this is an internal-only synthetic address
+        (`<username>@vinco.local`, never a real inbox anyone can read a
+        confirmation link from) and the account is already vetted by
+        whichever admin is creating it through VINCO's own UI.
+
+        This also fires Supabase's existing `handle_new_user()` trigger,
+        which auto-creates a `profiles` row and a default `user_roles`/
+        `user_scopes` row (`employee`/`assigned`, unless this happens to
+        be the very first user ever, in which case `super_admin`/`all`)
+        -- `set_user_role` below corrects that to the actually-requested
+        role right after, for every case except when the default already
+        happens to match.
+
+        Returns the new user's id (a UUID).
+        """
+        response = self._http_client.post(
+            f"{self._project_url}/auth/v1/admin/users",
+            json={
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": {"full_name": full_name},
+            },
+            headers=self._headers(),
+        )
+        if response.status_code not in (200, 201):
+            raise SupabaseAdminError(
+                f"Failed to create Supabase Auth user: {response.status_code} {response.text}"
+            )
+        body = response.json()
+        user_id = body.get("id")
+        if not isinstance(user_id, str):
+            raise SupabaseAdminError(f"Unexpected response creating Supabase Auth user: {body!r}")
+        return user_id
+
+    def set_password(self, user_id: str, password: str) -> None:
+        response = self._http_client.put(
+            f"{self._project_url}/auth/v1/admin/users/{user_id}",
+            json={"password": password},
+            headers=self._headers(),
+        )
+        if response.status_code != 200:
+            raise SupabaseAdminError(
+                f"Failed to reset password for {user_id}: {response.status_code} {response.text}"
+            )
+
+    def set_banned(self, user_id: str, *, banned: bool) -> None:
+        """The active/inactive toggle: Supabase Auth's own account-level
+        ban, which `verify_token`/`signInWithPassword` both already
+        respect -- a banned user's login attempt and any already-issued
+        token both fail at Supabase's own layer, before this backend or
+        `can()` ever sees a request from them. Not a `vinco.app_users`-
+        only flag that this backend would have to remember to check
+        everywhere."""
+        response = self._http_client.put(
+            f"{self._project_url}/auth/v1/admin/users/{user_id}",
+            json={"ban_duration": _PERMANENT_BAN_DURATION if banned else "none"},
+            headers=self._headers(),
+        )
+        if response.status_code != 200:
+            raise SupabaseAdminError(
+                f"Failed to set banned={banned} for {user_id}: {response.status_code} {response.text}"
+            )
+
+    def set_user_role(self, user_id: str, role: str) -> None:
+        """Replaces every `public.user_roles` row for `user_id` with
+        exactly one row for `role` (VINCO's simplified model gives each
+        native user exactly one role, unlike Supabase's own schema which
+        technically allows several). Also corrects `public.user_scopes`
+        to match -- `all` for `super_admin`, `assigned` otherwise, the
+        same convention `handle_new_user()`'s trigger already uses.
+
+        Raises `SupabaseAdminError` (not silently succeeding) if `role`
+        isn't a value the `app_role` Postgres enum actually has --
+        e.g. `super_user`, until the one-time migration SQL
+        (`scripts/native_auth_rbac.sql`) that adds it has been run.
+        """
+        delete_response = self._http_client.delete(
+            f"{self._project_url}/rest/v1/user_roles",
+            params={"user_id": f"eq.{user_id}"},
+            headers=self._headers(),
+        )
+        if delete_response.status_code not in (200, 204):
+            raise SupabaseAdminError(
+                f"Failed to clear existing roles for {user_id}: "
+                f"{delete_response.status_code} {delete_response.text}"
+            )
+
+        insert_response = self._http_client.post(
+            f"{self._project_url}/rest/v1/user_roles",
+            json={"user_id": user_id, "role": role},
+            headers=self._headers(),
+        )
+        if insert_response.status_code not in (200, 201):
+            raise SupabaseAdminError(
+                f"Failed to assign role {role!r} to {user_id} -- if this is a role that "
+                "doesn't exist yet in the app_role Postgres enum (e.g. 'super_user'), the "
+                "one-time migration SQL must be run first. "
+                f"({insert_response.status_code} {insert_response.text})"
+            )
+
+        scope = "all" if role == "super_admin" else "assigned"
+        scope_response = self._http_client.post(
+            f"{self._project_url}/rest/v1/user_scopes",
+            json={"user_id": user_id, "scope": scope},
+            headers={**self._headers(), "Prefer": "resolution=merge-duplicates"},
+        )
+        if scope_response.status_code not in (200, 201):
+            raise SupabaseAdminError(
+                f"Failed to set scope for {user_id}: {scope_response.status_code} {scope_response.text}"
+            )

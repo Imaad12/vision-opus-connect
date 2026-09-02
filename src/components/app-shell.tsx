@@ -159,6 +159,12 @@ const SECTIONS: NavSection[] = [
         icon: ShieldCheck,
         perms: ["employees.view", "admin.users", "admin.roles"],
       },
+      {
+        to: "/settings/users",
+        labelKey: "nav.users_access",
+        icon: ShieldCheck,
+        perms: ["admin.users"],
+      },
       { to: "/audit-logs", labelKey: "nav.audit", icon: ScrollText, perms: ["admin.audit"] },
       { to: "/settings", labelKey: "nav.settings", icon: Settings, perms: ["admin.settings"] },
     ],

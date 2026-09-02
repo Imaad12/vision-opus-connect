@@ -4,6 +4,7 @@ Importing this package registers every model on `Base.metadata`, which is
 what `init_db.create_all()` and Alembic's autogeneration rely on.
 """
 
+from app.models.app_user import AppUser
 from app.models.boq import BOQ, BOQLineItem
 from app.models.client import Client
 from app.models.company import Company
@@ -33,6 +34,7 @@ from app.models.variation import ProjectVariation
 from app.models.vendor import Vendor
 
 __all__ = [
+    "AppUser",
     "BOQ",
     "BOQLineItem",
     "Client",
