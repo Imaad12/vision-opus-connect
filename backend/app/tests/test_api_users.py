@@ -21,7 +21,7 @@ from app.api.auth import AuthenticatedUser, SupabaseAdminError
 from app.api.deps import get_current_user, get_db, get_supabase_admin, get_supabase_auth
 from app.api.main import create_app
 from app.database.base import Base
-from app.models import Employee
+from app.models import AppUser, Employee
 
 
 class _FakeSupabaseAuth:
@@ -134,6 +134,21 @@ def _seed_employee(engine: Engine, *, full_name: str = "Sam Employee") -> int:
         session.add(employee)
         session.commit()
         return employee.id
+
+
+def _seed_app_user(
+    engine: Engine, *, id: str, username: str, role: str = "employee", is_active: bool = True
+) -> None:
+    """Inserts one app_users row directly with a caller-chosen id -- for
+    tests that need the row to belong to whichever id `get_current_user`
+    is overridden to return (record-login tests), rather than whatever
+    id `_FakeSupabaseAdmin.create_auth_user` would generate."""
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with factory() as session:
+        session.add(
+            AppUser(id=id, username=username, display_name=username, role=role, is_active=is_active)
+        )
+        session.commit()
 
 
 def test_create_user_success(api_client: TestClient, fake_admin: _FakeSupabaseAdmin):
@@ -357,3 +372,203 @@ def test_create_user_without_admin_users_permission_cannot_link_employee(
     api_client.state["granted"].discard("admin.users")  # type: ignore[attr-defined]
     response = api_client.post("/users", json=_create_payload(employee_id=employee_id))
     assert response.status_code == 403
+
+
+# ---- Employee link/unlink after creation (Part 8/9) ----
+
+
+def test_link_employee_to_existing_user(api_client: TestClient, engine: Engine):
+    employee_id = _seed_employee(engine, full_name="Later Linked")
+    created = api_client.post("/users", json=_create_payload()).json()
+    assert created["employee_id"] is None
+
+    response = api_client.put(f"/users/{created['id']}/employee-link", json={"employee_id": employee_id})
+    assert response.status_code == 200
+    assert response.json()["employee_id"] == employee_id
+
+
+def test_unlink_employee_from_user(api_client: TestClient, engine: Engine):
+    employee_id = _seed_employee(engine)
+    created = api_client.post("/users", json=_create_payload(employee_id=employee_id)).json()
+    assert created["employee_id"] == employee_id
+
+    response = api_client.put(f"/users/{created['id']}/employee-link", json={"employee_id": None})
+    assert response.status_code == 200
+    assert response.json()["employee_id"] is None
+
+
+def test_link_employee_already_linked_to_another_user_is_422(api_client: TestClient, engine: Engine):
+    employee_id = _seed_employee(engine)
+    api_client.post("/users", json=_create_payload(employee_id=employee_id))
+    other = api_client.post("/users", json=_create_payload(username="second", display_name="Second")).json()
+
+    response = api_client.put(f"/users/{other['id']}/employee-link", json={"employee_id": employee_id})
+    assert response.status_code == 422
+    assert "already has a VINCO login" in response.json()["detail"]
+
+
+def test_relinking_user_to_same_employee_it_already_has_is_allowed(api_client: TestClient, engine: Engine):
+    """Setting the employee_id a user already has must not trip the
+    duplicate-link check against its own existing row."""
+    employee_id = _seed_employee(engine)
+    created = api_client.post("/users", json=_create_payload(employee_id=employee_id)).json()
+
+    response = api_client.put(f"/users/{created['id']}/employee-link", json={"employee_id": employee_id})
+    assert response.status_code == 200
+    assert response.json()["employee_id"] == employee_id
+
+
+def test_employee_link_without_admin_users_permission_is_403(api_client: TestClient, engine: Engine):
+    # Seeded directly (not via POST /users): an earlier admin.users-gated
+    # call from this same caller would cache that permission as granted
+    # for the deliberate short TTL (see permission_cache.py), which would
+    # then mask the discard below and defeat this exact test.
+    employee_id = _seed_employee(engine)
+    _seed_app_user(engine, id="target-user", username="target")
+    api_client.state["granted"].discard("admin.users")  # type: ignore[attr-defined]
+
+    response = api_client.put("/users/target-user/employee-link", json={"employee_id": employee_id})
+    assert response.status_code == 403
+
+
+# ---- Last active Super Admin protection (Part 13) ----
+
+
+def test_deactivating_the_only_active_super_admin_is_blocked(api_client: TestClient):
+    boss = api_client.post(
+        "/users", json=_create_payload(username="boss", display_name="Boss", role="super_admin")
+    ).json()
+
+    response = api_client.put(f"/users/{boss['id']}", json={"is_active": False})
+    assert response.status_code == 422
+    assert "last active Super Admin" in response.json()["detail"]
+
+
+def test_deactivating_a_super_admin_is_allowed_when_another_is_active(api_client: TestClient):
+    boss1 = api_client.post(
+        "/users", json=_create_payload(username="boss1", display_name="Boss 1", role="super_admin")
+    ).json()
+    api_client.post("/users", json=_create_payload(username="boss2", display_name="Boss 2", role="super_admin"))
+
+    response = api_client.put(f"/users/{boss1['id']}", json={"is_active": False})
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+
+
+def test_demoting_the_only_active_super_admin_is_blocked(api_client: TestClient):
+    boss = api_client.post(
+        "/users", json=_create_payload(username="boss", display_name="Boss", role="super_admin")
+    ).json()
+
+    response = api_client.put(f"/users/{boss['id']}/role", json={"role": "admin"})
+    assert response.status_code == 422
+    assert "last active Super Admin" in response.json()["detail"]
+
+
+def test_demoting_a_super_admin_is_allowed_when_another_is_active(api_client: TestClient):
+    boss1 = api_client.post(
+        "/users", json=_create_payload(username="boss1", display_name="Boss 1", role="super_admin")
+    ).json()
+    api_client.post("/users", json=_create_payload(username="boss2", display_name="Boss 2", role="super_admin"))
+
+    response = api_client.put(f"/users/{boss1['id']}/role", json={"role": "admin"})
+    assert response.status_code == 200
+    assert response.json()["role"] == "admin"
+
+
+def test_reactivating_a_deactivated_super_admin_is_never_blocked(api_client: TestClient):
+    """The guard only ever blocks the direction that reduces the active
+    count -- reactivating can only increase it."""
+    boss = api_client.post(
+        "/users",
+        json=_create_payload(username="boss", display_name="Boss", role="super_admin", is_active=False),
+    ).json()
+
+    response = api_client.put(f"/users/{boss['id']}", json={"is_active": True})
+    assert response.status_code == 200
+    assert response.json()["is_active"] is True
+
+
+def test_demoting_an_already_inactive_super_admin_is_allowed(api_client: TestClient):
+    """An inactive Super Admin doesn't count toward "at least one active"
+    -- demoting them further doesn't reduce anything that was counted."""
+    boss = api_client.post(
+        "/users",
+        json=_create_payload(username="boss", display_name="Boss", role="super_admin", is_active=False),
+    ).json()
+
+    response = api_client.put(f"/users/{boss['id']}/role", json={"role": "admin"})
+    assert response.status_code == 200
+    assert response.json()["role"] == "admin"
+
+
+def test_deactivating_a_non_super_admin_is_never_blocked(api_client: TestClient):
+    """The guard is scoped to the Super Admin role only -- deactivating
+    the sole Admin/Employee/Super User account is unaffected."""
+    plain = api_client.post("/users", json=_create_payload()).json()
+
+    response = api_client.put(f"/users/{plain['id']}", json={"is_active": False})
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+
+
+# ---- Login tracking (Part 2/3/4: real, not fabricated, last-login data) ----
+
+
+def test_record_login_sets_last_login_at_for_the_caller(api_client: TestClient, engine: Engine):
+    _seed_app_user(engine, id="admin-caller", username="whoami")
+
+    response = api_client.post("/users/me/record-login")
+    assert response.status_code == 204
+
+    listed = api_client.get("/users").json()
+    mine = next(u for u in listed if u["id"] == "admin-caller")
+    assert mine["last_login_at"] is not None
+
+
+def test_record_login_is_a_noop_when_caller_has_no_app_user_row(api_client: TestClient):
+    # The fixture's default caller ("admin-caller") has no app_users row
+    # unless a test seeds one -- must not 404/500, just succeed quietly.
+    response = api_client.post("/users/me/record-login")
+    assert response.status_code == 204
+
+
+def test_record_login_requires_no_special_permission(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    """Every authenticated user may record their own login -- unlike
+    every other /users route, no admin.users/admin.roles is required."""
+    _seed_app_user(engine, id="plain-caller", username="plain")
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def _get_db_override() -> Generator[Session, None, None]:
+        session = factory()
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _get_db_override
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        id="plain-caller", email="plain@example.com", token="fake-token", claims={}
+    )
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.post("/users/me/record-login")
+
+    assert response.status_code == 204
+
+
+def test_record_login_requires_a_bearer_token(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: iter([factory()])
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.post("/users/me/record-login")
+
+    assert response.status_code == 401

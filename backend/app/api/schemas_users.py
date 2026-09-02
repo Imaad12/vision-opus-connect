@@ -77,5 +77,10 @@ class AppUserRoleUpdate(BaseModel):
     role: AppUserRole
 
 
+class AppUserEmployeeLinkUpdate(BaseModel):
+    #: `None` unlinks the account from any HR roster entry.
+    employee_id: int | None = None
+
+
 class AppUserPasswordReset(BaseModel):
     password: str = Field(min_length=8, max_length=200)

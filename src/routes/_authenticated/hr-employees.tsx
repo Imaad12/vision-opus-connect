@@ -7,6 +7,7 @@ import { ResourcePage, type ResourceConfig } from "@/components/resource-page";
 import { Button } from "@/components/ui/button";
 import { useMe } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
+import { logAudit } from "@/lib/audit";
 import { type Row } from "@/lib/db";
 import { useI18n } from "@/lib/i18n";
 import type { AppUser } from "@/lib/vinco-users";
@@ -56,8 +57,14 @@ function EmployeeVincoAccessCell({ employee, onLinked }: { employee: Row; onLink
           open={open}
           onOpenChange={setOpen}
           defaultEmployeeId={employeeId}
-          onCreated={() => {
+          onCreated={(user) => {
             void queryClient.invalidateQueries({ queryKey: ["app-users"] });
+            void logAudit({
+              action: "user_created",
+              entity_type: "app_users",
+              entity_id: user.id,
+              summary: `Created VINCO login ${user.username} for ${String(employee["full_name"] ?? "")}`,
+            });
             onLinked();
           }}
         />
@@ -71,7 +78,9 @@ function EmployeeVincoAccessCell({ employee, onLinked }: { employee: Row; onLink
         {linked.is_active ? t("users.access_active") : t("users.access_inactive")}
       </span>
       <Button variant="ghost" size="sm" asChild>
-        <Link to="/employees">{t("users.manage")}</Link>
+        <Link to="/employees">
+          {linked.is_active ? t("users.manage_access") : t("users.reactivate_access")}
+        </Link>
       </Button>
     </div>
   );

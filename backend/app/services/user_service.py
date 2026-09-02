@@ -12,7 +12,9 @@ letting `app_users.role` drift into being merely cosmetic.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import SupabaseAdmin, SupabaseAdminError
@@ -21,13 +23,28 @@ from app.services.errors import ValidationError
 
 __all__ = [
     "USERNAME_EMAIL_DOMAIN",
+    "LAST_ACTIVE_ROLE_GUARD",
     "list_users",
     "get_user",
     "create_user",
     "update_user",
     "update_user_role",
+    "update_employee_link",
     "reset_password",
+    "record_login",
 ]
+
+#: The one role that can create/edit users and change roles by default
+#: (see supabase/migrations/20260818103534_*.sql's DEFAULT ROLE
+#: PERMISSIONS section -- `general_manager` only gets `admin.audit`,
+#: `super_user` deliberately excludes every `admin.*` permission). If the
+#: last *active* account holding this role were deactivated or demoted,
+#: nobody could manage users or roles again -- not even by editing the
+#: database directly through this same API, since every route that could
+#: fix it requires admin.users/admin.roles. `update_user` and
+#: `update_user_role` both refuse the specific change that would reach
+#: zero.
+LAST_ACTIVE_ROLE_GUARD = "super_admin"
 
 #: Synthetic email domain for native VINCO accounts -- Supabase Auth
 #: requires an email-shaped identifier, but employees only ever see and
@@ -61,12 +78,60 @@ def _username_email(username: str) -> str:
     return f"{username}@{USERNAME_EMAIL_DOMAIN}"
 
 
+def _validate_employee_link(
+    session: Session, employee_id: int, *, exclude_user_id: str | None = None
+) -> Employee:
+    """Shared by `create_user` and `update_employee_link`: an employee_id
+    must name a real, non-deleted employee, and one not already linked to
+    a *different* app_user (`exclude_user_id` lets an update re-validate
+    without tripping over the row it's updating)."""
+    employee = session.get(Employee, employee_id)
+    if employee is None or employee.is_deleted:
+        raise ValidationError(f"Employee {employee_id} not found.")
+    stmt = select(AppUser).where(AppUser.employee_id == employee_id)
+    if exclude_user_id is not None:
+        stmt = stmt.where(AppUser.id != exclude_user_id)
+    already_linked = session.execute(stmt).scalar_one_or_none()
+    if already_linked is not None:
+        raise ValidationError(
+            f"{employee.full_name} already has a VINCO login ({already_linked.username!r})."
+        )
+    return employee
+
+
+def _active_last_active_role_count(session: Session, *, excluding: str | None = None) -> int:
+    """How many *active* accounts currently hold `LAST_ACTIVE_ROLE_GUARD`,
+    optionally excluding one user (the one about to change) -- used to
+    decide whether a pending deactivation/demotion would reach zero."""
+    stmt = select(func.count()).select_from(AppUser).where(
+        AppUser.role == LAST_ACTIVE_ROLE_GUARD, AppUser.is_active.is_(True)
+    )
+    if excluding is not None:
+        stmt = stmt.where(AppUser.id != excluding)
+    return session.execute(stmt).scalar_one()
+
+
 def list_users(session: Session) -> list[AppUser]:
     return list(session.execute(select(AppUser).order_by(AppUser.username)).scalars().all())
 
 
 def get_user(session: Session, user_id: str) -> AppUser | None:
     return session.get(AppUser, user_id)
+
+
+def record_login(session: Session, *, user_id: str) -> None:
+    """Best-effort last-login tracking for the caller's own account --
+    a silent no-op when no app_users row exists (e.g. a legacy Supabase
+    identity with no native VINCO login), not an error. Meant to be
+    called once per interactive sign-in, right after
+    `signInWithPassword` succeeds (see src/lib/vinco-auth.ts) -- never
+    gated behind a permission, since every user may record their own
+    login."""
+    user = session.get(AppUser, user_id)
+    if user is None:
+        return
+    user.last_login_at = datetime.now(timezone.utc)
+    session.flush()
 
 
 def create_user(
@@ -93,16 +158,7 @@ def create_user(
     # with no app_users row to show for it -- same reasoning as checking
     # the username above before create_auth_user runs.
     if employee_id is not None:
-        employee = session.get(Employee, employee_id)
-        if employee is None or employee.is_deleted:
-            raise ValidationError(f"Employee {employee_id} not found.")
-        already_linked = session.execute(
-            select(AppUser).where(AppUser.employee_id == employee_id)
-        ).scalar_one_or_none()
-        if already_linked is not None:
-            raise ValidationError(
-                f"{employee.full_name} already has a VINCO login ({already_linked.username!r})."
-            )
+        _validate_employee_link(session, employee_id)
 
     try:
         user_id = admin.create_auth_user(
@@ -136,6 +192,15 @@ def update_user(
     is_active: bool | None,
 ) -> AppUser:
     if is_active is not None and is_active != user.is_active:
+        if (
+            not is_active
+            and user.role == LAST_ACTIVE_ROLE_GUARD
+            and _active_last_active_role_count(session, excluding=user.id) == 0
+        ):
+            raise ValidationError(
+                "Cannot deactivate the last active Super Admin -- this would leave nobody "
+                "able to manage users or roles. Make another account Super Admin first."
+            )
         try:
             admin.set_banned(user.id, banned=not is_active)
         except SupabaseAdminError as exc:
@@ -154,12 +219,35 @@ def update_user_role(session: Session, user: AppUser, admin: SupabaseAdmin, *, r
     if supabase_role is None:
         raise ValidationError(f"Unknown role {role!r}.")
 
+    if (
+        role != LAST_ACTIVE_ROLE_GUARD
+        and user.role == LAST_ACTIVE_ROLE_GUARD
+        and user.is_active
+        and _active_last_active_role_count(session, excluding=user.id) == 0
+    ):
+        raise ValidationError(
+            "Cannot change the last active Super Admin's role -- this would leave nobody "
+            "able to manage users or roles. Make another account Super Admin first."
+        )
+
     try:
         admin.set_user_role(user.id, supabase_role)
     except SupabaseAdminError as exc:
         raise ValidationError(str(exc)) from exc
 
     user.role = role
+    session.flush()
+    return user
+
+
+def update_employee_link(session: Session, user: AppUser, *, employee_id: int | None) -> AppUser:
+    """Links or unlinks `user` from an HR roster entry -- the same
+    existence/uniqueness rule `create_user` enforces at creation time,
+    reusable here since a login's employee link can change later (a
+    mis-linked account, or one that never had one)."""
+    if employee_id is not None:
+        _validate_employee_link(session, employee_id, exclude_user_id=user.id)
+    user.employee_id = employee_id
     session.flush()
     return user
 

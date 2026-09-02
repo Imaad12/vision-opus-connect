@@ -22,6 +22,7 @@
 import type { AuthError } from "@supabase/supabase-js";
 
 import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 
 export const USERNAME_EMAIL_DOMAIN = "vinco.local";
 
@@ -81,6 +82,14 @@ export async function signInWithUsernamePassword(
   if (error) {
     return { ok: false, kind: classifySignInError(error) };
   }
+
+  // Best-effort last-login tracking (real data for the Access Control
+  // Center's "Last login"/"Never logged in" -- see backend/app/api/
+  // routers/users.py's record-login route). Never blocks or fails the
+  // sign-in itself: a no-op on the backend if this account has no
+  // native app_users row, and any failure here is swallowed rather than
+  // surfaced -- recording a timestamp is not worth interrupting login.
+  void api.post("/users/me/record-login", {}).catch(() => undefined);
 
   return { ok: true };
 }

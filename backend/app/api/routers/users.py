@@ -14,10 +14,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.auth import SupabaseAdmin
-from app.api.deps import get_db, get_supabase_admin, require_permission
+from app.api.auth import AuthenticatedUser, SupabaseAdmin
+from app.api.deps import get_current_user, get_db, get_supabase_admin, require_permission
 from app.api.schemas_users import (
     AppUserCreate,
+    AppUserEmployeeLinkUpdate,
     AppUserPasswordReset,
     AppUserRead,
     AppUserRoleUpdate,
@@ -34,6 +35,17 @@ def _get_or_404(session: Session, user_id: str):
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
     return user
+
+
+@router.post("/me/record-login", status_code=status.HTTP_204_NO_CONTENT)
+def record_login(
+    session: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> None:
+    """No permission requirement beyond a valid token -- every user may
+    record their own login. A no-op if the caller has no native VINCO
+    account (see user_service.record_login)."""
+    user_service.record_login(session, user_id=user.id)
 
 
 @router.get("", response_model=list[AppUserRead])
@@ -94,6 +106,20 @@ def update_user_role(
     target = _get_or_404(session, user_id)
     try:
         return user_service.update_user_role(session, target, admin, role=payload.role)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+
+@router.put("/{user_id}/employee-link", response_model=AppUserRead)
+def update_employee_link(
+    user_id: str,
+    payload: AppUserEmployeeLinkUpdate,
+    session: Session = Depends(get_db),
+    _user=Depends(require_permission("admin.users")),
+) -> AppUserRead:
+    target = _get_or_404(session, user_id)
+    try:
+        return user_service.update_employee_link(session, target, employee_id=payload.employee_id)
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 

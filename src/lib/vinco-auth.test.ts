@@ -8,17 +8,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const signInWithPassword = vi.fn();
+const apiPost = vi.fn();
 
 vi.mock("@/integrations/supabase/client", () => ({
   supabase: { auth: { signInWithPassword } },
 }));
+vi.mock("@/lib/api", () => ({
+  api: { post: apiPost },
+}));
 
-const { signInWithUsernamePassword, usernameToEmail, USERNAME_EMAIL_DOMAIN } = await import(
-  "./vinco-auth"
-);
+const { signInWithUsernamePassword, usernameToEmail, USERNAME_EMAIL_DOMAIN } =
+  await import("./vinco-auth");
 
 beforeEach(() => {
   signInWithPassword.mockReset();
+  apiPost.mockReset().mockResolvedValue(undefined);
 });
 
 describe("usernameToEmail", () => {
@@ -86,5 +90,26 @@ describe("signInWithUsernamePassword", () => {
     const result = await signInWithUsernamePassword("   ", "somepassword");
     expect(result).toEqual({ ok: false, kind: "empty" });
     expect(signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("records the login on success", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    await signInWithUsernamePassword("jdoe", "correct-horse-battery");
+    expect(apiPost).toHaveBeenCalledWith("/users/me/record-login", {});
+  });
+
+  it("does not record a login on failure", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthApiError", status: 400, message: "Invalid login credentials" },
+    });
+    await signInWithUsernamePassword("jdoe", "wrong-password");
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("a failed login-record call does not make sign-in itself fail", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    apiPost.mockRejectedValue(new Error("backend unreachable"));
+    const result = await signInWithUsernamePassword("jdoe", "correct-horse-battery");
+    expect(result).toEqual({ ok: true });
   });
 });

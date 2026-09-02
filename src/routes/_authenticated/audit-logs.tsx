@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
 import { useMe } from "@/hooks/use-auth";
-import { db, type Row } from "@/lib/db";
+import { filterAuditLogs, type AuditLogRow } from "@/lib/audit-log-filters";
+import { db } from "@/lib/db";
 import { formatDate, useI18n } from "@/lib/i18n";
 
 export const Route = createFileRoute("/_authenticated/audit-logs")({
@@ -12,7 +14,8 @@ export const Route = createFileRoute("/_authenticated/audit-logs")({
       { title: "Audit log — VINCO ERP" },
       {
         name: "description",
-        content: "Immutable trail of who created, changed, approved or deleted records across the ERP.",
+        content:
+          "Immutable trail of who created, changed, approved or deleted records across the ERP.",
       },
       { property: "og:title", content: "Audit log — VINCO ERP" },
       { property: "og:description", content: "Who changed what, and when." },
@@ -26,13 +29,43 @@ function AuditPage() {
   const me = useMe();
   const allowed = me.can("admin.audit");
 
+  const [actor, setActor] = useState("");
+  const [action, setAction] = useState("");
+  const [entityType, setEntityType] = useState("");
+
   const logs = useQuery({
     queryKey: ["audit-logs"],
     enabled: allowed,
     queryFn: async () => {
-      const { data } = await db.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(300);
-      return (data ?? []) as Row[];
+      const { data } = await db
+        .from("audit_logs")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(300);
+      return (data ?? []) as AuditLogRow[];
     },
+  });
+
+  const actors = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const log of logs.data ?? []) {
+      if (log.actor_id) seen.set(log.actor_id, log.actor_name ?? log.actor_id);
+    }
+    return Array.from(seen.entries());
+  }, [logs.data]);
+  const actions = useMemo(
+    () => Array.from(new Set((logs.data ?? []).map((l) => l.action))).sort(),
+    [logs.data],
+  );
+  const entityTypes = useMemo(
+    () => Array.from(new Set((logs.data ?? []).map((l) => l.entity_type))).sort(),
+    [logs.data],
+  );
+
+  const visible = filterAuditLogs(logs.data ?? [], {
+    actor: actor || undefined,
+    action: action || undefined,
+    entityType: entityType || undefined,
   });
 
   if (!allowed) {
@@ -47,6 +80,44 @@ function AuditPage() {
   return (
     <>
       <PageHeader title={t("nav.audit")} />
+      <div className="mb-4 flex flex-wrap gap-2">
+        <select
+          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+          value={actor}
+          onChange={(e) => setActor(e.target.value)}
+        >
+          <option value="">{t("audit.filter.all_actors")}</option>
+          {actors.map(([id, name]) => (
+            <option key={id} value={id}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+          value={action}
+          onChange={(e) => setAction(e.target.value)}
+        >
+          <option value="">{t("audit.filter.all_actions")}</option>
+          {actions.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+        <select
+          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+          value={entityType}
+          onChange={(e) => setEntityType(e.target.value)}
+        >
+          <option value="">{t("audit.filter.all_entities")}</option>
+          {entityTypes.map((et) => (
+            <option key={et} value={et}>
+              {et}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="surface-panel overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -58,22 +129,20 @@ function AuditPage() {
             </tr>
           </thead>
           <tbody>
-            {(logs.data ?? []).length === 0 && (
+            {visible.length === 0 && (
               <tr>
                 <td colSpan={4} className="px-3 py-10 text-center text-muted-foreground">
                   {t("common.empty")}
                 </td>
               </tr>
             )}
-            {(logs.data ?? []).map((log) => (
-              <tr key={String(log["id"])} className="border-b border-border/70 last:border-0">
-                <td className="px-3 py-2.5">{String(log["summary"] ?? log["action"])}</td>
-                <td className="px-3 py-2.5">{String(log["actor_name"] ?? "—")}</td>
-                <td className="px-3 py-2.5 text-muted-foreground">
-                  {String(log["entity_type"])}
-                </td>
+            {visible.map((log) => (
+              <tr key={log.id} className="border-b border-border/70 last:border-0">
+                <td className="px-3 py-2.5">{log.summary ?? log.action}</td>
+                <td className="px-3 py-2.5">{log.actor_name ?? "—"}</td>
+                <td className="px-3 py-2.5 text-muted-foreground">{log.entity_type}</td>
                 <td className="px-3 py-2.5 whitespace-nowrap text-muted-foreground">
-                  {formatDate(log["created_at"] as string, lang)}
+                  {formatDate(log.created_at, lang)}
                 </td>
               </tr>
             ))}

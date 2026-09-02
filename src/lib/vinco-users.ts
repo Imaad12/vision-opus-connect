@@ -31,3 +31,19 @@ export const ROLE_LABELS: Record<AppUserRole, { en: string; ar: string }> = {
   super_user: { en: "Super User", ar: "مستخدم متميز" },
   super_admin: { en: "Super Admin", ar: "مسؤول النظام" },
 };
+
+/**
+ * MUST match `backend/app/services/user_service.py`'s
+ * `ROLE_TO_SUPABASE_ROLE` exactly -- the frontend has no endpoint that
+ * returns this mapping dynamically, so it's duplicated here rather than
+ * fetched. Used only to resolve "what real Supabase role does this
+ * VINCO role enforce as" for read-only display (effective permissions in
+ * the user detail view) -- role *assignment* always goes through the
+ * backend's `/users/{id}/role`, which is the actual source of truth.
+ */
+export const APP_ROLE_TO_SUPABASE_ROLE: Record<AppUserRole, string> = {
+  employee: "employee",
+  admin: "general_manager",
+  super_user: "super_user",
+  super_admin: "super_admin",
+};
