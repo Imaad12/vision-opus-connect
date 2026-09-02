@@ -23,6 +23,25 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter
     healthCheckPath: /health
+    # Runs `alembic upgrade head` against VISION_DATABASE_URL before the
+    # new image is swapped in, on every deploy. Without this, a deploy
+    # only ever changes what code is running -- the live schema stays
+    # wherever it last was, silently, until someone happens to run
+    # migrations by hand. That gap is exactly what caused a real
+    # production incident: code shipped in commits df745ad/cc4a9ce added
+    # app_users.must_change_password/password_changed_at (migration
+    # 6d263c6d93a5) and the import_batches table (0316ad9e1d33), neither
+    # of which was ever applied here, so every query touching app_users'
+    # full column set (GET /users/me, POST /users) 500'd with a Postgres
+    # UndefinedColumn error the moment that code went live. Uses the
+    # plain `alembic` CLI, not scripts/safe_production_migrate.sh --
+    # that script's interactive confirmation prompts are for a human
+    # running it by hand, not an unattended deploy step; the safety this
+    # step instead relies on is what it's always relied on: migrations
+    # are additive/reviewed-in-PR (see README's "no destructive
+    # migrations" principle), so `upgrade head` here is exactly as safe
+    # as merging the migration file itself already was.
+    preDeployCommand: "alembic upgrade head"
     envVars:
       # Supabase Session Pooler connection string, in the form
       # postgresql+psycopg://user:password@host:5432/dbname
@@ -37,6 +56,16 @@ services:
       # Supabase anon/publishable key (safe to expose client-side, but
       # still set as a Render secret rather than committed here).
       - key: VISION_SUPABASE_ANON_KEY
+        sync: false
+      # Service-role key -- required since the native VINCO user-
+      # management routes (POST /users, reset-password) create/manage
+      # real Supabase Auth identities via the Admin API. See
+      # app/api/auth.py's SupabaseAdmin for the narrow boundary around
+      # this (only user_service.py ever holds/uses it). A real secret,
+      # set directly in the Render dashboard -- never committed here.
+      # Listed here only so this file stays a complete, accurate record
+      # of what this service actually needs configured.
+      - key: VISION_SUPABASE_SERVICE_ROLE_KEY
         sync: false
       # Comma-separated list of allowed frontend origins, e.g.
       # https://vinco.pages.dev,https://app.yourdomain.com
