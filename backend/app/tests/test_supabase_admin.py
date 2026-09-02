@@ -13,7 +13,7 @@ import json
 import httpx
 import pytest
 
-from app.api.auth import SupabaseAdmin, SupabaseAdminError
+from app.api.auth import SupabaseAdmin, SupabaseAdminError, SupabaseUnavailableError
 
 
 def _admin_with_transport(handler) -> SupabaseAdmin:
@@ -154,6 +154,47 @@ def test_set_user_role_super_admin_gets_all_scope() -> None:
 
     scope_call = calls[-1]
     assert scope_call[1] == {"user_id": "user-abc-123", "scope": "all"}
+
+
+def _network_failure_transport(exc: Exception) -> httpx.Client:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("timed out"),
+        httpx.ReadTimeout("timed out reading response"),
+    ],
+)
+def test_network_failure_raises_supabase_unavailable_not_a_generic_500(exc: Exception) -> None:
+    """None of these ever produced an HTTP response at all -- Part A2's
+    "502/503 Supabase/Auth failure" case, distinct from SupabaseAdminError
+    (a real response Supabase sent back, e.g. a validation rejection)."""
+    admin = SupabaseAdmin(
+        project_url="https://example.supabase.co",
+        service_role_key="test-service-role-key",
+        http_client=_network_failure_transport(exc),
+    )
+    with pytest.raises(SupabaseUnavailableError):
+        admin.create_auth_user(email="jdoe@vinco.local", password="s3cret-pass", full_name="Jane Doe")
+
+
+def test_network_failure_on_set_password_also_raises_supabase_unavailable() -> None:
+    """Not just create_auth_user -- every method routes through the same
+    _request helper (see auth.py), so this is a property of SupabaseAdmin
+    as a whole, not one call site."""
+    admin = SupabaseAdmin(
+        project_url="https://example.supabase.co",
+        service_role_key="test-service-role-key",
+        http_client=_network_failure_transport(httpx.ConnectError("connection refused")),
+    )
+    with pytest.raises(SupabaseUnavailableError):
+        admin.set_password("user-abc-123", "new-password-1")
 
 
 def test_set_user_role_raises_clearly_when_role_value_is_rejected() -> None:

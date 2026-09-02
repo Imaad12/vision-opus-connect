@@ -31,7 +31,10 @@ export const dict: Dict = {
   "auth.password": { en: "Password", ar: "كلمة المرور" },
   "auth.show_password": { en: "Show password", ar: "إظهار كلمة المرور" },
   "auth.hide_password": { en: "Hide password", ar: "إخفاء كلمة المرور" },
-  "auth.error.empty": { en: "Enter your username and password.", ar: "أدخل اسم المستخدم وكلمة المرور." },
+  "auth.error.empty": {
+    en: "Enter your username and password.",
+    ar: "أدخل اسم المستخدم وكلمة المرور.",
+  },
   "auth.error.invalid_credentials": {
     en: "Invalid username or password.",
     ar: "اسم المستخدم أو كلمة المرور غير صحيحة.",
@@ -44,6 +47,32 @@ export const dict: Dict = {
     en: "Unable to connect. Check your internet connection and try again.",
     ar: "تعذر الاتصال. تحقق من اتصالك بالإنترنت وحاول مرة أخرى.",
   },
+  "auth.set_password.title": { en: "Set your password", ar: "تعيين كلمة المرور" },
+  "auth.set_password.description": {
+    en: "For your security, you must create your own password before continuing.",
+    ar: "لحماية حسابك، يجب عليك إنشاء كلمة مرور خاصة بك قبل المتابعة.",
+  },
+  "auth.set_password.submit": { en: "Set Password", ar: "تعيين كلمة المرور" },
+  "auth.set_password.submitting": { en: "Setting password…", ar: "جارٍ تعيين كلمة المرور…" },
+  "auth.set_password.success": {
+    en: "Password set. Signing you in…",
+    ar: "تم تعيين كلمة المرور. جارٍ تسجيل الدخول…",
+  },
+  "auth.set_password.wrong_current": {
+    en: "That current password is incorrect.",
+    ar: "كلمة المرور الحالية غير صحيحة.",
+  },
+  "auth.set_password.unknown_error": {
+    en: "Could not change your password. Please try again.",
+    ar: "تعذّر تغيير كلمة المرور. حاول مرة أخرى.",
+  },
+  "users.change_password.title": { en: "Change Password", ar: "تغيير كلمة المرور" },
+  "users.change_password.description": {
+    en: "Change the password for your own account. This does not affect any other user.",
+    ar: "تغيير كلمة المرور لحسابك الخاص. لا يؤثر هذا على أي مستخدم آخر.",
+  },
+  "users.change_password.submit": { en: "Change Password", ar: "تغيير كلمة المرور" },
+  "users.change_password.success": { en: "Password changed.", ar: "تم تغيير كلمة المرور." },
   "auth.session_expired": {
     en: "Your session expired. Please sign in again.",
     ar: "انتهت صلاحية الجلسة. الرجاء تسجيل الدخول مرة أخرى.",
@@ -60,8 +89,12 @@ export const dict: Dict = {
   "users.role": { en: "Role", ar: "الدور" },
   "users.last_login": { en: "Last login", ar: "آخر دخول" },
   "users.confirm_password": { en: "Confirm password", ar: "تأكيد كلمة المرور" },
+  "users.current_password": { en: "Current password", ar: "كلمة المرور الحالية" },
   "users.new_password": { en: "New password", ar: "كلمة مرور جديدة" },
   "users.password_mismatch": { en: "Passwords do not match.", ar: "كلمتا المرور غير متطابقتين." },
+  "users.password_status": { en: "Password", ar: "كلمة المرور" },
+  "users.password_status.ok": { en: "Set by user", ar: "حدّدها المستخدم" },
+  "users.password_status.pending": { en: "Must change password", ar: "يجب تغيير كلمة المرور" },
   "users.password_too_short": {
     en: "Password must be at least 8 characters.",
     ar: "يجب أن تتكون كلمة المرور من 8 أحرف على الأقل.",
@@ -69,6 +102,29 @@ export const dict: Dict = {
   "users.activate": { en: "Activate", ar: "تفعيل" },
   "users.deactivate": { en: "Deactivate", ar: "إيقاف" },
   "users.reset_password": { en: "Reset Password", ar: "إعادة تعيين كلمة المرور" },
+  "users.reset_password.confirm_title": {
+    en: "Reset password",
+    ar: "إعادة تعيين كلمة المرور",
+  },
+  "users.reset_password.confirm_desc": {
+    en: "This generates a new temporary password and immediately invalidates the current one. The account holder will be required to set their own password the next time they sign in.",
+    ar: "سيتم إنشاء كلمة مرور مؤقتة جديدة وإلغاء الحالية فوراً. سيُطلب من صاحب الحساب تعيين كلمة مرور خاصة به عند تسجيل الدخول القادم.",
+  },
+  "users.reset_password.generate": {
+    en: "Generate temporary password",
+    ar: "إنشاء كلمة مرور مؤقتة",
+  },
+  "users.temp_password.created_title": { en: "VINCO USER CREATED", ar: "تم إنشاء مستخدم VINCO" },
+  "users.temp_password.reset_title": { en: "PASSWORD RESET", ar: "تمت إعادة تعيين كلمة المرور" },
+  "users.temp_password.label": { en: "Temporary password", ar: "كلمة المرور المؤقتة" },
+  "users.temp_password.instructions": {
+    en: "Give this temporary password to the employee securely. They must create their own password when they first sign in.",
+    ar: "سلّم كلمة المرور المؤقتة هذه للموظف بشكل آمن. يجب عليه إنشاء كلمة مرور خاصة به عند تسجيل الدخول لأول مرة.",
+  },
+  "users.temp_password.warning": {
+    en: "This password is shown only once and is not saved anywhere. If you close this without copying it, use Reset Password to generate a new one.",
+    ar: "تُعرض كلمة المرور هذه مرة واحدة فقط ولا يتم حفظها. إذا أغلقت هذه النافذة دون نسخها، استخدم إعادة تعيين كلمة المرور لإنشاء واحدة جديدة.",
+  },
   "users.confirm_deactivate": {
     en: "Deactivate this account? They will be signed out immediately and unable to log in until reactivated.",
     ar: "إيقاف هذا الحساب؟ سيتم تسجيل خروجه فوراً ولن يتمكن من الدخول حتى تتم إعادة تفعيله.",
@@ -109,6 +165,10 @@ export const dict: Dict = {
   "acc.summary.no_employee": { en: "No linked employee", ar: "بدون موظف مرتبط" },
   "acc.summary.no_access": { en: "Employees without access", ar: "موظفون بدون صلاحية" },
   "acc.summary.never_logged_in": { en: "Never logged in", ar: "لم يسجلوا الدخول أبداً" },
+  "acc.summary.must_change_password": {
+    en: "Must change password",
+    ar: "يجب تغيير كلمة المرور",
+  },
   "acc.filter.all": { en: "All", ar: "الكل" },
   "acc.filter.active": { en: "Active", ar: "نشط" },
   "acc.filter.inactive": { en: "Inactive", ar: "موقوف" },
@@ -118,6 +178,10 @@ export const dict: Dict = {
   "acc.filter.super_admin": { en: "Super Admin", ar: "مسؤول النظام" },
   "acc.filter.never_logged_in": { en: "Never logged in", ar: "لم يسجل الدخول" },
   "acc.filter.no_employee": { en: "No linked employee", ar: "بدون موظف مرتبط" },
+  "acc.filter.must_change_password": {
+    en: "Must change password",
+    ar: "يجب تغيير كلمة المرور",
+  },
   "acc.search_placeholder": {
     en: "Search by employee, name, or username…",
     ar: "بحث بالموظف أو الاسم أو اسم المستخدم…",
@@ -145,6 +209,19 @@ export const dict: Dict = {
   },
   "detail.auth.account_active": { en: "Account active", ar: "الحساب نشط" },
   "detail.auth.employee_linked": { en: "Employee linked", ar: "الموظف مرتبط" },
+  "detail.auth.must_change_password": {
+    en: "Must change password on next sign-in",
+    ar: "يجب تغيير كلمة المرور عند الدخول القادم",
+  },
+  "detail.auth.password_set_by_user": {
+    en: "Password set by account holder",
+    ar: "حدّد صاحب الحساب كلمة المرور",
+  },
+  "detail.auth.password_changed_at": { en: "Password last changed", ar: "آخر تغيير لكلمة المرور" },
+  "detail.auth.password_never_changed": {
+    en: "Never changed by the account holder",
+    ar: "لم يغيّرها صاحب الحساب أبداً",
+  },
   "detail.auth.password_note": {
     en: "Passwords are never shown or stored in VINCO — only Supabase Auth verifies them.",
     ar: "لا يتم عرض كلمات المرور أو تخزينها في VINCO — يقوم Supabase Auth وحده بالتحقق منها.",
@@ -175,7 +252,10 @@ export const dict: Dict = {
     ar: "غير موثّق لاستقبال إعادة تعيين كلمة المرور — يُعامل كبيانات تواصل فقط وليس كقناة استرداد فعّالة.",
   },
   "detail.activity.title": { en: "Security Activity", ar: "نشاط الأمان" },
-  "detail.activity.empty": { en: "No recorded activity for this account.", ar: "لا يوجد نشاط مسجل لهذا الحساب." },
+  "detail.activity.empty": {
+    en: "No recorded activity for this account.",
+    ar: "لا يوجد نشاط مسجل لهذا الحساب.",
+  },
   "detail.action.view_permissions": { en: "View permissions", ar: "عرض الصلاحيات" },
   "detail.action.link_employee": { en: "Link employee", ar: "ربط موظف" },
   "detail.action.unlink_employee": { en: "Unlink employee", ar: "إلغاء ربط الموظف" },
@@ -232,6 +312,9 @@ export const dict: Dict = {
   "common.save": { en: "Save", ar: "حفظ" },
   "common.cancel": { en: "Cancel", ar: "إلغاء" },
   "common.close": { en: "Close", ar: "إغلاق" },
+  "common.copy": { en: "Copy", ar: "نسخ" },
+  "common.copied": { en: "Copied", ar: "تم النسخ" },
+  "common.done": { en: "Done", ar: "تم" },
   "common.actions": { en: "Actions", ar: "إجراءات" },
   "common.none": { en: "None", ar: "بدون" },
   "common.start_date": { en: "Start date", ar: "تاريخ البداية" },

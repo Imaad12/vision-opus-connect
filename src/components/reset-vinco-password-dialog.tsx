@@ -1,5 +1,4 @@
 import { Loader2 } from "lucide-react";
-import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -9,89 +8,78 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { TemporaryPasswordReveal } from "@/components/temporary-password-reveal";
 import { useI18n } from "@/lib/i18n";
 
 /**
- * Reset-password form shared by `settings.users.tsx` and `employees.tsx`
- * -- same `POST /users/{id}/reset-password` call either page makes, one
- * dialog rather than two copies of the same validation.
+ * Admin password-recovery dialog, shared by `settings.users.tsx` and
+ * `employees.tsx` -- same `POST /users/{id}/reset-password` call either
+ * page makes, one dialog rather than two copies.
+ *
+ * No password input at all (Part B4): the backend always generates a
+ * fresh, cryptographically random temporary password -- there is no
+ * reachable recovery email for a synthetic `@vinco.local` identity, so
+ * this IS the recovery mechanism, not a fallback. Two phases: a confirm
+ * step (nothing has happened yet), then -- once `result` is set by the
+ * parent's mutation succeeding -- the same one-time reveal panel the
+ * create flow uses.
  */
 export function ResetVincoPasswordDialog({
   user,
   onOpenChange,
   busy,
-  onSubmit,
+  result,
+  onGenerate,
+  onDone,
 }: {
-  user: { id: string; display_name: string } | null;
+  user: { id: string; username: string; display_name: string } | null;
   onOpenChange: (open: boolean) => void;
   busy: boolean;
-  onSubmit: (password: string) => void;
+  /** The newly generated temporary password, once the reset succeeded --
+   * `null` while still on the confirm step. */
+  result: string | null;
+  onGenerate: () => void;
+  onDone: () => void;
 }) {
   const { t } = useI18n();
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (password !== confirmPassword) {
-      setFormError(t("users.password_mismatch"));
-      return;
-    }
-    if (password.length < 8) {
-      setFormError(t("users.password_too_short"));
-      return;
-    }
-    onSubmit(password);
-    setPassword("");
-    setConfirmPassword("");
-    setFormError(null);
-  };
 
   return (
-    <Dialog open={user !== null} onOpenChange={onOpenChange}>
+    <Dialog open={user !== null} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {t("users.reset_password")} — {user?.display_name}
+            {result
+              ? t("users.temp_password.reset_title")
+              : `${t("users.reset_password.confirm_title")} — ${user?.display_name}`}
           </DialogTitle>
         </DialogHeader>
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="reset-password-new">{t("users.new_password")}</Label>
-            <Input
-              id="reset-password-new"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
+        {result && user ? (
+          <TemporaryPasswordReveal
+            username={user.username}
+            temporaryPassword={result}
+            onDone={onDone}
+          />
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              {t("users.reset_password.confirm_desc")}
+            </p>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => onOpenChange(false)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button type="button" disabled={busy} className="gap-2" onClick={onGenerate}>
+                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+                {t("users.reset_password.generate")}
+              </Button>
+            </DialogFooter>
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="reset-password-confirm">{t("users.confirm_password")}</Label>
-            <Input
-              id="reset-password-confirm"
-              type="password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("users.reset_password")}
-            </Button>
-          </DialogFooter>
-        </form>
+        )}
       </DialogContent>
     </Dialog>
   );

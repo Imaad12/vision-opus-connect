@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { NoAccess, PageHeader } from "@/components/app-shell";
 import { ResetVincoPasswordDialog } from "@/components/reset-vinco-password-dialog";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,10 +18,16 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { TemporaryPasswordReveal } from "@/components/temporary-password-reveal";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, useI18n, type Lang } from "@/lib/i18n";
-import { ROLE_LABELS, type AppUser, type AppUserRole } from "@/lib/vinco-users";
+import {
+  ROLE_LABELS,
+  type AppUser,
+  type AppUserCreateResult,
+  type AppUserRole,
+} from "@/lib/vinco-users";
 
 /**
  * Native VINCO user management -- creates/edits real accounts (username
@@ -63,6 +70,7 @@ function UsersAccessPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<AppUser | null>(null);
   const [resettingPassword, setResettingPassword] = useState<AppUser | null>(null);
+  const [resetResult, setResetResult] = useState<string | null>(null);
 
   const usersQuery = useQuery({
     queryKey: ["app-users"],
@@ -76,15 +84,13 @@ function UsersAccessPage() {
     mutationFn: (payload: {
       username: string;
       display_name: string;
-      password: string;
       role: AppUserRole;
       is_active: boolean;
-    }) => api.post<AppUser>("/users", payload),
-    onSuccess: () => {
-      toast.success(t("common.saved"));
-      setCreateOpen(false);
-      invalidate();
-    },
+    }) => api.post<AppUserCreateResult>("/users", payload),
+    // Deliberately doesn't close the dialog or toast here -- the child
+    // shows the one-time temporary password first (Part B2) and only
+    // closes itself once the admin clicks Done.
+    onSuccess: () => invalidate(),
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
@@ -110,11 +116,11 @@ function UsersAccessPage() {
   });
 
   const resetPasswordMutation = useMutation({
-    mutationFn: ({ id, password }: { id: string; password: string }) =>
-      api.post<void>(`/users/${id}/reset-password`, { password }),
-    onSuccess: () => {
-      toast.success(t("common.saved"));
-      setResettingPassword(null);
+    mutationFn: (id: string) =>
+      api.post<{ temporary_password: string }>(`/users/${id}/reset-password`, {}),
+    onSuccess: (data) => {
+      setResetResult(data.temporary_password);
+      invalidate();
     },
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
@@ -148,6 +154,7 @@ function UsersAccessPage() {
               <th className="px-3 py-2.5 text-start">{t("users.username")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.role")}</th>
               <th className="px-3 py-2.5 text-start">{t("common.status")}</th>
+              <th className="px-3 py-2.5 text-start">{t("users.password_status")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.last_login")}</th>
               <th className="px-3 py-2.5 text-start">{t("common.actions")}</th>
             </tr>
@@ -155,14 +162,14 @@ function UsersAccessPage() {
           <tbody>
             {usersQuery.isLoading && (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
                   {t("common.loading")}
                 </td>
               </tr>
             )}
             {usersQuery.isError && (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-destructive">
+                <td colSpan={7} className="px-3 py-8 text-center text-destructive">
                   {t("common.load_failed")}: {errorMessage(usersQuery.error)}
                 </td>
               </tr>
@@ -171,7 +178,7 @@ function UsersAccessPage() {
               !usersQuery.isError &&
               (usersQuery.data ?? []).length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
                     {t("common.empty")}
                   </td>
                 </tr>
@@ -198,6 +205,13 @@ function UsersAccessPage() {
                 </td>
                 <td className="px-3 py-2.5">
                   <StatusBadge value={u.is_active ? "ACTIVE" : "INACTIVE"} />
+                </td>
+                <td className="px-3 py-2.5">
+                  <Badge variant={u.must_change_password ? "secondary" : "outline"}>
+                    {u.must_change_password
+                      ? t("users.password_status.pending")
+                      : t("users.password_status.ok")}
+                  </Badge>
                 </td>
                 <td className="px-3 py-2.5 text-muted-foreground">
                   {u.last_login_at ? formatDate(u.last_login_at, lang) : t("common.none")}
@@ -236,7 +250,7 @@ function UsersAccessPage() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         busy={createMutation.isPending}
-        onSubmit={(payload) => createMutation.mutate(payload)}
+        onSubmit={(payload) => createMutation.mutateAsync(payload)}
         lang={lang}
       />
 
@@ -250,11 +264,19 @@ function UsersAccessPage() {
 
       <ResetVincoPasswordDialog
         user={resettingPassword}
-        onOpenChange={(open) => !open && setResettingPassword(null)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setResettingPassword(null);
+            setResetResult(null);
+          }
+        }}
         busy={resetPasswordMutation.isPending}
-        onSubmit={(password) =>
-          resettingPassword && resetPasswordMutation.mutate({ id: resettingPassword.id, password })
-        }
+        result={resetResult}
+        onGenerate={() => resettingPassword && resetPasswordMutation.mutate(resettingPassword.id)}
+        onDone={() => {
+          setResettingPassword(null);
+          setResetResult(null);
+        }}
       />
     </>
   );
@@ -270,46 +292,39 @@ function CreateUserDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   busy: boolean;
+  /** No `password` field: the backend always generates a fresh temporary
+   * one -- see user_service.create_user. Returns the created user
+   * (including the one-time `temporary_password`) so this dialog can
+   * show it before closing (Part B2); a rejected promise (the parent's
+   * mutation already toasts the error) just leaves the form as-is. */
   onSubmit: (payload: {
     username: string;
     display_name: string;
-    password: string;
     role: AppUserRole;
     is_active: boolean;
-  }) => void;
+  }) => Promise<AppUserCreateResult>;
   lang: Lang;
 }) {
   const { t } = useI18n();
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [role, setRole] = useState<AppUserRole>("employee");
   const [active, setActive] = useState(true);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [created, setCreated] = useState<AppUserCreateResult | null>(null);
 
   const reset = () => {
     setUsername("");
     setDisplayName("");
-    setPassword("");
-    setConfirmPassword("");
     setRole("employee");
     setActive(true);
-    setFormError(null);
+    setCreated(null);
   };
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (password !== confirmPassword) {
-      setFormError(t("users.password_mismatch"));
-      return;
-    }
-    if (password.length < 8) {
-      setFormError(t("users.password_too_short"));
-      return;
-    }
-    setFormError(null);
-    onSubmit({ username, display_name: displayName, password, role, is_active: active });
+    onSubmit({ username, display_name: displayName, role, is_active: active })
+      .then((user) => setCreated(user))
+      .catch(() => undefined); // the parent's mutation already surfaced the error via toast
   };
 
   return (
@@ -322,80 +337,74 @@ function CreateUserDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("users.add")}</DialogTitle>
+          <DialogTitle>
+            {created ? t("users.temp_password.created_title") : t("users.add")}
+          </DialogTitle>
         </DialogHeader>
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-user-display-name">{t("users.display_name")}</Label>
-            <Input
-              id="new-user-display-name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-user-username">{t("users.username")}</Label>
-            <Input
-              id="new-user-username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="off"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-user-password">{t("auth.password")}</Label>
-            <Input
-              id="new-user-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-user-confirm-password">{t("users.confirm_password")}</Label>
-            <Input
-              id="new-user-confirm-password"
-              type="password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-user-role">{t("users.role")}</Label>
-            <select
-              id="new-user-role"
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-              value={role}
-              onChange={(e) => setRole(e.target.value as AppUserRole)}
-            >
-              {(Object.keys(ROLE_LABELS) as AppUserRole[]).map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_LABELS[r][lang]}
-                </option>
-              ))}
-            </select>
-          </div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-            {t("common.status")}: {active ? t("users.activate") : t("users.deactivate")}
-          </label>
-          {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("users.add")}
-            </Button>
-          </DialogFooter>
-        </form>
+        {created ? (
+          <TemporaryPasswordReveal
+            username={created.username}
+            temporaryPassword={created.temporary_password}
+            onDone={() => {
+              reset();
+              onOpenChange(false);
+            }}
+          />
+        ) : (
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-user-display-name">{t("users.display_name")}</Label>
+              <Input
+                id="new-user-display-name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-user-username">{t("users.username")}</Label>
+              <Input
+                id="new-user-username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-user-role">{t("users.role")}</Label>
+              <select
+                id="new-user-role"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={role}
+                onChange={(e) => setRole(e.target.value as AppUserRole)}
+              >
+                {(Object.keys(ROLE_LABELS) as AppUserRole[]).map((r) => (
+                  <option key={r} value={r}>
+                    {ROLE_LABELS[r][lang]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={active}
+                onChange={(e) => setActive(e.target.checked)}
+              />
+              {t("common.status")}: {active ? t("users.activate") : t("users.deactivate")}
+            </label>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button type="submit" disabled={busy} className="gap-2">
+                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+                {t("users.add")}
+              </Button>
+            </DialogFooter>
+          </form>
+        )}
       </DialogContent>
     </Dialog>
   );

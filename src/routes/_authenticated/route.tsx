@@ -1,6 +1,7 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
+import { ForcedPasswordChangeGate } from "@/components/forced-password-change-gate";
 import { meQueryOptions } from "@/hooks/use-auth";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -26,8 +27,10 @@ export const Route = createFileRoute("/_authenticated")({
     void context.queryClient.ensureQueryData(meQueryOptions(context.user.id));
   },
   component: () => (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <ForcedPasswordChangeGate>
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </ForcedPasswordChangeGate>
   ),
 });

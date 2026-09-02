@@ -8,20 +8,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const signInWithPassword = vi.fn();
+const updateUser = vi.fn();
 const apiPost = vi.fn();
 
 vi.mock("@/integrations/supabase/client", () => ({
-  supabase: { auth: { signInWithPassword } },
+  supabase: { auth: { signInWithPassword, updateUser } },
 }));
 vi.mock("@/lib/api", () => ({
   api: { post: apiPost },
 }));
 
-const { signInWithUsernamePassword, usernameToEmail, USERNAME_EMAIL_DOMAIN } =
+const { signInWithUsernamePassword, usernameToEmail, USERNAME_EMAIL_DOMAIN, changeOwnPassword } =
   await import("./vinco-auth");
 
 beforeEach(() => {
   signInWithPassword.mockReset();
+  updateUser.mockReset();
   apiPost.mockReset().mockResolvedValue(undefined);
 });
 
@@ -111,5 +113,103 @@ describe("signInWithUsernamePassword", () => {
     apiPost.mockRejectedValue(new Error("backend unreachable"));
     const result = await signInWithUsernamePassword("jdoe", "correct-horse-battery");
     expect(result).toEqual({ ok: true });
+  });
+});
+
+describe("changeOwnPassword", () => {
+  it("rejects a mismatched confirmation without calling Supabase at all", async () => {
+    const result = await changeOwnPassword("jdoe", "current-pw", "new-password-1", "different");
+    expect(result).toEqual({ ok: false, kind: "mismatch" });
+    expect(signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects a too-short new password without calling Supabase at all", async () => {
+    const result = await changeOwnPassword("jdoe", "current-pw", "short", "short");
+    expect(result).toEqual({ ok: false, kind: "too_short" });
+    expect(signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("re-verifies the current password against the derived synthetic email", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    updateUser.mockResolvedValue({ error: null });
+    await changeOwnPassword("jdoe", "current-pw", "new-password-1", "new-password-1");
+    expect(signInWithPassword).toHaveBeenCalledWith({
+      email: "jdoe@vinco.local",
+      password: "current-pw",
+    });
+  });
+
+  it("fails with wrong_current when the current password is incorrect, and never calls updateUser", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthApiError", status: 400, message: "Invalid login credentials" },
+    });
+    const result = await changeOwnPassword(
+      "jdoe",
+      "wrong-current",
+      "new-password-1",
+      "new-password-1",
+    );
+    expect(result).toEqual({ ok: false, kind: "wrong_current" });
+    expect(updateUser).not.toHaveBeenCalled();
+  });
+
+  it("classifies a network failure while re-verifying distinctly from a wrong password", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthRetryableFetchError", message: "fetch failed" },
+    });
+    const result = await changeOwnPassword(
+      "jdoe",
+      "current-pw",
+      "new-password-1",
+      "new-password-1",
+    );
+    expect(result).toEqual({ ok: false, kind: "network" });
+  });
+
+  it("changes the password via Supabase's own updateUser once re-verified", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    updateUser.mockResolvedValue({ error: null });
+    await changeOwnPassword("jdoe", "current-pw", "new-password-1", "new-password-1");
+    expect(updateUser).toHaveBeenCalledWith({ password: "new-password-1" });
+  });
+
+  it("reports failure if Supabase's updateUser itself fails", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    updateUser.mockResolvedValue({ error: { name: "AuthApiError", message: "weak password" } });
+    const result = await changeOwnPassword(
+      "jdoe",
+      "current-pw",
+      "new-password-1",
+      "new-password-1",
+    );
+    expect(result).toEqual({ ok: false, kind: "unknown" });
+  });
+
+  it("tells the backend to clear must_change_password on success", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    updateUser.mockResolvedValue({ error: null });
+    await changeOwnPassword("jdoe", "current-pw", "new-password-1", "new-password-1");
+    expect(apiPost).toHaveBeenCalledWith("/users/me/password-changed", {});
+  });
+
+  it("still reports success if only the backend bookkeeping call fails", async () => {
+    signInWithPassword.mockResolvedValue({ error: null });
+    updateUser.mockResolvedValue({ error: null });
+    apiPost.mockRejectedValue(new Error("backend unreachable"));
+    const result = await changeOwnPassword(
+      "jdoe",
+      "current-pw",
+      "new-password-1",
+      "new-password-1",
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("never calls the backend bookkeeping endpoint when the password change itself failed", async () => {
+    signInWithPassword.mockResolvedValue({
+      error: { name: "AuthApiError", status: 400, message: "Invalid login credentials" },
+    });
+    await changeOwnPassword("jdoe", "wrong-current", "new-password-1", "new-password-1");
+    expect(apiPost).not.toHaveBeenCalled();
   });
 });

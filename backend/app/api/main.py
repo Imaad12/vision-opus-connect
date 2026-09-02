@@ -9,10 +9,14 @@ PySide6 UI does. See API_ARCHITECTURE.md for the full design.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 
+from app.api.auth import SupabaseUnavailableError
 from app.api.logging_middleware import AccessLogMiddleware
 from app.api.routers import (
     clients,
@@ -71,6 +75,52 @@ def create_app() -> FastAPI:
         # without that try/except must still fail as a client error, never
         # as an unhandled 500.
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(SupabaseUnavailableError)
+    def _handle_supabase_unavailable(_request: Request, exc: SupabaseUnavailableError) -> JSONResponse:
+        # Global, not per-route: every SupabaseAdmin-backed route (create
+        # user, reset password, role/scope/employee-link changes) can hit
+        # this the same way -- Supabase itself unreachable (DNS/TLS/
+        # timeout/connection refused), not a validation problem. 503
+        # (not 500): the request was well-formed and the caller was
+        # authorized, but a required upstream dependency didn't respond,
+        # which is the textbook case for "Service Unavailable" and tells
+        # the client this is worth retrying rather than a bug to report.
+        logging.getLogger("app.api").warning("Supabase unavailable: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "The identity provider is temporarily unavailable. Please try again shortly."},
+        )
+
+    @app.exception_handler(IntegrityError)
+    def _handle_integrity_error(_request: Request, exc: IntegrityError) -> JSONResponse:
+        # Belt-and-braces for the theoretical race a service-layer
+        # existence/uniqueness check can't fully close (two concurrent
+        # requests both pass the pre-check, then only the database's own
+        # unique constraint -- app_users.username, app_users.employee_id --
+        # catches the second one). 409 (Conflict), not 500: the request
+        # was well-formed, but it collided with another one that got
+        # there first. Never echoes the raw database error (could name
+        # internal table/column details) -- just says what happened.
+        logging.getLogger("app.api").warning("Integrity error: %s", exc)
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "This conflicts with an existing record (e.g. a duplicate username or link)."},
+        )
+
+    @app.exception_handler(Exception)
+    def _handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        # Last resort: anything not already caught by a route's own
+        # try/except or the handlers above. Logged server-side with the
+        # real exception (never in the response body) so an operator can
+        # diagnose it from Render's logs, while the client only ever sees
+        # a generic message -- no stack trace, no internal detail, and
+        # certainly never a secret (service-role key, tokens, passwords),
+        # regardless of what the underlying exception's message contained.
+        logging.getLogger("app.api").exception(
+            "Unhandled exception on %s %s", request.method, request.url.path
+        )
+        return JSONResponse(status_code=500, content={"detail": "An unexpected error occurred."})
 
     app.include_router(health.router)
     app.include_router(company.router)

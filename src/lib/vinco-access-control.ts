@@ -25,6 +25,7 @@ export type UserSummaryCounts = {
   usersWithoutEmployee: number;
   employeesWithoutAccess: number;
   neverLoggedIn: number;
+  mustChangePassword: number;
 };
 
 export function computeUserSummary(
@@ -43,11 +44,13 @@ export function computeUserSummary(
   let active = 0;
   let usersWithoutEmployee = 0;
   let neverLoggedIn = 0;
+  let mustChangePassword = 0;
   for (const u of users) {
     byRole[u.role]++;
     if (u.is_active) active++;
     if (u.employee_id == null) usersWithoutEmployee++;
     if (!u.last_login_at) neverLoggedIn++;
+    if (u.must_change_password) mustChangePassword++;
   }
   return {
     total: users.length,
@@ -57,6 +60,7 @@ export function computeUserSummary(
     usersWithoutEmployee,
     employeesWithoutAccess: employees.filter((e) => !linkedEmployeeIds.has(e.id)).length,
     neverLoggedIn,
+    mustChangePassword,
   };
 }
 
@@ -69,7 +73,8 @@ export type UserDirectoryFilter =
   | "super_user"
   | "super_admin"
   | "never_logged_in"
-  | "no_employee";
+  | "no_employee"
+  | "must_change_password";
 
 /** `employeeNameById` lets search match on the linked employee's name,
  * not just the account's own username/display name. */
@@ -101,6 +106,9 @@ export function filterAndSearchUsers(
         break;
       case "no_employee":
         if (u.employee_id != null) return false;
+        break;
+      case "must_change_password":
+        if (!u.must_change_password) return false;
         break;
       case "all":
         break;

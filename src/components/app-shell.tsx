@@ -9,6 +9,7 @@ import {
   FileStack,
   FileText,
   Handshake,
+  KeyRound,
   LayoutDashboard,
   Languages,
   LogOut,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { ChangePasswordDialog } from "@/components/change-password-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -178,6 +180,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   const handleSignOut = async () => {
     await queryClient.cancelQueries();
@@ -303,6 +306,15 @@ export function AppShell({ children }: { children: ReactNode }) {
             </AvatarFallback>
           </Avatar>
 
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setChangePasswordOpen(true)}
+            title={t("users.change_password.title")}
+          >
+            <KeyRound className="size-4" />
+          </Button>
+
           <Button variant="ghost" size="icon" onClick={handleSignOut} title={t("auth.signout")}>
             <LogOut className="size-4" />
           </Button>
@@ -310,6 +322,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <main className="min-w-0 flex-1 p-4 lg:p-6">{children}</main>
       </div>
+
+      <ChangePasswordDialog open={changePasswordOpen} onOpenChange={setChangePasswordOpen} />
     </div>
   );
 }

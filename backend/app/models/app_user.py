@@ -37,6 +37,16 @@ class AppUser(Base, TimestampMixin):
     (e.g. a system/admin account) and not every employee needs one; the
     unique constraint enforces at most one VINCO login per employee, so
     "does this employee have a VINCO login" is always a single answer.
+
+    `must_change_password` is true whenever the current password was set
+    by an admin (creation, or an admin-triggered reset) rather than
+    chosen by the account holder -- the login flow forces a
+    password-set screen while this is true (see
+    src/routes/_authenticated/route.tsx), and clears it the moment the
+    account holder sets their own password (first-login or self-service
+    change). `password_changed_at` mirrors that: only ever set by the
+    account holder's own change, never by an admin action, so it stays a
+    genuine "the human last changed this" signal.
     """
 
     __tablename__ = "app_users"
@@ -50,6 +60,8 @@ class AppUser(Base, TimestampMixin):
     employee_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("employees.id"), nullable=True, unique=True
     )
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     def __repr__(self) -> str:
         return f"AppUser(id={self.id!r}, username={self.username!r}, role={self.role!r})"

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
-from app.api.auth import AuthenticatedUser, SupabaseAdminError
+from app.api.auth import AuthenticatedUser, SupabaseAdminError, SupabaseUnavailableError
 from app.api.deps import get_current_user, get_db, get_supabase_admin, get_supabase_auth
 from app.api.main import create_app
 from app.database.base import Base
@@ -44,8 +44,11 @@ class _FakeSupabaseAdmin:
         self.passwords_reset: list[tuple[str, str]] = []
         self._next_id = 1
         self.reject_role: str | None = None
+        self.unavailable: bool = False
 
     def create_auth_user(self, *, email: str, password: str, full_name: str) -> str:
+        if self.unavailable:
+            raise SupabaseUnavailableError("simulated network failure reaching Supabase")
         user_id = f"fake-user-{self._next_id}"
         self._next_id += 1
         self.created.append({"id": user_id, "email": email, "password": password, "full_name": full_name})
@@ -113,10 +116,13 @@ def api_client(engine: Engine, fake_admin: _FakeSupabaseAdmin):
 
 
 def _create_payload(**overrides) -> dict:
+    """No `password` -- the backend always generates a fresh temporary
+    one (see user_service.create_user); a request that still sends one
+    would simply have it ignored by AppUserCreate (extra fields aren't
+    part of that schema)."""
     payload = {
         "username": "jdoe",
         "display_name": "Jane Doe",
-        "password": "correct-horse-battery",
         "role": "employee",
         "is_active": True,
     }
@@ -162,13 +168,41 @@ def test_create_user_success(api_client: TestClient, fake_admin: _FakeSupabaseAd
     assert len(fake_admin.created) == 1
     assert fake_admin.created[0]["email"] == "jdoe@vinco.local"
     assert fake_admin.roles_set == [(body["id"], "employee")]
-    # Never echoed back
-    assert "password" not in body
 
 
-def test_create_user_response_never_contains_password(api_client: TestClient):
+def test_create_user_returns_a_temporary_password_exactly_once(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """The one and only place `temporary_password` is ever returned --
+    the immediate create response, shown to the admin once (the "VINCO
+    USER CREATED" dialog). It must be a real, non-trivial secret (not
+    e.g. an empty string) and must match exactly what was actually sent
+    to Supabase Auth."""
     response = api_client.post("/users", json=_create_payload())
-    assert "correct-horse-battery" not in response.text
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert isinstance(body["temporary_password"], str)
+    assert len(body["temporary_password"]) >= 12
+    assert fake_admin.created[0]["password"] == body["temporary_password"]
+
+
+def test_create_user_sets_must_change_password(api_client: TestClient):
+    response = api_client.post("/users", json=_create_payload())
+    assert response.status_code == 201, response.text
+    assert response.json()["must_change_password"] is True
+
+
+def test_create_user_two_calls_generate_different_temporary_passwords(api_client: TestClient):
+    first = api_client.post("/users", json=_create_payload()).json()
+    second = api_client.post("/users", json=_create_payload(username="asmith")).json()
+    assert first["temporary_password"] != second["temporary_password"]
+
+
+def test_temporary_password_is_never_returned_by_list_or_get(api_client: TestClient):
+    created = api_client.post("/users", json=_create_payload()).json()
+    listed = api_client.get("/users").json()
+    mine = next(u for u in listed if u["id"] == created["id"])
+    assert "temporary_password" not in mine
 
 
 def test_create_user_duplicate_username_is_422(api_client: TestClient):
@@ -245,18 +279,33 @@ def test_update_role_to_not_yet_migrated_role_is_422(api_client: TestClient, fak
     assert "app_role" in response.json()["detail"]
 
 
-def test_reset_password(api_client: TestClient, fake_admin: _FakeSupabaseAdmin):
+def test_reset_password_generates_and_returns_a_new_temporary_password(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """No request body: VINCO's actual recovery mechanism is an
+    admin-generated temporary password, never an admin-invented one (see
+    user_service.reset_password's docstring on why -- no reachable
+    recovery email exists for a synthetic @vinco.local identity)."""
     created = api_client.post("/users", json=_create_payload()).json()
 
-    response = api_client.post(f"/users/{created['id']}/reset-password", json={"password": "new-password-99"})
-    assert response.status_code == 204
-    assert (created["id"], "new-password-99") in fake_admin.passwords_reset
+    response = api_client.post(f"/users/{created['id']}/reset-password")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body["temporary_password"], str)
+    assert len(body["temporary_password"]) >= 12
+    assert (created["id"], body["temporary_password"]) in fake_admin.passwords_reset
+    # Distinct from the password generated at creation time.
+    assert body["temporary_password"] != created["temporary_password"]
 
 
-def test_reset_password_response_never_contains_password(api_client: TestClient):
+def test_reset_password_sets_must_change_password(api_client: TestClient):
     created = api_client.post("/users", json=_create_payload()).json()
-    response = api_client.post(f"/users/{created['id']}/reset-password", json={"password": "super-secret-value"})
-    assert "super-secret-value" not in response.text
+    # Simulate the account holder already having set their own password.
+    api_client.post(f"/users/{created['id']}/reset-password")
+
+    listed = api_client.get("/users").json()
+    mine = next(u for u in listed if u["id"] == created["id"])
+    assert mine["must_change_password"] is True
 
 
 # ---- Permission enforcement (Phase 17's explicit security matrix) ----
@@ -572,3 +621,169 @@ def test_record_login_requires_a_bearer_token(engine: Engine, fake_admin: _FakeS
         response = client.post("/users/me/record-login")
 
     assert response.status_code == 401
+
+
+# ---- Self-service: GET /users/me + POST /users/me/password-changed ----
+
+
+def test_get_own_user_returns_own_row(api_client: TestClient, engine: Engine):
+    _seed_app_user(engine, id="admin-caller", username="whoami")
+
+    response = api_client.get("/users/me")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == "admin-caller"
+    assert body["username"] == "whoami"
+    assert body["must_change_password"] is True
+
+
+def test_get_own_user_404_when_no_native_account(api_client: TestClient):
+    # The fixture's default caller ("admin-caller") has no app_users row
+    # unless a test seeds one -- the frontend should treat this exactly
+    # like must_change_password: false (no forced gate applies).
+    response = api_client.get("/users/me")
+    assert response.status_code == 404
+
+
+def test_get_own_user_requires_no_special_permission(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    """A plain Employee with no admin.* grant must still be able to check
+    their own must_change_password status -- unlike GET /users (the full
+    list), which is correctly gated behind admin.users."""
+    _seed_app_user(engine, id="plain-caller", username="plain")
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def _get_db_override() -> Generator[Session, None, None]:
+        session = factory()
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _get_db_override
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        id="plain-caller", email="plain@example.com", token="fake-token", claims={}
+    )
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.get("/users/me")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "plain-caller"
+
+
+def test_get_own_user_requires_a_bearer_token(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: iter([factory()])
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.get("/users/me")
+
+    assert response.status_code == 401
+
+
+def test_mark_own_password_changed_clears_flag_and_stamps_timestamp(
+    api_client: TestClient, engine: Engine
+):
+    _seed_app_user(engine, id="admin-caller", username="whoami")
+    assert api_client.get("/users/me").json()["must_change_password"] is True
+
+    response = api_client.post("/users/me/password-changed")
+    assert response.status_code == 204
+
+    after = api_client.get("/users/me").json()
+    assert after["must_change_password"] is False
+
+
+def test_mark_own_password_changed_is_a_noop_when_caller_has_no_app_user_row(api_client: TestClient):
+    response = api_client.post("/users/me/password-changed")
+    assert response.status_code == 204
+
+
+def test_mark_own_password_changed_requires_no_special_permission(
+    engine: Engine, fake_admin: _FakeSupabaseAdmin
+):
+    _seed_app_user(engine, id="plain-caller", username="plain")
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def _get_db_override() -> Generator[Session, None, None]:
+        session = factory()
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _get_db_override
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        id="plain-caller", email="plain@example.com", token="fake-token", claims={}
+    )
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.post("/users/me/password-changed")
+
+    assert response.status_code == 204
+
+
+def test_mark_own_password_changed_never_affects_another_user(api_client: TestClient, engine: Engine):
+    """No user_id anywhere in this route -- an Employee cannot use it to
+    clear (or otherwise touch) another account's must_change_password."""
+    _seed_app_user(engine, id="admin-caller", username="whoami")
+    other = api_client.post("/users", json=_create_payload(username="other")).json()
+    assert other["must_change_password"] is True
+
+    response = api_client.post("/users/me/password-changed")
+    assert response.status_code == 204
+
+    listed = api_client.get("/users").json()
+    other_after = next(u for u in listed if u["id"] == other["id"])
+    assert other_after["must_change_password"] is True
+
+
+def test_mark_own_password_changed_requires_a_bearer_token(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: iter([factory()])
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.post("/users/me/password-changed")
+
+    assert response.status_code == 401
+
+
+# ---- Structured error responses (Part A2's status-code table) ----
+
+
+def test_create_user_returns_503_when_supabase_is_unreachable(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """Distinct from a validation failure (422): Supabase itself never
+    responded at all -- DNS/TLS/timeout/connection-refused -- which is
+    not the caller's fault and is worth retrying, so it must not be
+    conflated with a 422 the caller needs to fix."""
+    fake_admin.unavailable = True
+    response = api_client.post("/users", json=_create_payload())
+    assert response.status_code == 503
+    # Never leaks the raw exception text/internal detail.
+    assert "simulated network failure" not in response.text
+
+
+def test_create_user_503_response_is_still_valid_json_with_no_stack_trace(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    fake_admin.unavailable = True
+    response = api_client.post("/users", json=_create_payload())
+    body = response.json()
+    assert "detail" in body
+    assert "Traceback" not in response.text

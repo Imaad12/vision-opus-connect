@@ -23,6 +23,31 @@ export type AppUser = {
   updated_at: string;
   last_login_at: string | null;
   employee_id: number | null;
+  /** True whenever the current password was set by an admin (creation or
+   * an admin-triggered reset) rather than chosen by the account holder --
+   * see backend/app/models/app_user.py's docstring. Drives the forced
+   * "SET YOUR PASSWORD" gate (src/routes/_authenticated/route.tsx). */
+  must_change_password: boolean;
+  /** Set only when the account holder changes their own password
+   * (first-login or self-service) -- never by an admin action. */
+  password_changed_at: string | null;
+};
+
+/** Response shape for `POST /users` -- `AppUser` plus the one-time
+ * temporary password, present ONLY in this immediate response (see
+ * backend/app/api/schemas_users.py's `AppUserCreateResult`). */
+export type AppUserCreateResult = AppUser & { temporary_password: string };
+
+/** Response shape for `GET /users/me` -- deliberately narrower than
+ * `AppUser` (see backend/app/api/schemas_users.py's `AppUserSelfRead`):
+ * reachable by any authenticated user, not just `admin.users` holders,
+ * to answer exactly "must I change my password" (the forced first-login
+ * gate, see forced-password-change-gate.tsx). */
+export type AppUserSelf = {
+  id: string;
+  username: string;
+  display_name: string;
+  must_change_password: boolean;
 };
 
 export const ROLE_LABELS: Record<AppUserRole, { en: string; ar: string }> = {

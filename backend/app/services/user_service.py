@@ -12,6 +12,7 @@ letting `app_users.role` drift into being merely cosmetic.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -32,7 +33,24 @@ __all__ = [
     "update_employee_link",
     "reset_password",
     "record_login",
+    "generate_temporary_password",
+    "mark_password_changed",
 ]
+
+
+def generate_temporary_password() -> str:
+    """A fresh, cryptographically random temporary password for a newly
+    created or admin-reset VINCO login.
+
+    `secrets.token_urlsafe(12)` gives ~96 bits of entropy from Python's
+    CSPRNG (`os.urandom` under the hood) -- never derived from anything
+    guessable (username, display name, timestamp), and never reused.
+    Callers (`create_user`, `reset_password`) hand this straight to
+    Supabase Auth and return it to the route for a one-time response; it
+    is never stored (there is no password column on `AppUser`), logged,
+    or written to `audit_logs`.
+    """
+    return secrets.token_urlsafe(12)
 
 #: The one role that can create/edit users and change roles by default
 #: (see supabase/migrations/20260818103534_*.sql's DEFAULT ROLE
@@ -140,11 +158,20 @@ def create_user(
     *,
     username: str,
     display_name: str,
-    password: str,
     role: str,
     is_active: bool,
     employee_id: int | None = None,
-) -> AppUser:
+) -> tuple[AppUser, str]:
+    """Creates the Supabase Auth identity and `app_users` row, returning
+    `(app_user, temporary_password)`. The caller (the `POST /users`
+    route) must return `temporary_password` to the admin exactly once
+    (see `AppUserCreateResult`) and never persist, log, or audit-log it --
+    this function doesn't either: it's a local variable that goes out of
+    scope the moment the route responds.
+
+    `must_change_password` is left at its column default (`True`, see
+    `AppUser`) -- a freshly created login always starts with an
+    admin-generated password the account holder hasn't chosen yet."""
     existing = session.execute(select(AppUser).where(AppUser.username == username)).scalar_one_or_none()
     if existing is not None:
         raise ValidationError(f"Username {username!r} is already taken.")
@@ -160,9 +187,11 @@ def create_user(
     if employee_id is not None:
         _validate_employee_link(session, employee_id)
 
+    temporary_password = generate_temporary_password()
+
     try:
         user_id = admin.create_auth_user(
-            email=_username_email(username), password=password, full_name=display_name
+            email=_username_email(username), password=temporary_password, full_name=display_name
         )
         admin.set_user_role(user_id, supabase_role)
         if not is_active:
@@ -180,7 +209,7 @@ def create_user(
     )
     session.add(app_user)
     session.flush()
-    return app_user
+    return app_user, temporary_password
 
 
 def update_user(
@@ -252,8 +281,46 @@ def update_employee_link(session: Session, user: AppUser, *, employee_id: int | 
     return user
 
 
-def reset_password(user: AppUser, admin: SupabaseAdmin, *, password: str) -> None:
+def reset_password(session: Session, user: AppUser, admin: SupabaseAdmin) -> str:
+    """Admin-triggered recovery: generates a fresh temporary password,
+    sets it on the Supabase Auth identity, and forces the account back
+    into "must change password" -- the same state a brand-new account
+    starts in. This is VINCO's actual password-recovery mechanism (see
+    `AppUser`'s docstring on why: usernames use a synthetic, unreachable
+    `@vinco.local` email, so a normal "forgot password" email link is not
+    viable). Returns the new password for the caller to show the admin
+    exactly once, same non-persistence guarantee as `create_user`.
+
+    Does not touch `password_changed_at` -- that field means "the account
+    holder last changed this themselves" (see `mark_password_changed`),
+    and an admin reset is deliberately not that."""
+    temporary_password = generate_temporary_password()
     try:
-        admin.set_password(user.id, password)
+        admin.set_password(user.id, temporary_password)
     except SupabaseAdminError as exc:
         raise ValidationError(str(exc)) from exc
+    user.must_change_password = True
+    session.flush()
+    return temporary_password
+
+
+def mark_password_changed(session: Session, *, user_id: str) -> AppUser | None:
+    """Self-service bookkeeping only -- called after the caller's own
+    Supabase Auth password change already succeeded (see
+    `POST /users/me/password-changed`), never as a way to change the
+    password itself. Clears `must_change_password` and stamps
+    `password_changed_at` so it stays a genuine "the human last changed
+    this" signal, distinct from an admin-triggered `reset_password`.
+
+    Returns `None` (a no-op, not an error) if the caller has no native
+    VINCO account -- mirrors `record_login`'s handling of the same case,
+    since both are called unconditionally as part of an authenticated
+    caller's own session lifecycle, not gated on the row already being
+    known to exist."""
+    user = session.get(AppUser, user_id)
+    if user is None:
+        return None
+    user.must_change_password = False
+    user.password_changed_at = datetime.now(timezone.utc)
+    session.flush()
+    return user

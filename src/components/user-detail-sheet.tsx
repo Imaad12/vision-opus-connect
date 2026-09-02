@@ -117,6 +117,11 @@ export function UserDetailSheet({
             {user.is_active ? t("acc.filter.active") : t("acc.filter.inactive")}
           </Badge>
           <Badge variant="outline">{ROLE_LABELS[user.role][lang]}</Badge>
+          <Badge variant={user.must_change_password ? "secondary" : "outline"}>
+            {user.must_change_password
+              ? t("users.password_status.pending")
+              : t("users.password_status.ok")}
+          </Badge>
         </div>
 
         <div className="mt-3 flex flex-wrap gap-2">
@@ -216,6 +221,20 @@ export function UserDetailSheet({
             {!supabaseIdentityExists && (
               <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive">
                 {t("detail.auth.supabase_identity_missing")}
+              </p>
+            )}
+            <DetailRow label={t("detail.auth.password_changed_at")}>
+              {user.password_changed_at
+                ? formatDate(user.password_changed_at, lang)
+                : t("detail.auth.password_never_changed")}
+            </DetailRow>
+            {user.must_change_password ? (
+              <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+                {t("detail.auth.must_change_password")}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {t("detail.auth.password_set_by_user")}
               </p>
             )}
             <p className="text-xs text-muted-foreground">{t("detail.auth.password_note")}</p>

@@ -23,6 +23,7 @@ import type { AuthError } from "@supabase/supabase-js";
 
 import { supabase } from "@/integrations/supabase/client";
 import { api } from "@/lib/api";
+import { validateNewUserPassword } from "@/lib/vinco-user-provisioning";
 
 export const USERNAME_EMAIL_DOMAIN = "vinco.local";
 
@@ -90,6 +91,65 @@ export async function signInWithUsernamePassword(
   // native app_users row, and any failure here is swallowed rather than
   // surfaced -- recording a timestamp is not worth interrupting login.
   void api.post("/users/me/record-login", {}).catch(() => undefined);
+
+  return { ok: true };
+}
+
+export type ChangeOwnPasswordFailureKind =
+  "mismatch" | "too_short" | "wrong_current" | "network" | "unknown";
+
+export type ChangeOwnPasswordResult =
+  { ok: true } | { ok: false; kind: ChangeOwnPasswordFailureKind };
+
+/**
+ * Shared by both the forced first-login "SET YOUR PASSWORD" gate (Part
+ * B3) and logged-in users' self-service "Change Password" (Part B5) --
+ * same three-step flow either way: verify the caller actually knows
+ * their *current* password (a fresh `signInWithPassword`, not trusting
+ * whatever the currently-cached session claims), change it via
+ * Supabase's own `updateUser`, then tell the backend so it can clear
+ * `must_change_password`/stamp `password_changed_at` (`user_service.
+ * mark_password_changed`) -- never a password itself in that last call.
+ *
+ * Never touches another account: `username` must be the CALLER's own
+ * (both call sites pass it from their own `GET /users/me` response, not
+ * a value the caller can otherwise choose), and the backend bookkeeping
+ * call (`POST /users/me/password-changed`) has no user id in its path
+ * either -- it only ever affects whichever token made the request.
+ */
+export async function changeOwnPassword(
+  username: string,
+  currentPassword: string,
+  newPassword: string,
+  confirmPassword: string,
+): Promise<ChangeOwnPasswordResult> {
+  const validation = validateNewUserPassword(newPassword, confirmPassword);
+  if (!validation.ok) return { ok: false, kind: validation.kind };
+
+  const email = usernameToEmail(username);
+
+  const { error: verifyError } = await supabase.auth.signInWithPassword({
+    email,
+    password: currentPassword,
+  });
+  if (verifyError) {
+    return {
+      ok: false,
+      kind: classifySignInError(verifyError) === "network" ? "network" : "wrong_current",
+    };
+  }
+
+  const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+  if (updateError) return { ok: false, kind: "unknown" };
+
+  // Best-effort bookkeeping, same rationale as record_login above: the
+  // password itself is already changed and the account holder can
+  // already sign in with it, so a failure here (still writing
+  // must_change_password/password_changed_at) must not be reported to
+  // the caller as if the password change itself failed -- worst case,
+  // the forced-change gate reappears once more next sign-in, not a
+  // security or data-loss issue.
+  void api.post("/users/me/password-changed", {}).catch(() => undefined);
 
   return { ok: true };
 }

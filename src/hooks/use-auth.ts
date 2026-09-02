@@ -2,6 +2,8 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
+import { ApiError, api } from "@/lib/api";
+import type { AppUserSelf } from "@/lib/vinco-users";
 
 export type AppRole =
   | "super_admin"
@@ -96,6 +98,37 @@ export function meQueryOptions(userId: string | null) {
       };
     },
   });
+}
+
+/**
+ * Query definition for `GET /users/me` -- the caller's own native VINCO
+ * login row, if any (see `AppUserSelf`). Shared, so the forced
+ * first-login gate (`forced-password-change-gate.tsx`) and the
+ * self-service Change Password dialog resolve the exact same cache
+ * entry rather than issuing two independent fetches, and so a
+ * successful password change (either flow) only needs to invalidate
+ * this one key.
+ */
+export function ownAppUserQueryOptions() {
+  return queryOptions({
+    queryKey: ["users-me"],
+    queryFn: async (): Promise<AppUserSelf | null> => {
+      try {
+        return await api.get<AppUserSelf>("/users/me");
+      } catch (e) {
+        // No native VINCO login (e.g. a legacy/Google-linked account) --
+        // not an error condition for anything that reads this.
+        if (e instanceof ApiError && e.status === 404) return null;
+        throw e;
+      }
+    },
+    staleTime: Infinity,
+    retry: 1,
+  });
+}
+
+export function useOwnAppUser() {
+  return useQuery(ownAppUserQueryOptions());
 }
 
 export function useMe() {

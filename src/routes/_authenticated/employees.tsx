@@ -8,6 +8,7 @@ import { AddVincoUserDialog } from "@/components/add-vinco-user-dialog";
 import { NoAccess, PageHeader } from "@/components/app-shell";
 import { ResetVincoPasswordDialog } from "@/components/reset-vinco-password-dialog";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { UserDetailSheet } from "@/components/user-detail-sheet";
 import { useMe } from "@/hooks/use-auth";
@@ -66,6 +67,7 @@ const FILTERS: UserDirectoryFilter[] = [
   "super_admin",
   "never_logged_in",
   "no_employee",
+  "must_change_password",
 ];
 
 function EmployeesPage() {
@@ -77,6 +79,7 @@ function EmployeesPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [resettingPassword, setResettingPassword] = useState<AppUser | null>(null);
+  const [resetResult, setResetResult] = useState<string | null>(null);
   const [viewingUser, setViewingUser] = useState<AppUser | null>(null);
   const [filter, setFilter] = useState<UserDirectoryFilter>("all");
   const [search, setSearch] = useState("");
@@ -175,11 +178,15 @@ function EmployeesPage() {
   });
 
   const resetPasswordMutation = useMutation({
-    mutationFn: ({ id, password }: { id: string; password: string }) =>
-      api.post<void>(`/users/${id}/reset-password`, { password }),
-    onSuccess: (_data, { id }) => {
-      toast.success(t("common.saved"));
-      setResettingPassword(null);
+    mutationFn: (id: string) =>
+      api.post<{ temporary_password: string }>(`/users/${id}/reset-password`, {}),
+    onSuccess: (data, id) => {
+      // Show the one-time temporary password (Part B4) rather than
+      // closing immediately -- invalidate now so the directory's
+      // "must change password"/last-updated columns are current by the
+      // time the admin clicks Done and the sheet closes.
+      setResetResult(data.temporary_password);
+      invalidateUsers();
       const target = users.find((u) => u.id === id);
       void logAudit({
         action: "password_reset",
@@ -284,6 +291,10 @@ function EmployeesPage() {
         <SummaryCard label={t("acc.summary.admins")} value={summary.byRole.admin} />
         <SummaryCard label={t("acc.summary.no_employee")} value={summary.usersWithoutEmployee} />
         <SummaryCard label={t("acc.summary.no_access")} value={summary.employeesWithoutAccess} />
+        <SummaryCard
+          label={t("acc.summary.must_change_password")}
+          value={summary.mustChangePassword}
+        />
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -318,6 +329,7 @@ function EmployeesPage() {
               <th className="px-3 py-2.5 text-start">{t("users.role")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.data_scope")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.status")}</th>
+              <th className="px-3 py-2.5 text-start">{t("users.password_status")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.last_login")}</th>
               <th className="px-3 py-2.5 text-start">{t("users.created")}</th>
               <th className="px-3 py-2.5 text-start">{t("common.actions")}</th>
@@ -326,14 +338,14 @@ function EmployeesPage() {
           <tbody>
             {usersQuery.isLoading && (
               <tr>
-                <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">
                   {t("common.loading")}
                 </td>
               </tr>
             )}
             {!usersQuery.isLoading && visibleUsers.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">
                   {t("common.empty")}
                 </td>
               </tr>
@@ -379,6 +391,13 @@ function EmployeesPage() {
                   </td>
                   <td className="px-3 py-2.5">
                     <StatusBadge value={u.is_active ? "ACTIVE" : "INACTIVE"} />
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <Badge variant={u.must_change_password ? "secondary" : "outline"}>
+                      {u.must_change_password
+                        ? t("users.password_status.pending")
+                        : t("users.password_status.ok")}
+                    </Badge>
                   </td>
                   <td className="px-3 py-2.5 text-muted-foreground">
                     {u.last_login_at
@@ -450,11 +469,19 @@ function EmployeesPage() {
 
       <ResetVincoPasswordDialog
         user={resettingPassword}
-        onOpenChange={(open) => !open && setResettingPassword(null)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setResettingPassword(null);
+            setResetResult(null);
+          }
+        }}
         busy={resetPasswordMutation.isPending}
-        onSubmit={(password) =>
-          resettingPassword && resetPasswordMutation.mutate({ id: resettingPassword.id, password })
-        }
+        result={resetResult}
+        onGenerate={() => resettingPassword && resetPasswordMutation.mutate(resettingPassword.id)}
+        onDone={() => {
+          setResettingPassword(null);
+          setResetResult(null);
+        }}
       />
 
       <UserDetailSheet

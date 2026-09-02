@@ -49,7 +49,14 @@ from typing import Any
 import httpx
 import jwt
 
-__all__ = ["AuthenticatedUser", "AuthError", "SupabaseAuth", "SupabaseAdmin"]
+__all__ = [
+    "AuthenticatedUser",
+    "AuthError",
+    "SupabaseAuth",
+    "SupabaseAdmin",
+    "SupabaseAdminError",
+    "SupabaseUnavailableError",
+]
 
 #: Supabase's own convention for an effectively-permanent ban (there is
 #: no dedicated "disabled forever" value in the Admin API -- a very long
@@ -172,6 +179,17 @@ class SupabaseAdminError(Exception):
     `SupabaseAdmin` method is ever called."""
 
 
+class SupabaseUnavailableError(Exception):
+    """Raised when a `SupabaseAdmin` call never got an HTTP response at
+    all -- DNS failure, connection refused, TLS error, or a timeout
+    talking to Supabase. Deliberately NOT a `SupabaseAdminError` subclass:
+    `user_service.py`'s functions only ever catch `SupabaseAdminError`
+    (a caller-facing 4xx, e.g. duplicate username) and must let this one
+    propagate uncaught, so the router (and the catch-all handler in
+    app/api/main.py, as a backstop) can map it to 502/503 instead of
+    422 -- "Supabase is unreachable" is not a validation problem."""
+
+
 class SupabaseAdmin:
     """Admin-level Supabase operations, authenticated with the
     service-role key -- see this module's docstring for why this class
@@ -207,6 +225,18 @@ class SupabaseAdmin:
             "Content-Type": "application/json",
         }
 
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Every admin HTTP call goes through here so the
+        "never got a response at all" failure mode (network/DNS/TLS/
+        timeout -- see `SupabaseUnavailableError`) is handled exactly
+        once, not re-implemented per method."""
+        try:
+            return self._http_client.request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            raise SupabaseUnavailableError(
+                f"Could not reach Supabase for {method} {url}: {exc}"
+            ) from exc
+
     def create_auth_user(self, *, email: str, password: str, full_name: str) -> str:
         """Creates a real Supabase Auth identity. `email_confirm: true`
         skips Supabase's normal email-verification flow entirely --
@@ -225,7 +255,8 @@ class SupabaseAdmin:
 
         Returns the new user's id (a UUID).
         """
-        response = self._http_client.post(
+        response = self._request(
+            "POST",
             f"{self._project_url}/auth/v1/admin/users",
             json={
                 "email": email,
@@ -265,7 +296,8 @@ class SupabaseAdmin:
         return user_id
 
     def set_password(self, user_id: str, password: str) -> None:
-        response = self._http_client.put(
+        response = self._request(
+            "PUT",
             f"{self._project_url}/auth/v1/admin/users/{user_id}",
             json={"password": password},
             headers=self._headers(),
@@ -283,7 +315,8 @@ class SupabaseAdmin:
         `can()` ever sees a request from them. Not a `vinco.app_users`-
         only flag that this backend would have to remember to check
         everywhere."""
-        response = self._http_client.put(
+        response = self._request(
+            "PUT",
             f"{self._project_url}/auth/v1/admin/users/{user_id}",
             json={"ban_duration": _PERMANENT_BAN_DURATION if banned else "none"},
             headers=self._headers(),
@@ -307,7 +340,8 @@ class SupabaseAdmin:
         (`supabase/migrations/20260902000000_add_super_user_role.sql`
         and the one immediately after it) have been applied.
         """
-        delete_response = self._http_client.delete(
+        delete_response = self._request(
+            "DELETE",
             f"{self._project_url}/rest/v1/user_roles",
             params={"user_id": f"eq.{user_id}"},
             headers=self._headers(),
@@ -318,7 +352,8 @@ class SupabaseAdmin:
                 f"{delete_response.status_code} {delete_response.text}"
             )
 
-        insert_response = self._http_client.post(
+        insert_response = self._request(
+            "POST",
             f"{self._project_url}/rest/v1/user_roles",
             json={"user_id": user_id, "role": role},
             headers=self._headers(),
@@ -334,7 +369,8 @@ class SupabaseAdmin:
             )
 
         scope = "all" if role == "super_admin" else "assigned"
-        scope_response = self._http_client.post(
+        scope_response = self._request(
+            "POST",
             f"{self._project_url}/rest/v1/user_scopes",
             json={"user_id": user_id, "scope": scope},
             headers={**self._headers(), "Prefer": "resolution=merge-duplicates"},

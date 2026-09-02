@@ -15,8 +15,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { filterSelectableEmployees, validateNewUserPassword } from "@/lib/vinco-user-provisioning";
-import { ROLE_LABELS, type AppUser, type AppUserRole } from "@/lib/vinco-users";
+import { filterSelectableEmployees } from "@/lib/vinco-user-provisioning";
+import {
+  ROLE_LABELS,
+  type AppUser,
+  type AppUserCreateResult,
+  type AppUserRole,
+} from "@/lib/vinco-users";
+import { TemporaryPasswordReveal } from "@/components/temporary-password-reveal";
 
 /**
  * The single "give an employee a VINCO login" workflow: creates a real
@@ -72,10 +78,12 @@ export function AddVincoUserDialog({
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [displayNameTouched, setDisplayNameTouched] = useState(false);
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [role, setRole] = useState<AppUserRole>("employee");
   const [formError, setFormError] = useState<string | null>(null);
+  // Set once POST /users succeeds -- swaps the form for the one-time
+  // temporary-password reveal (Part B2). Cleared (and the dialog fully
+  // closed) only when the admin clicks Done.
+  const [created, setCreated] = useState<AppUserCreateResult | null>(null);
   const submittingRef = useRef(false);
 
   const locked = defaultEmployeeId != null;
@@ -101,10 +109,9 @@ export function AddVincoUserDialog({
     setUsername("");
     setDisplayName("");
     setDisplayNameTouched(false);
-    setPassword("");
-    setConfirmPassword("");
     setRole("employee");
     setFormError(null);
+    setCreated(null);
     submittingRef.current = false;
   }, [open, defaultEmployeeId]);
 
@@ -133,17 +140,18 @@ export function AddVincoUserDialog({
     mutationFn: (payload: {
       username: string;
       display_name: string;
-      password: string;
       role: AppUserRole;
       is_active: boolean;
       employee_id: number | null;
-    }) => api.post<AppUser>("/users", payload),
+    }) => api.post<AppUserCreateResult>("/users", payload),
     onSuccess: (user) => {
-      toast.success(t("common.saved"));
       void queryClient.invalidateQueries({ queryKey: ["app-users"] });
       void queryClient.invalidateQueries({ queryKey: ["employees"] });
       onCreated?.(user);
-      onOpenChange(false);
+      // Don't close yet -- show the one-time temporary password first
+      // (Part B2); the dialog only actually closes when the admin clicks
+      // Done in the reveal panel below.
+      setCreated(user);
     },
     onError: (e: Error) => {
       toast.error(errorMessage(e));
@@ -154,20 +162,11 @@ export function AddVincoUserDialog({
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (submittingRef.current) return;
-
-    const validation = validateNewUserPassword(password, confirmPassword);
-    if (!validation.ok) {
-      setFormError(
-        t(validation.kind === "mismatch" ? "users.password_mismatch" : "users.password_too_short"),
-      );
-      return;
-    }
     setFormError(null);
     submittingRef.current = true;
     createMutation.mutate({
       username,
       display_name: displayName,
-      password,
       role,
       is_active: true,
       employee_id: employeeId ? Number(employeeId) : null,
@@ -180,125 +179,116 @@ export function AddVincoUserDialog({
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("users.add_vinco_user")}</DialogTitle>
+          <DialogTitle>
+            {created ? t("users.temp_password.created_title") : t("users.add_vinco_user")}
+          </DialogTitle>
         </DialogHeader>
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-employee">{t("users.employee")}</Label>
-            {locked ? (
-              <Input
-                id="vinco-user-employee"
-                value={
-                  (employeesQuery.data ?? []).find((e) => String(e.id) === employeeId)?.full_name ??
-                  t("common.loading")
-                }
-                disabled
-              />
-            ) : (
-              <>
+        {created ? (
+          <TemporaryPasswordReveal
+            username={created.username}
+            temporaryPassword={created.temporary_password}
+            onDone={() => {
+              setCreated(null);
+              onOpenChange(false);
+            }}
+          />
+        ) : (
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            <div className="space-y-1.5">
+              <Label htmlFor="vinco-user-employee">{t("users.employee")}</Label>
+              {locked ? (
                 <Input
-                  value={employeeFilter}
-                  onChange={(e) => setEmployeeFilter(e.target.value)}
-                  placeholder={t("users.search_employee")}
-                  className="mb-1.5"
-                />
-                <select
                   id="vinco-user-employee"
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                  value={employeeId}
-                  onChange={(e) => setEmployeeId(e.target.value)}
-                >
-                  <option value="">{t("users.no_employee_link")}</option>
-                  {selectableEmployees.length === 0 && employeeFilter.trim() ? (
-                    <option value="" disabled>
-                      {t("users.no_matching_employees")}
-                    </option>
-                  ) : null}
-                  {selectableEmployees.map((e) => (
-                    <option key={e.id} value={String(e.id)}>
-                      {e.full_name}
-                      {e.position ? ` — ${e.position}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-display-name">{t("users.display_name")}</Label>
-            <Input
-              id="vinco-user-display-name"
-              value={displayName}
-              onChange={(e) => {
-                setDisplayName(e.target.value);
-                setDisplayNameTouched(true);
-              }}
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-username">{t("users.username")}</Label>
-            <Input
-              id="vinco-user-username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="off"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-password">{t("auth.password")}</Label>
-            <Input
-              id="vinco-user-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-confirm-password">{t("users.confirm_password")}</Label>
-            <Input
-              id="vinco-user-confirm-password"
-              type="password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="vinco-user-role">{t("users.role")}</Label>
-            <select
-              id="vinco-user-role"
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-              value={role}
-              onChange={(e) => setRole(e.target.value as AppUserRole)}
-            >
-              {(Object.keys(ROLE_LABELS) as AppUserRole[]).map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_LABELS[r][lang]}
-                </option>
-              ))}
-            </select>
-          </div>
-          {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={busy}
-              onClick={() => onOpenChange(false)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("users.create_user")}
-            </Button>
-          </DialogFooter>
-        </form>
+                  value={
+                    (employeesQuery.data ?? []).find((e) => String(e.id) === employeeId)
+                      ?.full_name ?? t("common.loading")
+                  }
+                  disabled
+                />
+              ) : (
+                <>
+                  <Input
+                    value={employeeFilter}
+                    onChange={(e) => setEmployeeFilter(e.target.value)}
+                    placeholder={t("users.search_employee")}
+                    className="mb-1.5"
+                  />
+                  <select
+                    id="vinco-user-employee"
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    value={employeeId}
+                    onChange={(e) => setEmployeeId(e.target.value)}
+                  >
+                    <option value="">{t("users.no_employee_link")}</option>
+                    {selectableEmployees.length === 0 && employeeFilter.trim() ? (
+                      <option value="" disabled>
+                        {t("users.no_matching_employees")}
+                      </option>
+                    ) : null}
+                    {selectableEmployees.map((e) => (
+                      <option key={e.id} value={String(e.id)}>
+                        {e.full_name}
+                        {e.position ? ` — ${e.position}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="vinco-user-display-name">{t("users.display_name")}</Label>
+              <Input
+                id="vinco-user-display-name"
+                value={displayName}
+                onChange={(e) => {
+                  setDisplayName(e.target.value);
+                  setDisplayNameTouched(true);
+                }}
+                required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="vinco-user-username">{t("users.username")}</Label>
+              <Input
+                id="vinco-user-username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="vinco-user-role">{t("users.role")}</Label>
+              <select
+                id="vinco-user-role"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={role}
+                onChange={(e) => setRole(e.target.value as AppUserRole)}
+              >
+                {(Object.keys(ROLE_LABELS) as AppUserRole[]).map((r) => (
+                  <option key={r} value={r}>
+                    {ROLE_LABELS[r][lang]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => onOpenChange(false)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button type="submit" disabled={busy} className="gap-2">
+                {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+                {t("users.create_user")}
+              </Button>
+            </DialogFooter>
+          </form>
+        )}
       </DialogContent>
     </Dialog>
   );

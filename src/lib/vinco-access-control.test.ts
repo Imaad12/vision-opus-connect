@@ -20,6 +20,8 @@ function user(overrides: Partial<AppUser> = {}): AppUser {
     updated_at: "2026-01-01T00:00:00Z",
     last_login_at: null,
     employee_id: null,
+    must_change_password: false,
+    password_changed_at: null,
     ...overrides,
   };
 }
@@ -59,6 +61,15 @@ describe("computeUserSummary", () => {
       user({ id: "u2", last_login_at: "2026-01-01T00:00:00Z" }),
     ];
     expect(computeUserSummary(users, employees).neverLoggedIn).toBe(1);
+  });
+
+  it("counts users who must change their password", () => {
+    const users = [
+      user({ id: "u1", must_change_password: true }),
+      user({ id: "u2", must_change_password: false }),
+      user({ id: "u3", must_change_password: true }),
+    ];
+    expect(computeUserSummary(users, employees).mustChangePassword).toBe(2);
   });
 });
 
@@ -144,6 +155,20 @@ describe("filterAndSearchUsers", () => {
       filterAndSearchUsers(users, { filter: "all", search: "priya patel", employeeNameById }).map(
         (u) => u.id,
       ),
+    ).toEqual(["u1"]);
+  });
+
+  it("filters by must-change-password", () => {
+    const withPending = [
+      user({ id: "u1", must_change_password: true }),
+      user({ id: "u2", must_change_password: false }),
+    ];
+    expect(
+      filterAndSearchUsers(withPending, {
+        filter: "must_change_password",
+        search: "",
+        employeeNameById,
+      }).map((u) => u.id),
     ).toEqual(["u1"]);
   });
 

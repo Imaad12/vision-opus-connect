@@ -89,10 +89,12 @@ export class ApiError extends Error {
     const where = `${this.method} ${this.path}`;
     if (this.kind === "timeout") return `${where} — ${this.message}`;
     if (this.kind === "network") {
-      return `${where} — no response from the server (${this.message}). This means the ` +
+      return (
+        `${where} — no response from the server (${this.message}). This means the ` +
         "request never got an HTTP response at all: check your network connection, that " +
         "the API is reachable, and (for the desktop app) that its origin is allowed by " +
-        "the backend's CORS configuration.";
+        "the backend's CORS configuration."
+      );
     }
     const hint = HTTP_STATUS_HINTS[this.status];
     return `${where} — HTTP ${this.status}${hint ? ` (${hint})` : ""}: ${this.message}`;
@@ -103,8 +105,11 @@ const HTTP_STATUS_HINTS: Record<number, string> = {
   401: "session expired or invalid — signing out",
   403: "insufficient permissions",
   404: "endpoint not found on the deployed backend",
+  409: "conflicts with an existing record",
   422: "invalid data",
   500: "server error",
+  502: "identity provider unreachable — try again shortly",
+  503: "identity provider temporarily unavailable — try again shortly",
 };
 
 async function authHeaders(): Promise<Record<string, string>> {
