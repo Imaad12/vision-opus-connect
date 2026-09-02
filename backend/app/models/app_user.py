@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base, TimestampMixin
@@ -30,6 +30,13 @@ class AppUser(Base, TimestampMixin):
     display copy without an extra round trip per list-users render, per
     the explicit instruction that authorization must stay backend/
     Supabase-enforced, not merely reflected here.
+
+    `employee_id` links this login to an HR roster entry (`Employee`,
+    same `vinco` schema, so a real FK works here unlike `id` above) --
+    nullable, since not every VINCO login corresponds to an HR employee
+    (e.g. a system/admin account) and not every employee needs one; the
+    unique constraint enforces at most one VINCO login per employee, so
+    "does this employee have a VINCO login" is always a single answer.
     """
 
     __tablename__ = "app_users"
@@ -40,6 +47,9 @@ class AppUser(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    employee_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("employees.id"), nullable=True, unique=True
+    )
 
     def __repr__(self) -> str:
         return f"AppUser(id={self.id!r}, username={self.username!r}, role={self.role!r})"

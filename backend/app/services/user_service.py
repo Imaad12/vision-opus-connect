@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.auth import SupabaseAdmin, SupabaseAdminError
-from app.models import AppUser
+from app.models import AppUser, Employee
 from app.services.errors import ValidationError
 
 __all__ = [
@@ -78,6 +78,7 @@ def create_user(
     password: str,
     role: str,
     is_active: bool,
+    employee_id: int | None = None,
 ) -> AppUser:
     existing = session.execute(select(AppUser).where(AppUser.username == username)).scalar_one_or_none()
     if existing is not None:
@@ -86,6 +87,22 @@ def create_user(
     supabase_role = ROLE_TO_SUPABASE_ROLE.get(role)
     if supabase_role is None:
         raise ValidationError(f"Unknown role {role!r}.")
+
+    # Validated here, before any Supabase Auth call: a bad employee_id
+    # must never leave behind a real, orphaned Supabase Auth identity
+    # with no app_users row to show for it -- same reasoning as checking
+    # the username above before create_auth_user runs.
+    if employee_id is not None:
+        employee = session.get(Employee, employee_id)
+        if employee is None or employee.is_deleted:
+            raise ValidationError(f"Employee {employee_id} not found.")
+        already_linked = session.execute(
+            select(AppUser).where(AppUser.employee_id == employee_id)
+        ).scalar_one_or_none()
+        if already_linked is not None:
+            raise ValidationError(
+                f"{employee.full_name} already has a VINCO login ({already_linked.username!r})."
+            )
 
     try:
         user_id = admin.create_auth_user(
@@ -103,6 +120,7 @@ def create_user(
         display_name=display_name,
         role=role,
         is_active=is_active,
+        employee_id=employee_id,
     )
     session.add(app_user)
     session.flush()

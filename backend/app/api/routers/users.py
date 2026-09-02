@@ -60,6 +60,7 @@ def create_user(
             password=payload.password,
             role=payload.role,
             is_active=payload.is_active,
+            employee_id=payload.employee_id,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc

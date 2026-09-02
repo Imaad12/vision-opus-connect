@@ -236,6 +236,25 @@ class SupabaseAdmin:
             headers=self._headers(),
         )
         if response.status_code not in (200, 201):
+            # GoTrue's documented shape for this specific failure is a 422
+            # with {"code": "email_exists", ...} or {"error_code": ...} --
+            # but the exact key has moved between Supabase versions (see
+            # vinco-auth.ts's classifySignInError for the same
+            # version-inconsistency on the sign-in side), so this checks
+            # loosely for the word rather than one fixed key. Distinguished
+            # from the generic failure below because it has a real,
+            # actionable cause: our own username-uniqueness check above
+            # only catches a duplicate `app_users` row, not a Supabase Auth
+            # identity that already exists without one (e.g. left over from
+            # a previous attempt that failed after this step) -- that's a
+            # data-cleanup situation for an admin, not a generic 500.
+            already_exists = response.status_code == 422 and "already" in response.text.lower()
+            if already_exists:
+                raise SupabaseAdminError(
+                    f"A Supabase Auth account for {email!r} already exists but has no matching "
+                    "VINCO user record. Choose a different username, or ask an administrator to "
+                    "check the Supabase Auth dashboard for an orphaned account with this email."
+                )
             raise SupabaseAdminError(
                 f"Failed to create Supabase Auth user: {response.status_code} {response.text}"
             )

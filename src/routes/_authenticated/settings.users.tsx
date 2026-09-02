@@ -5,14 +5,22 @@ import { useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
+import { ResetVincoPasswordDialog } from "@/components/reset-vinco-password-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, useI18n, type Lang } from "@/lib/i18n";
+import { ROLE_LABELS, type AppUser, type AppUserRole } from "@/lib/vinco-users";
 
 /**
  * Native VINCO user management -- creates/edits real accounts (username
@@ -24,28 +32,10 @@ import { formatDate, useI18n, type Lang } from "@/lib/i18n";
  * Supabase identity (e.g. one that signed in via Google OAuth); this
  * page is specifically for creating and managing native
  * username/password accounts. Both remain useful and neither replaces
- * the other.
+ * the other. `AppUserRole`/`AppUser`/`ROLE_LABELS` live in
+ * `@/lib/vinco-users` now, shared with `employees.tsx`/`hr-employees.tsx`'s
+ * employee-to-VINCO-login provisioning flow -- not redefined here.
  */
-
-type AppUserRole = "employee" | "admin" | "super_user" | "super_admin";
-
-type AppUser = {
-  id: string;
-  username: string;
-  display_name: string;
-  role: AppUserRole;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-  last_login_at: string | null;
-};
-
-const ROLE_LABELS: Record<AppUserRole, { en: string; ar: string }> = {
-  employee: { en: "Employee", ar: "موظف" },
-  admin: { en: "Admin", ar: "مسؤول" },
-  super_user: { en: "Super User", ar: "مستخدم متميز" },
-  super_admin: { en: "Super Admin", ar: "مسؤول النظام" },
-};
 
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.describe();
@@ -99,14 +89,8 @@ function UsersAccessPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      ...payload
-    }: {
-      id: string;
-      display_name?: string;
-      is_active?: boolean;
-    }) => api.put<AppUser>(`/users/${id}`, payload),
+    mutationFn: ({ id, ...payload }: { id: string; display_name?: string; is_active?: boolean }) =>
+      api.put<AppUser>(`/users/${id}`, payload),
     onSuccess: () => {
       toast.success(t("common.saved"));
       setEditing(null);
@@ -183,13 +167,15 @@ function UsersAccessPage() {
                 </td>
               </tr>
             )}
-            {!usersQuery.isLoading && !usersQuery.isError && (usersQuery.data ?? []).length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
-                  {t("common.empty")}
-                </td>
-              </tr>
-            )}
+            {!usersQuery.isLoading &&
+              !usersQuery.isError &&
+              (usersQuery.data ?? []).length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
+                    {t("common.empty")}
+                  </td>
+                </tr>
+              )}
             {(usersQuery.data ?? []).map((u) => (
               <tr key={u.id} className="border-b border-border/70 last:border-0">
                 <td className="px-3 py-2.5 font-medium">{u.display_name}</td>
@@ -199,7 +185,9 @@ function UsersAccessPage() {
                     className="h-9 rounded-md border border-input bg-background px-2 text-sm disabled:opacity-60"
                     value={u.role}
                     disabled={!canManageRoles || roleMutation.isPending}
-                    onChange={(e) => roleMutation.mutate({ id: u.id, role: e.target.value as AppUserRole })}
+                    onChange={(e) =>
+                      roleMutation.mutate({ id: u.id, role: e.target.value as AppUserRole })
+                    }
                   >
                     {(Object.keys(ROLE_LABELS) as AppUserRole[]).map((r) => (
                       <option key={r} value={r}>
@@ -260,7 +248,7 @@ function UsersAccessPage() {
         onSubmit={(payload) => editing && updateMutation.mutate({ id: editing.id, ...payload })}
       />
 
-      <ResetPasswordDialog
+      <ResetVincoPasswordDialog
         user={resettingPassword}
         onOpenChange={(open) => !open && setResettingPassword(null)}
         busy={resetPasswordMutation.isPending}
@@ -459,85 +447,6 @@ function EditUserDialog({
             <Button type="submit" disabled={busy} className="gap-2">
               {busy ? <Loader2 className="size-4 animate-spin" /> : null}
               {t("common.save")}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ResetPasswordDialog({
-  user,
-  onOpenChange,
-  busy,
-  onSubmit,
-}: {
-  user: AppUser | null;
-  onOpenChange: (open: boolean) => void;
-  busy: boolean;
-  onSubmit: (password: string) => void;
-}) {
-  const { t } = useI18n();
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (password !== confirmPassword) {
-      setFormError(t("users.password_mismatch"));
-      return;
-    }
-    if (password.length < 8) {
-      setFormError(t("users.password_too_short"));
-      return;
-    }
-    onSubmit(password);
-    setPassword("");
-    setConfirmPassword("");
-    setFormError(null);
-  };
-
-  return (
-    <Dialog open={user !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>
-            {t("users.reset_password")} — {user?.display_name}
-          </DialogTitle>
-        </DialogHeader>
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div className="space-y-1.5">
-            <Label htmlFor="reset-password-new">{t("users.new_password")}</Label>
-            <Input
-              id="reset-password-new"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="reset-password-confirm">{t("users.confirm_password")}</Label>
-            <Input
-              id="reset-password-confirm"
-              type="password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          {formError ? <p className="text-sm text-destructive">{formError}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("users.reset_password")}
             </Button>
           </DialogFooter>
         </form>

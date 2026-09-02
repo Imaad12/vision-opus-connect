@@ -55,11 +55,32 @@ def test_create_auth_user_posts_to_admin_users_and_returns_id() -> None:
 
 
 def test_create_auth_user_raises_on_failure_response() -> None:
+    admin = _admin_with_transport(lambda r: httpx.Response(500, json={"msg": "internal error"}))
+    with pytest.raises(SupabaseAdminError, match="500"):
+        admin.create_auth_user(email="dup@vinco.local", password="s3cret-pass", full_name="Dup")
+
+
+def test_create_auth_user_gives_a_clean_message_when_the_email_already_exists() -> None:
+    """GoTrue reports a duplicate email as a 422 whose body mentions
+    "already" -- distinguished from a generic failure with an actionable
+    message instead of a raw status/body dump (see auth.py's
+    create_auth_user for the version-inconsistency this loose match
+    works around)."""
     admin = _admin_with_transport(
         lambda r: httpx.Response(422, json={"msg": "email already registered"})
     )
-    with pytest.raises(SupabaseAdminError, match="422"):
+    with pytest.raises(SupabaseAdminError, match="already exists"):
         admin.create_auth_user(email="dup@vinco.local", password="s3cret-pass", full_name="Dup")
+
+
+def test_create_auth_user_generic_422_still_uses_generic_message() -> None:
+    """A 422 for an unrelated reason (e.g. a malformed field) must not be
+    mistaken for the "already exists" case just because it shares a
+    status code."""
+    admin = _admin_with_transport(lambda r: httpx.Response(422, json={"msg": "weak password"}))
+    with pytest.raises(SupabaseAdminError, match="422") as exc_info:
+        admin.create_auth_user(email="weak@vinco.local", password="123", full_name="Weak")
+    assert "already exists" not in str(exc_info.value)
 
 
 def test_set_password_puts_to_admin_users_id() -> None:

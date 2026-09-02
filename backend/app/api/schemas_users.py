@@ -33,6 +33,7 @@ class AppUserRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None
+    employee_id: int | None = None
 
 
 class AppUserCreate(BaseModel):
@@ -41,6 +42,10 @@ class AppUserCreate(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     role: AppUserRole
     is_active: bool = True
+    #: Optional link to an existing HR roster entry (`Employee.id`) -- see
+    #: user_service.create_user for the existence/uniqueness checks. Not
+    #: every VINCO login needs one (e.g. a system/admin account).
+    employee_id: int | None = None
 
     @field_validator("username")
     @classmethod

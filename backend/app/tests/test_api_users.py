@@ -21,6 +21,7 @@ from app.api.auth import AuthenticatedUser, SupabaseAdminError
 from app.api.deps import get_current_user, get_db, get_supabase_admin, get_supabase_auth
 from app.api.main import create_app
 from app.database.base import Base
+from app.models import Employee
 
 
 class _FakeSupabaseAuth:
@@ -121,6 +122,18 @@ def _create_payload(**overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _seed_employee(engine: Engine, *, full_name: str = "Sam Employee") -> int:
+    """Inserts one HR roster row directly (bypassing the /employees API,
+    which is out of scope for these tests) and returns its id, for tests
+    that need a real employee to link a VINCO login to."""
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with factory() as session:
+        employee = Employee(full_name=full_name)
+        session.add(employee)
+        session.commit()
+        return employee.id
 
 
 def test_create_user_success(api_client: TestClient, fake_admin: _FakeSupabaseAdmin):
@@ -265,3 +278,82 @@ def test_missing_bearer_token_is_401(engine: Engine, fake_admin: _FakeSupabaseAd
         response = client.get("/users")
 
     assert response.status_code == 401
+
+
+# ---- Employee -> VINCO login linking ----
+
+
+def test_create_user_links_employee(api_client: TestClient, engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    employee_id = _seed_employee(engine, full_name="Priya Patel")
+
+    response = api_client.post("/users", json=_create_payload(employee_id=employee_id))
+    assert response.status_code == 201, response.text
+    assert response.json()["employee_id"] == employee_id
+
+    # Round-trips through list_users too, not just the create response.
+    listed = api_client.get("/users").json()
+    assert listed[0]["employee_id"] == employee_id
+
+
+def test_create_user_without_employee_id_is_unlinked(api_client: TestClient):
+    response = api_client.post("/users", json=_create_payload())
+    assert response.status_code == 201
+    assert response.json()["employee_id"] is None
+
+
+def test_create_user_unknown_employee_id_is_422(api_client: TestClient):
+    response = api_client.post("/users", json=_create_payload(employee_id=999999))
+    assert response.status_code == 422
+    assert "not found" in response.json()["detail"]
+
+
+def test_create_user_duplicate_employee_link_is_422(api_client: TestClient, engine: Engine):
+    employee_id = _seed_employee(engine)
+
+    first = api_client.post("/users", json=_create_payload(employee_id=employee_id))
+    assert first.status_code == 201
+
+    second = api_client.post(
+        "/users", json=_create_payload(username="other", display_name="Other Person", employee_id=employee_id)
+    )
+    assert second.status_code == 422
+    assert "already has a VINCO login" in second.json()["detail"]
+
+
+def test_create_user_rejected_employee_link_does_not_create_orphaned_auth_account(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """A bad employee_id must fail before any Supabase Auth call, not
+    after -- otherwise a rejected request would still leave behind a
+    real (orphaned) Supabase Auth identity with no app_users row."""
+    response = api_client.post("/users", json=_create_payload(employee_id=999999))
+    assert response.status_code == 422
+    assert fake_admin.created == []
+
+
+def test_create_user_role_assigned_with_employee_link(
+    api_client: TestClient, engine: Engine, fake_admin: _FakeSupabaseAdmin
+):
+    employee_id = _seed_employee(engine)
+
+    response = api_client.post("/users", json=_create_payload(employee_id=employee_id, role="admin"))
+    assert response.status_code == 201
+    body = response.json()
+    assert body["role"] == "admin"
+    assert body["employee_id"] == employee_id
+    # VINCO's "admin" label still maps onto the real Supabase role, exactly
+    # as it does for an unlinked user -- linking an employee changes
+    # nothing about role enforcement.
+    assert (body["id"], "general_manager") in fake_admin.roles_set
+
+
+def test_create_user_without_admin_users_permission_cannot_link_employee(
+    api_client: TestClient, engine: Engine
+):
+    """The same permission gate covers the employee-linked path -- an
+    unauthorized caller can't provision VINCO access for any employee,
+    linked or not."""
+    employee_id = _seed_employee(engine)
+    api_client.state["granted"].discard("admin.users")  # type: ignore[attr-defined]
+    response = api_client.post("/users", json=_create_payload(employee_id=employee_id))
+    assert response.status_code == 403
