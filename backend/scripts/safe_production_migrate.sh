@@ -63,16 +63,40 @@ cd "$BACKEND_DIR"
 
 # --- Bootstrap: backend/.venv with this project's own dependencies ---
 #
-# Requires Python 3.12+ (backend/pyproject.toml's `requires-python`) --
-# tried in this order since a stock macOS/Linux `python3` is frequently
-# an older system Python (this exact failure mode was reproduced
-# directly: a fresh checkout where `python3` resolves to 3.11 fails
-# pip's own "requires a different Python" check) that would otherwise
-# fail deep inside bootstrap with a confusing error instead of a clear
-# one here.
-find_system_python() {
+# Requires Python 3.12+ (backend/pyproject.toml's `requires-python`).
+# Every check below verifies an ACTUAL interpreter's ACTUAL reported
+# version (never trusts a command name alone -- `python3.12` existing
+# on PATH is not proof it IS 3.12: a stale shim, a misconfigured
+# version manager, or an unrelated alias can all put a same-named but
+# wrong-version binary in front of the real one) and is re-verified
+# again after every step that could produce a new interpreter, so a
+# wrong-version environment can never silently reach `pip install` or
+# the database prompt.
+
+# Deliberately asks the interpreter itself (Python's own `sys.version_info`,
+# not a parse of `python3 --version`'s text) -- avoids depending on
+# `awk`/`cut`/`sed` or any other external text tool existing on PATH,
+# since the whole point of this script is to assume as little about the
+# calling machine's toolset as possible. Purely for human-readable
+# diagnostic messages -- `version_is_new_enough` below is the actual
+# pass/fail authority, via the exact same `sys.version_info` mechanism.
+python_version_string() {
+  "$1" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null
+}
+
+version_is_new_enough() {
+  "$1" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)' >/dev/null 2>&1
+}
+
+# Tried in this order; a candidate is only ever returned once its ACTUAL
+# version has been checked -- never returned by name alone. This is
+# deliberately a single pass (find + verify together, not "find first
+# by name, verify after") so a same-named-but-wrong-version `python3.12`
+# is skipped in favor of trying the next candidate, rather than being
+# returned and only failing a separate check later.
+find_valid_system_python() {
   for candidate in python3.13 python3.12 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
+    if command -v "$candidate" >/dev/null 2>&1 && version_is_new_enough "$candidate"; then
       echo "$candidate"
       return 0
     fi
@@ -80,36 +104,81 @@ find_system_python() {
   return 1
 }
 
-venv_is_bootstrapped() {
-  [ -x "$VENV_DIR/bin/python3" ] && "$VENV_DIR/bin/python3" -c \
+dependencies_importable() {
+  "$1" -c \
     'import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ("sqlalchemy", "alembic", "psycopg")) else 1)' \
     >/dev/null 2>&1
 }
 
-if ! venv_is_bootstrapped; then
-  if [ ! -x "$VENV_DIR/bin/python3" ]; then
-    SYSTEM_PYTHON="$(find_system_python)" || {
-      echo "[UNSAFE] No python3 found on PATH at all. Install Python 3.12+ " \
-           "(e.g. 'brew install python@3.12' on macOS) and re-run." >&2
-      exit 1
-    }
-    if ! "$SYSTEM_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)'; then
-      FOUND_VERSION="$("$SYSTEM_PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
-      echo "[UNSAFE] Found '$SYSTEM_PYTHON' but it's Python $FOUND_VERSION -- this " \
-           "project requires 3.12+. Install a newer Python (e.g. 'brew install " \
-           "python@3.12' on macOS) and re-run." >&2
-      exit 1
-    fi
-    echo "[bootstrap] Creating virtual environment at $VENV_DIR (using $SYSTEM_PYTHON) ..."
-    "$SYSTEM_PYTHON" -m venv "$VENV_DIR"
-  fi
-  echo "[bootstrap] Installing backend dependencies into $VENV_DIR (pip install -e .) ..."
-  "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
-  "$VENV_DIR/bin/python3" -m pip install --quiet -e "$BACKEND_DIR"
+VENV_PYTHON="$VENV_DIR/bin/python3"
+
+if [ -x "$VENV_PYTHON" ] && ! version_is_new_enough "$VENV_PYTHON"; then
+  FOUND_VERSION="$(python_version_string "$VENV_PYTHON")"
+  echo "[bootstrap] Existing $VENV_DIR was built with Python $FOUND_VERSION, older " \
+       "than the required 3.12+ -- removing it and rebuilding with a valid interpreter."
+  rm -rf "$VENV_DIR"
 fi
 
-PY="$VENV_DIR/bin/python3"
+if [ ! -x "$VENV_PYTHON" ]; then
+  SYSTEM_PYTHON="$(find_valid_system_python)" || {
+    echo "[UNSAFE] No Python 3.12+ found on PATH (checked python3.13, python3.12, " \
+         "python3 -- by ACTUAL reported version, not name alone). Install one " \
+         "(e.g. 'brew install python@3.12' on macOS) and re-run. Nothing was " \
+         "installed or connected to." >&2
+    for candidate in python3.13 python3.12 python3; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        echo "  - found '$candidate' at $(command -v "$candidate"), but it reports " \
+             "Python $(python_version_string "$candidate")" >&2
+      fi
+    done
+    exit 1
+  }
+  echo "[bootstrap] Creating virtual environment at $VENV_DIR (using '$SYSTEM_PYTHON', " \
+       "Python $(python_version_string "$SYSTEM_PYTHON")) ..."
+  "$SYSTEM_PYTHON" -m venv "$VENV_DIR"
+  # Defense in depth: re-verify the venv's OWN interpreter, not just the
+  # source one -- catches any environment where `-m venv` itself doesn't
+  # produce what its own invoking interpreter reported.
+  if ! version_is_new_enough "$VENV_PYTHON"; then
+    FOUND_VERSION="$(python_version_string "$VENV_PYTHON")"
+    echo "[UNSAFE] '$SYSTEM_PYTHON' reported 3.12+ but the venv it created at " \
+         "$VENV_DIR runs Python $FOUND_VERSION. Removing the broken venv. This " \
+         "needs a human to look at why '$SYSTEM_PYTHON' and its own 'venv' module " \
+         "disagree before proceeding." >&2
+    rm -rf "$VENV_DIR"
+    exit 1
+  fi
+fi
+
+if ! dependencies_importable "$VENV_PYTHON"; then
+  echo "[bootstrap] Installing backend dependencies into $VENV_DIR (pip install -e .) ..."
+  "$VENV_PYTHON" -m pip install --quiet --upgrade pip || {
+    echo "[UNSAFE] 'pip install --upgrade pip' failed (see output above) -- stopping " \
+         "before touching the database. Nothing was installed correctly; re-run " \
+         "after fixing the error above." >&2
+    exit 1
+  }
+  "$VENV_PYTHON" -m pip install --quiet -e "$BACKEND_DIR" || {
+    echo "[UNSAFE] 'pip install -e .' failed (see output above) -- stopping before " \
+         "touching the database. The environment is incomplete; re-run after " \
+         "fixing the error above." >&2
+    exit 1
+  }
+  if ! dependencies_importable "$VENV_PYTHON"; then
+    echo "[UNSAFE] pip install reported success but sqlalchemy/alembic/psycopg are " \
+         "still not importable in $VENV_DIR -- stopping before touching the " \
+         "database. This needs a human to look at the install output above." >&2
+    exit 1
+  fi
+fi
+
+PY="$VENV_PYTHON"
 ALEMBIC="$VENV_DIR/bin/alembic"
+if [ ! -x "$ALEMBIC" ]; then
+  echo "[UNSAFE] Dependencies installed, but $ALEMBIC does not exist -- the venv is " \
+       "incomplete. Stopping before touching the database." >&2
+  exit 1
+fi
 
 if [ -z "${VISION_DATABASE_URL:-}" ]; then
   read -rs -p "Paste VISION_DATABASE_URL (hidden, not saved to history): " VISION_DATABASE_URL
