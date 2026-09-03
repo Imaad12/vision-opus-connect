@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from pathlib import Path
 
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
@@ -76,6 +77,31 @@ def _upload_and_get_document(
     row from the batch's document list -- the background-processed
     equivalent of the old synchronous "outcomes[0]" shortcut."""
     _upload(client, batch_id, filename=filename, text=text)
+    documents = client.get(f"/imports/batches/{batch_id}/documents").json()
+    return next(d for d in documents if d["filename"] == filename)
+
+
+def _make_pdf_with_text(path: Path, text: str, *, extra_blank_pages: int = 0) -> None:
+    """Same real-PyMuPDF-fixture convention `test_document_preview.py`
+    already uses -- a genuine PDF a reviewer's browser could open, not a
+    mock, so these tests exercise the actual PDF importer + page-preview
+    rendering path end-to-end."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text)
+    for _ in range(extra_blank_pages):
+        doc.new_page()
+    doc.save(path)
+    doc.close()
+
+
+def _upload_pdf_and_get_document(
+    client: TestClient, batch_id: int, pdf_path: Path, *, filename: str = "quote.pdf"
+) -> dict:
+    client.post(
+        f"/imports/batches/{batch_id}/documents",
+        files=[("files", (filename, pdf_path.read_bytes(), "application/pdf"))],
+    )
     documents = client.get(f"/imports/batches/{batch_id}/documents").json()
     return next(d for d in documents if d["filename"] == filename)
 
@@ -292,6 +318,131 @@ def test_confirmed_document_cannot_be_rejected_afterward(api_client: TestClient)
     assert response.status_code == 422
 
 
+# ---- Review workspace (P2): field corrections + page preview ----
+
+
+def test_update_candidate_field_applies_correction(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+
+    response = api_client.patch(
+        f"/imports/documents/{document['id']}/candidate",
+        json={"client_name": "ABC Holdings LLC (corrected)"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["quotation_candidate"]["client_name"] == "ABC Holdings LLC (corrected)"
+
+    # The correction is actually persisted, not just echoed back.
+    detail = api_client.get(f"/imports/documents/{document['id']}").json()
+    assert detail["quotation_candidate"]["client_name"] == "ABC Holdings LLC (corrected)"
+
+
+def test_update_candidate_marks_edited_field_high_confidence(api_client: TestClient):
+    """A field the reviewer actually changes must have its confidence
+    marker cleared to HIGH -- otherwise a LOW/NEEDS_REVIEW flag from
+    extraction time would keep blocking `confirm_import`'s OCR gate
+    (`compute_ocr_confidence_status`) even after a human corrected it,
+    silently defeating the entire point of letting them edit it."""
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+
+    response = api_client.patch(
+        f"/imports/documents/{document['id']}/candidate",
+        json={"net_value": "1300000.00"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["quotation_candidate"]["field_confidence"]["net_value"] == "HIGH"
+
+
+def test_update_candidate_omitted_fields_are_untouched(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+
+    response = api_client.patch(
+        f"/imports/documents/{document['id']}/candidate",
+        json={"client_name": "New Name"},
+    )
+    assert response.status_code == 200, response.text
+    # project_name wasn't in the request body at all -- exclude_unset
+    # means it must survive unchanged, not be nulled out.
+    assert response.json()["quotation_candidate"]["project_name"] == "Villa ABC Renovation"
+
+
+def test_update_candidate_after_confirm_is_422(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+    api_client.post(
+        f"/imports/documents/{document['id']}/confirm",
+        json={"new_client_name": "X", "new_project_name": "Y"},
+    )
+
+    response = api_client.patch(
+        f"/imports/documents/{document['id']}/candidate",
+        json={"client_name": "Too late"},
+    )
+    assert response.status_code == 422
+
+
+def test_update_candidate_missing_document_is_404(api_client: TestClient):
+    response = api_client.patch("/imports/documents/999/candidate", json={"client_name": "X"})
+    assert response.status_code == 404
+
+
+def test_get_document_page_count_is_none_for_non_pdf(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+    detail = api_client.get(f"/imports/documents/{document['id']}").json()
+    assert detail["page_count"] is None
+
+
+def test_get_document_reports_page_count_for_pdf(api_client: TestClient, tmp_path: Path):
+    pdf_path = tmp_path / "source.pdf"
+    _make_pdf_with_text(pdf_path, "Quotation Number: QTN/2024/017", extra_blank_pages=2)
+
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_pdf_and_get_document(api_client, batch["id"], pdf_path)
+
+    detail = api_client.get(f"/imports/documents/{document['id']}").json()
+    assert detail["page_count"] == 3
+
+
+def test_document_page_preview_returns_a_real_png(api_client: TestClient, tmp_path: Path):
+    pdf_path = tmp_path / "source.pdf"
+    _make_pdf_with_text(pdf_path, "Quotation Number: QTN/2024/017")
+
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_pdf_and_get_document(api_client, batch["id"], pdf_path)
+
+    response = api_client.get(f"/imports/documents/{document['id']}/pages/1")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_document_page_preview_out_of_range_is_422(api_client: TestClient, tmp_path: Path):
+    pdf_path = tmp_path / "source.pdf"
+    _make_pdf_with_text(pdf_path, "Quotation Number: QTN/2024/017")
+
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_pdf_and_get_document(api_client, batch["id"], pdf_path)
+
+    response = api_client.get(f"/imports/documents/{document['id']}/pages/99")
+    assert response.status_code == 422
+
+
+def test_document_page_preview_non_pdf_is_422(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+
+    response = api_client.get(f"/imports/documents/{document['id']}/pages/1")
+    assert response.status_code == 422
+
+
+def test_document_page_preview_missing_document_is_404(api_client: TestClient):
+    response = api_client.get("/imports/documents/999/pages/1")
+    assert response.status_code == 404
+
+
 # ---- Permission gating ----
 
 
@@ -307,6 +458,8 @@ def test_all_routes_require_quotations_create(api_client: TestClient):
     assert api_client.get("/imports/documents/1").status_code == 403
     assert api_client.post("/imports/documents/1/confirm", json={}).status_code == 403
     assert api_client.post("/imports/documents/1/reject", json={}).status_code == 403
+    assert api_client.patch("/imports/documents/1/candidate", json={}).status_code == 403
+    assert api_client.get("/imports/documents/1/pages/1").status_code == 403
 
 
 def test_missing_bearer_token_is_401(storage_dir: Path):

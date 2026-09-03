@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Loader2, Upload } from "lucide-react";
-import { useRef, useState, type FormEvent } from "react";
+import { ChevronLeft, ChevronRight, FileText, Loader2, Upload } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
@@ -16,9 +16,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
-import { formatDate, useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 
 /**
  * Standalone, flat route (NOT `quotations.import.tsx`) -- deliberately.
@@ -107,11 +108,105 @@ type ImportedDocumentDetail = ImportedDocumentSummary & {
   resulting_project_id: number | null;
   resulting_quotation_id: number | null;
   quotation_candidate: ImportedQuotationCandidate | null;
+  /** `null` whenever a page-by-page preview isn't available -- a
+   * non-PDF document, or a PDF the backend couldn't open. Never
+   * fabricated: the review workspace's preview panel must treat `null`
+   * as "no preview", not as "one page" (see `schemas_imports.
+   * ImportedDocumentRead.page_count`'s own docstring). */
+  page_count: number | null;
 };
 
 type BatchUploadAccepted = {
   accepted_files: string[];
 };
+
+/** Mirrors `app.services.import_service._QUOTATION_EDITABLE_FIELDS`
+ * exactly -- every extracted quotation field a reviewer is allowed to
+ * correct in the workspace below, before confirming. */
+const EDITABLE_CANDIDATE_FIELDS = [
+  "quotation_number",
+  "quotation_date",
+  "client_name",
+  "project_name",
+  "project_number",
+  "description",
+  "currency",
+  "net_value",
+  "tax_value",
+  "gross_value",
+  "valid_until",
+  "payment_terms",
+  "notes",
+] as const;
+
+type EditableCandidateField = (typeof EDITABLE_CANDIDATE_FIELDS)[number];
+
+/** `PATCH /imports/documents/{id}/candidate`'s request body -- every
+ * field optional (only fields actually edited are sent, see
+ * `ReviewDialog`'s `edited` state below). */
+type UpdateQuotationCandidatePayload = Partial<Record<EditableCandidateField, string | null>>;
+
+/** Drives the review workspace's editable form -- one entry per
+ * `EDITABLE_CANDIDATE_FIELDS` value, in the order shown to the
+ * reviewer. The first six are the mockup's primary fields (Customer/
+ * Project/Reference/Date/Valid until/Currency/Subtotal/VAT/Total); the
+ * rest are shown as secondary "more details" fields, still fully
+ * editable -- nothing on the candidate is hidden from correction. */
+const CANDIDATE_FIELD_DEFS: {
+  key: EditableCandidateField;
+  labelKey: string;
+  inputType: "text" | "date" | "textarea";
+  primary: boolean;
+}[] = [
+  { key: "client_name", labelKey: "imp.review.client_name", inputType: "text", primary: true },
+  { key: "project_name", labelKey: "imp.review.project_name", inputType: "text", primary: true },
+  {
+    key: "quotation_number",
+    labelKey: "imp.review.field.quotation_number",
+    inputType: "text",
+    primary: true,
+  },
+  {
+    key: "quotation_date",
+    labelKey: "imp.review.field.quotation_date",
+    inputType: "date",
+    primary: true,
+  },
+  {
+    key: "valid_until",
+    labelKey: "imp.review.field.valid_until",
+    inputType: "date",
+    primary: true,
+  },
+  { key: "currency", labelKey: "imp.review.field.currency", inputType: "text", primary: true },
+  { key: "net_value", labelKey: "imp.review.field.net_value", inputType: "text", primary: true },
+  { key: "tax_value", labelKey: "imp.review.field.tax_value", inputType: "text", primary: true },
+  {
+    key: "gross_value",
+    labelKey: "imp.review.field.gross_value",
+    inputType: "text",
+    primary: true,
+  },
+  {
+    key: "project_number",
+    labelKey: "imp.review.field.project_number",
+    inputType: "text",
+    primary: false,
+  },
+  {
+    key: "payment_terms",
+    labelKey: "imp.review.field.payment_terms",
+    inputType: "text",
+    primary: false,
+  },
+  {
+    key: "description",
+    labelKey: "imp.review.field.description",
+    inputType: "textarea",
+    primary: false,
+  },
+  { key: "notes", labelKey: "imp.review.notes", inputType: "textarea", primary: false },
+];
 
 /** Mirrors `app.core.enums.ExtractionStatus` -- extraction hasn't
  * reached a terminal outcome yet, so the frontend should keep polling
@@ -173,7 +268,7 @@ function ImportQuotationsPage() {
 }
 
 function ImportWorkspace() {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
@@ -415,7 +510,6 @@ function ImportWorkspace() {
 
       <ReviewDialog
         documentId={reviewing}
-        lang={lang}
         onOpenChange={(open) => !open && setReviewing(null)}
         onChanged={invalidateBatch}
       />
@@ -423,22 +517,202 @@ function ImportWorkspace() {
   );
 }
 
+/** Left-hand pane of the review workspace: the original source document,
+ * paged through server-rendered PNGs (`GET /imports/documents/{id}/pages/
+ * {n}`, reusing `app.core.document_preview.render_page_preview` exactly
+ * as the desktop app's own rendering path -- see that endpoint's own
+ * docstring). Fetched as a `Blob` (not a plain `<img src="...">`) because
+ * the endpoint is behind the same Bearer-token auth as every other
+ * `/imports/*` route, which an `<img>` tag cannot attach on its own.
+ *
+ * `pageCount === null` means the backend genuinely has no preview to
+ * offer (non-PDF, or a PDF it couldn't open) -- shown honestly as "no
+ * preview", never faked as a single page. */
+function DocumentPreviewPanel({
+  documentId,
+  pageCount,
+}: {
+  documentId: number;
+  pageCount: number | null;
+}) {
+  const { t } = useI18n();
+  const [page, setPage] = useState(1);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    setPage(1);
+  }, [documentId]);
+
+  useEffect(() => {
+    if (pageCount === null) return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setLoading(true);
+    setLoadError(false);
+    api
+      .getBlob(`/imports/documents/${documentId}/pages/${page}`)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setImageUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [documentId, page, pageCount]);
+
+  if (pageCount === null) {
+    return (
+      <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+        <FileText className="size-8" />
+        {t("imp.review.preview.unavailable")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col gap-2">
+      <div className="flex min-h-[320px] flex-1 items-center justify-center overflow-auto rounded-lg border border-border bg-muted/30 p-2">
+        {loading && <Loader2 className="size-6 animate-spin text-muted-foreground" />}
+        {!loading && loadError && (
+          <p className="p-4 text-center text-sm text-destructive">
+            {t("imp.review.preview.load_error")}
+          </p>
+        )}
+        {!loading && !loadError && imageUrl && (
+          // Server-rendered page image, not an interactive PDF widget --
+          // a plain <img> is exactly right here.
+          <img
+            src={imageUrl}
+            alt={`${t("imp.review.preview.page")} ${page}`}
+            className="max-h-[65vh] w-auto max-w-full shadow-sm"
+          />
+        )}
+      </div>
+      <div className="flex items-center justify-center gap-2 text-sm">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={page <= 1}
+          onClick={() => setPage((p) => p - 1)}
+        >
+          <ChevronLeft className="size-4" />
+        </Button>
+        <span className="num text-muted-foreground">
+          {t("imp.review.preview.page")} {page} {t("imp.review.preview.of")} {pageCount}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={page >= pageCount}
+          onClick={() => setPage((p) => p + 1)}
+        >
+          <ChevronRight className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** One editable field in the review workspace's form, driven by
+ * `CANDIDATE_FIELD_DEFS`. Shows the field's `ConfidenceLevel` (HIGH/
+ * NEEDS_REVIEW/LOW) as a small badge, and visibly flags anything below
+ * HIGH so a low-confidence extraction never blends in with a
+ * confidently-read one -- exactly the "fields with low confidence
+ * should be visibly marked" requirement this workspace exists for. */
+function CandidateFieldRow({
+  def,
+  candidate,
+  edited,
+  disabled,
+  onChange,
+}: {
+  def: (typeof CANDIDATE_FIELD_DEFS)[number];
+  candidate: ImportedQuotationCandidate;
+  edited: UpdateQuotationCandidatePayload;
+  disabled: boolean;
+  onChange: (field: EditableCandidateField, value: string) => void;
+}) {
+  const { t } = useI18n();
+  const key = def.key;
+  const editedValue = edited[key];
+  const value = editedValue !== undefined ? (editedValue ?? "") : (candidate[key] ?? "");
+  const confidence = candidate.field_confidence[key];
+  const isLowConfidence = confidence === "LOW" || confidence === "NEEDS_REVIEW";
+  const inputId = `review-${key}`;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <Label htmlFor={inputId}>{t(def.labelKey)}</Label>
+        {confidence && (
+          <Badge
+            variant={confidence === "HIGH" ? "outline" : "secondary"}
+            className={
+              isLowConfidence ? "border-amber-500 text-[10px] text-amber-700" : "text-[10px]"
+            }
+          >
+            {confidence}
+          </Badge>
+        )}
+      </div>
+      {def.inputType === "textarea" ? (
+        <Textarea
+          id={inputId}
+          value={value}
+          disabled={disabled}
+          className={isLowConfidence ? "border-amber-500" : undefined}
+          onChange={(e) => onChange(key, e.target.value)}
+        />
+      ) : (
+        <Input
+          id={inputId}
+          type={def.inputType}
+          value={value}
+          disabled={disabled}
+          className={isLowConfidence ? "border-amber-500" : undefined}
+          onChange={(e) => onChange(key, e.target.value)}
+        />
+      )}
+    </div>
+  );
+}
+
 function ReviewDialog({
   documentId,
-  lang,
   onOpenChange,
   onChanged,
 }: {
   documentId: number | null;
-  lang: string;
   onOpenChange: (open: boolean) => void;
   onChanged: () => void;
 }) {
   const { t } = useI18n();
-  const [clientName, setClientName] = useState("");
-  const [projectName, setProjectName] = useState("");
   const [includeBoq, setIncludeBoq] = useState(true);
   const [rejectReason, setRejectReason] = useState("");
+  const [edited, setEdited] = useState<UpdateQuotationCandidatePayload>({});
+
+  // A fresh document must never inherit another document's unsaved
+  // edits/reject-reason -- the previous version of this dialog kept
+  // `clientName`/`projectName` state across documents entirely
+  // unreset, a real latent bug (switching to review document B could
+  // silently carry over document A's typed-but-unsaved override).
+  useEffect(() => {
+    setEdited({});
+    setRejectReason("");
+    setIncludeBoq(true);
+  }, [documentId]);
 
   const documentQuery = useQuery({
     queryKey: ["import-document", documentId],
@@ -446,15 +720,56 @@ function ReviewDialog({
     queryFn: () => api.get<ImportedDocumentDetail>(`/imports/documents/${documentId}`),
   });
 
-  const confirmMutation = useMutation({
+  const document = documentQuery.data;
+  const candidate = document?.quotation_candidate ?? null;
+  const isDecided =
+    document?.review_status === "CONFIRMED" || document?.review_status === "REJECTED";
+  const hasEdits = Object.keys(edited).length > 0;
+
+  const handleFieldChange = (field: EditableCandidateField, raw: string) => {
+    setEdited((prev) => ({ ...prev, [field]: raw === "" ? null : raw }));
+  };
+
+  const saveMutation = useMutation({
     mutationFn: () =>
-      api.post<ImportedDocumentDetail>(`/imports/documents/${documentId}/confirm`, {
-        new_client_name: clientName.trim() || undefined,
-        new_project_name: projectName.trim() || undefined,
+      api.patch<ImportedDocumentDetail>(`/imports/documents/${documentId}/candidate`, edited),
+    onSuccess: () => {
+      toast.success(t("imp.review.saved_note"));
+      setEdited({});
+      onChanged();
+      void documentQuery.refetch();
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  const confirmMutation = useMutation({
+    mutationFn: async () => {
+      // The workspace has a single primary action (matching the
+      // reviewer's mental model: correct fields, then confirm) --
+      // any pending corrections are saved first so the quotation
+      // `confirm_import` creates always reflects exactly what's shown
+      // on screen, never a stale pre-edit value.
+      if (Object.keys(edited).length > 0) {
+        await api.patch<ImportedDocumentDetail>(
+          `/imports/documents/${documentId}/candidate`,
+          edited,
+        );
+      }
+      const effectiveClientName = (
+        (edited.client_name !== undefined ? edited.client_name : candidate?.client_name) ?? ""
+      ).trim();
+      const effectiveProjectName = (
+        (edited.project_name !== undefined ? edited.project_name : candidate?.project_name) ?? ""
+      ).trim();
+      return api.post<ImportedDocumentDetail>(`/imports/documents/${documentId}/confirm`, {
+        new_client_name: effectiveClientName || undefined,
+        new_project_name: effectiveProjectName || undefined,
         include_boq: includeBoq,
-      }),
+      });
+    },
     onSuccess: () => {
       toast.success(t("imp.review.confirmed_note"));
+      setEdited({});
       onChanged();
       void documentQuery.refetch();
     },
@@ -474,35 +789,9 @@ function ReviewDialog({
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
-  const document = documentQuery.data;
-  const candidate = document?.quotation_candidate ?? null;
-  const isDecided =
-    document?.review_status === "CONFIRMED" || document?.review_status === "REJECTED";
-
-  const field = (label: string, value: string | null, confidenceKey?: string) => {
-    if (value === null || value === "") return null;
-    const confidence = confidenceKey ? candidate?.field_confidence[confidenceKey] : undefined;
-    return (
-      <div className="flex items-start justify-between gap-3 border-b border-border/60 py-2 text-sm last:border-0">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="flex items-center gap-2 text-end font-medium">
-          {value}
-          {confidence && (
-            <Badge
-              variant={confidence === "HIGH" ? "outline" : "secondary"}
-              className="text-[10px]"
-            >
-              {confidence}
-            </Badge>
-          )}
-        </span>
-      </div>
-    );
-  };
-
   return (
     <Dialog open={documentId !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="flex max-h-[92vh] flex-col overflow-hidden sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>{document?.filename ?? t("imp.review.title")}</DialogTitle>
         </DialogHeader>
@@ -512,77 +801,86 @@ function ReviewDialog({
         )}
 
         {document && (
-          <div className="space-y-4">
-            <p className="text-xs text-muted-foreground">{t("imp.review.source_note")}</p>
+          <div className="flex flex-1 flex-col gap-4 overflow-hidden">
+            <div className="grid flex-1 gap-4 overflow-hidden md:grid-cols-2">
+              <DocumentPreviewPanel documentId={document.id} pageCount={document.page_count} />
 
-            {!candidate && (
-              <p className="text-sm text-destructive">{t("imp.review.no_candidate")}</p>
-            )}
+              <div className="flex flex-col gap-4 overflow-y-auto pe-1">
+                <p className="text-xs text-muted-foreground">{t("imp.review.source_note")}</p>
 
-            {candidate && (
-              <div className="surface-panel divide-y divide-border px-3">
-                {field(t("imp.review.client_name"), candidate.client_name, "client_name")}
-                {field(t("imp.review.project_name"), candidate.project_name, "project_name")}
-                {field("Quotation #", candidate.quotation_number, "quotation_number")}
-                {field(
-                  "Date",
-                  candidate.quotation_date
-                    ? formatDate(candidate.quotation_date, lang as "en" | "ar")
-                    : null,
-                  "quotation_date",
+                {!candidate && (
+                  <p className="text-sm text-destructive">{t("imp.review.no_candidate")}</p>
                 )}
-                {field("Net", candidate.net_value, "net_value")}
-                {field("VAT", candidate.tax_value, "tax_value")}
-                {field("Gross", candidate.gross_value, "gross_value")}
-              </div>
-            )}
 
-            {!isDecided && candidate && (
-              <div className="space-y-3 border-t border-border pt-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="review-client-name">{t("imp.review.client_name")}</Label>
-                  <Input
-                    id="review-client-name"
-                    value={clientName || candidate.client_name || ""}
-                    onChange={(e) => setClientName(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="review-project-name">{t("imp.review.project_name")}</Label>
-                  <Input
-                    id="review-project-name"
-                    value={projectName || candidate.project_name || ""}
-                    onChange={(e) => setProjectName(e.target.value)}
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={includeBoq}
-                    onChange={(e) => setIncludeBoq(e.target.checked)}
-                  />
-                  {t("imp.review.include_boq")}
-                </label>
-                <div className="space-y-1.5">
-                  <Label htmlFor="review-reject-reason">{t("imp.review.reject_reason")}</Label>
-                  <Input
-                    id="review-reject-reason"
-                    value={rejectReason}
-                    onChange={(e) => setRejectReason(e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
+                {candidate && (
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {CANDIDATE_FIELD_DEFS.filter((def) => def.primary).map((def) => (
+                        <CandidateFieldRow
+                          key={def.key}
+                          def={def}
+                          candidate={candidate}
+                          edited={edited}
+                          disabled={isDecided}
+                          onChange={handleFieldChange}
+                        />
+                      ))}
+                    </div>
 
-            {document.review_status === "CONFIRMED" && (
-              <p className="text-sm text-emerald-600">{t("imp.review.confirmed_note")}</p>
-            )}
-            {document.review_status === "REJECTED" && (
-              <p className="text-sm text-muted-foreground">{t("imp.review.rejected_note")}</p>
-            )}
+                    <details className="rounded-md border border-border/70 p-3">
+                      <summary className="cursor-pointer text-sm font-medium">
+                        {t("imp.review.more_fields")}
+                      </summary>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        {CANDIDATE_FIELD_DEFS.filter((def) => !def.primary).map((def) => (
+                          <CandidateFieldRow
+                            key={def.key}
+                            def={def}
+                            candidate={candidate}
+                            edited={edited}
+                            disabled={isDecided}
+                            onChange={handleFieldChange}
+                          />
+                        ))}
+                      </div>
+                    </details>
+
+                    {!isDecided && (
+                      <div className="space-y-3 border-t border-border pt-4">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={includeBoq}
+                            onChange={(e) => setIncludeBoq(e.target.checked)}
+                          />
+                          {t("imp.review.include_boq")}
+                        </label>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="review-reject-reason">
+                            {t("imp.review.reject_reason")}
+                          </Label>
+                          <Input
+                            id="review-reject-reason"
+                            value={rejectReason}
+                            onChange={(e) => setRejectReason(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {document.review_status === "CONFIRMED" && (
+                  <p className="text-sm text-emerald-600">{t("imp.review.confirmed_note")}</p>
+                )}
+                {document.review_status === "REJECTED" && (
+                  <p className="text-sm text-muted-foreground">{t("imp.review.rejected_note")}</p>
+                )}
+              </div>
+            </div>
 
             {!isDecided && (
-              <DialogFooter>
+              <DialogFooter className="shrink-0 border-t border-border pt-4">
                 <Button
                   type="button"
                   variant="outline"
@@ -590,6 +888,16 @@ function ReviewDialog({
                   onClick={() => rejectMutation.mutate()}
                 >
                   {t("imp.review.reject")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!hasEdits || saveMutation.isPending}
+                  onClick={() => saveMutation.mutate()}
+                  className="gap-1.5"
+                >
+                  {saveMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
+                  {t("imp.review.save_changes")}
                 </Button>
                 <Button
                   type="button"

@@ -154,6 +154,45 @@ describe("api client error handling", () => {
     }
   });
 
+  it("patch sends a PATCH request with a JSON body", async () => {
+    let capturedInit: RequestInit | undefined;
+    global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }) as typeof fetch;
+
+    await api.patch("/imports/documents/1/candidate", { client_name: "ABC Holdings" });
+
+    expect(capturedInit?.method).toBe("PATCH");
+    expect(capturedInit?.body).toBe(JSON.stringify({ client_name: "ABC Holdings" }));
+  });
+
+  it("getBlob resolves a binary response as a Blob, not parsed JSON", async () => {
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const response = new Response(pngBytes, {
+      status: 200,
+      headers: { "Content-Type": "image/png" },
+    });
+    global.fetch = vi.fn().mockResolvedValue(response) as typeof fetch;
+
+    const blob = await api.getBlob("/imports/documents/1/pages/1");
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.size).toBe(4);
+  });
+
+  it("getBlob still throws ApiError on a non-ok response, same as request()", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Page 99 is out of range." }), { status: 422 }),
+      ) as typeof fetch;
+
+    await expect(api.getBlob("/imports/documents/1/pages/99")).rejects.toMatchObject({
+      status: 422,
+      message: "Page 99 is out of range.",
+    });
+  });
+
   it("uploadFiles sends a multipart FormData body without a JSON Content-Type header", async () => {
     let capturedInit: RequestInit | undefined;
     global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {

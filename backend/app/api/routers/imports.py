@@ -28,7 +28,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_permission
@@ -42,8 +42,10 @@ from app.api.schemas_imports import (
     ImportedDocumentSummary,
     ImportedQuotationCandidateRead,
     RejectImportRequest,
+    UpdateQuotationCandidateRequest,
 )
 from app.core.config import settings
+from app.core.document_preview import get_page_count, render_page_preview
 from app.database.session import session_scope
 from app.models.import_staging import ImportedDocument
 from app.services import import_service
@@ -255,6 +257,21 @@ def upload_batch_documents(
     return BatchUploadAccepted(accepted_files=accepted_files)
 
 
+def _page_count_for(document: ImportedDocument) -> int | None:
+    """`None` whenever a page-by-page preview isn't available -- a
+    non-PDF document, or a PDF `get_page_count` can't open (moved/
+    deleted file, corrupted, password-protected). Deliberately swallows
+    every such failure rather than letting a preview nicety turn a
+    document-read request into a 500 -- the reviewer can always still
+    see and edit the extracted fields even with no preview panel."""
+    if document.extension.lower() != "pdf":
+        return None
+    try:
+        return get_page_count(Path(document.original_path))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 @router.get("/documents/{document_id}", response_model=ImportedDocumentRead)
 def get_document(
     document_id: int,
@@ -275,7 +292,73 @@ def get_document(
         resulting_project_id=document.resulting_project_id,
         resulting_quotation_id=document.resulting_quotation_id,
         quotation_candidate=_candidate_read(document),
+        page_count=_page_count_for(document),
     )
+
+
+@router.get("/documents/{document_id}/pages/{page_number}")
+def get_document_page_preview(
+    document_id: int,
+    page_number: int,
+    session: Session = Depends(get_db),
+    _user=Depends(require_permission(_PERMISSION)),
+) -> Response:
+    """Renders one page of the ORIGINAL source document to a PNG, for
+    the review workspace's side-by-side viewer -- reuses
+    `app.core.document_preview.render_page_preview` exactly as-is (the
+    same rasterization the desktop app's segment-boundary review dialog
+    would use), never a new rendering path. Read-only: never touches
+    `document.original_path` itself, only opens it for rendering.
+
+    PDF only for now, matching what `render_page_preview` actually
+    supports -- an Excel/Word/CSV/text document has no page-image
+    concept to render, and `ImportedDocumentRead.page_count` is already
+    `None` for those so the frontend never tries to call this for them.
+    """
+    document = _get_document_or_404(session, document_id)
+    if document.extension.lower() != "pdf":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Page preview is only available for PDF documents.",
+        )
+    try:
+        png_bytes = render_page_preview(Path(document.original_path), page_number)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@router.patch("/documents/{document_id}/candidate", response_model=ImportedDocumentRead)
+def update_document_candidate(
+    document_id: int,
+    payload: UpdateQuotationCandidateRequest,
+    session: Session = Depends(get_db),
+    _user=Depends(require_permission(_PERMISSION)),
+) -> ImportedDocumentRead:
+    """Reviewer corrections to one or more extracted quotation fields --
+    wraps the existing, already-tested `import_service.update_quotation_
+    candidate` (the same function the desktop app's review dialog already
+    calls; see that function's own docstring on why a genuine edit also
+    clears the field's LOW/NEEDS_REVIEW confidence flag). `exclude_unset`
+    means only fields the caller actually included in the request body
+    are applied -- omitted fields are left untouched, but a field sent
+    as `null` is deliberately cleared.
+    """
+    document = _get_document_or_404(session, document_id)
+    candidate = document.quotation_candidate
+    if candidate is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="This document has no extracted quotation data to edit yet.",
+        )
+    fields = payload.model_dump(exclude_unset=True)
+    try:
+        import_service.update_quotation_candidate(session, document, candidate, **fields)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    return get_document(document_id, session=session, _user=_user)
 
 
 @router.post("/documents/{document_id}/confirm", response_model=ImportedDocumentRead)

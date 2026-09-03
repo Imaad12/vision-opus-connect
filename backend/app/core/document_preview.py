@@ -77,3 +77,27 @@ def render_page_preview(path: Path, page_number: int, *, dpi: int = 150) -> byte
         return rasterize_page_to_png(page, dpi=dpi)
     finally:
         document.close()
+
+
+def get_page_count(path: Path) -> int:
+    """How many pages `path` has, for a caller building a pager ("page N
+    of M") that doesn't need every page rasterized just to know the
+    total. Same open/validate/close discipline and failure modes as
+    `render_page_preview` (`FileNotFoundError`/`ValueError`), deliberately
+    not implemented as `len(list(render every page))` -- opening the
+    document once is far cheaper than rendering it."""
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Source file not found: {path}")
+
+    try:
+        document = pymupdf.open(path)
+    except Exception as exc:  # noqa: BLE001 - pymupdf's own exception types for a corrupt/unsupported file
+        raise ValueError(f"Could not open '{path.name}' as a document: {exc}") from exc
+
+    try:
+        if document.needs_pass:
+            raise ValueError(f"'{path.name}' is password-protected and cannot be previewed.")
+        return document.page_count
+    finally:
+        document.close()

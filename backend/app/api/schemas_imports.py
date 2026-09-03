@@ -105,12 +105,47 @@ class ImportedDocumentRead(ImportedDocumentSummary):
     finished for yet, or one segmented into more than one candidate
     (out of this feature's current scope -- see this feature's own
     report; segmentation review has its own richer UI not exposed here
-    yet)."""
+    yet).
+
+    `page_count` is `None` whenever a page-by-page preview isn't
+    available -- a non-PDF document (Excel/Word/CSV/text/image), or a
+    PDF the router couldn't open (see `get_document`'s own try/except:
+    this is a display nicety, not something that should ever turn a
+    document-read request into a 500). Never fabricated -- the frontend
+    must treat `None` as "no preview", not as "one page"."""
 
     resulting_client_id: int | None
     resulting_project_id: int | None
     resulting_quotation_id: int | None
     quotation_candidate: ImportedQuotationCandidateRead | None
+    page_count: int | None = None
+
+
+class UpdateQuotationCandidateRequest(BaseModel):
+    """`PATCH /imports/documents/{id}/candidate` -- reviewer corrections
+    to one or more extracted quotation fields, applied before confirming.
+    Mirrors `import_service._QUOTATION_EDITABLE_FIELDS` exactly (the
+    route rejects anything else via `update_quotation_candidate` itself).
+
+    Every field is optional and the route reads only the ones the
+    caller actually set (`payload.model_dump(exclude_unset=True)`) --
+    omitting a field leaves it untouched, but sending it as `null`
+    deliberately clears it (e.g. the reviewer decides an extracted
+    currency was wrong and there's nothing to replace it with yet)."""
+
+    quotation_number: str | None = None
+    quotation_date: date | None = None
+    client_name: str | None = None
+    project_name: str | None = None
+    project_number: str | None = None
+    description: str | None = None
+    currency: str | None = None
+    net_value: Decimal | None = None
+    tax_value: Decimal | None = None
+    gross_value: Decimal | None = None
+    valid_until: date | None = None
+    payment_terms: str | None = None
+    notes: str | None = None
 
 
 class ConfirmImportRequest(BaseModel):

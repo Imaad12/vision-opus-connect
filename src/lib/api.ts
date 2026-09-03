@@ -157,7 +157,13 @@ function handleUnauthorized(): void {
   });
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// Shared by `request` (parses JSON) and `requestBlob` (parses binary
+// image bytes -- see `api.getBlob`, used for the import review
+// workspace's page-preview panel): everything up to "respond with the
+// right value" is identical for a JSON endpoint and a `Response(...,
+// media_type="image/png")` endpoint alike -- same auth header, same
+// timeout/network/401/non-ok handling.
+async function fetchOk(path: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method ?? "GET").toUpperCase();
   // A `FormData` body (file uploads -- see `api.uploadFiles` below) must
   // never get an explicit `Content-Type: application/json`: the browser
@@ -216,8 +222,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, detail, "http", method, path);
   }
 
+  return response;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetchOk(path, init);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** Same auth/timeout/error handling as `request`, but for a binary
+ * (non-JSON) response body -- see `api.getBlob`. */
+async function requestBlob(path: string): Promise<Blob> {
+  const response = await fetchOk(path);
+  return response.blob();
 }
 
 function withQuery(path: string, params?: Record<string, string | undefined>): string {
@@ -237,6 +255,8 @@ export const api = {
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
+  patch: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   /** Multipart file upload -- `fieldName` must match the backend
    * route's `UploadFile`/`list[UploadFile]` parameter name (see
    * app/api/routers/imports.py's `files: list[UploadFile]`, which
@@ -246,4 +266,11 @@ export const api = {
     for (const file of files) formData.append(fieldName, file);
     return request<T>(path, { method: "POST", body: formData });
   },
+  /** Fetches a binary (non-JSON) response body, e.g. the import review
+   * workspace's `GET /imports/documents/{id}/pages/{n}` page-preview
+   * PNG -- same auth header/timeout/error handling as every other
+   * `api.*` call, just returning a `Blob` instead of parsed JSON. The
+   * caller is responsible for turning it into an object URL (and
+   * revoking that URL once done with it). */
+  getBlob: (path: string) => requestBlob(path),
 };
