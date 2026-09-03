@@ -27,21 +27,33 @@ directly.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.enums import (
     DEFAULT_CURRENCY,
     Currency,
+    DocumentSourceType,
+    ExtractionStatus,
     ImportAuditEventType,
+    ImportDocumentKind,
     ImportReviewStatus,
     ClientAwardEvidenceMatchStatus,
 )
 from app.core.import_normalization import normalize_whitespace
-from app.models import ImportAuditLogEntry, ImportedDocument, ImportedClientAwardEvidenceCandidate, ClientAwardEvidence, Quotation
+from app.models import (
+    ImportAuditLogEntry,
+    ImportedDocument,
+    ImportedClientAwardEvidenceCandidate,
+    ClientAwardEvidence,
+    Project,
+    Quotation,
+)
 from app.services import quotation_service
 from app.services.errors import ValidationError
 from app.services.po_matching import match_quotation_for_reference
@@ -50,6 +62,12 @@ __all__ = [
     "confirm_client_award_evidence_import",
     "reject_client_award_evidence_import",
     "reconcile_unmatched_client_award_evidence",
+    "list_client_award_evidence",
+    "list_client_award_evidence_for_quotation",
+    "get_client_award_evidence",
+    "get_client_award_evidence_source_document",
+    "record_client_award_evidence",
+    "attach_client_award_evidence_document",
 ]
 
 
@@ -303,3 +321,237 @@ def reconcile_unmatched_client_award_evidence(session: Session) -> list[ClientAw
             continue  # matched, but not confirmable yet -- left MATCHED for manual review
 
     return reconciled
+
+
+# --- Manual recording (the "POs Awarded by Client" screen) --------------------
+#
+# Everything below this line is the hand-entered counterpart to the
+# OCR-import-confirmed path above. A reviewer typing a PO's details
+# directly into a form is the exact same business event as an OCR
+# extraction being confirmed -- the same award rules apply either way --
+# but there is no `ImportedDocument`/staged candidate driving it, so it
+# cannot reuse `confirm_client_award_evidence_import` itself. The
+# award-value/one-shot-`mark_awarded` logic is intentionally mirrored
+# here (not extracted into a shared private helper): the two callers'
+# surrounding bookkeeping (staged-document audit logging vs. none) differs
+# enough that a shared helper would need almost as many parameters as it
+# saved lines, and `confirm_client_award_evidence_import` is left
+# completely untouched to avoid any risk to its existing, already-tested
+# behavior.
+
+
+def list_client_award_evidence(session: Session) -> list[ClientAwardEvidence]:
+    """Every recorded client award/PO, newest first -- the data behind
+    the "POs Awarded by Client" screen. Eagerly loads exactly the path
+    that screen needs (quotation -> project -> client, and the awarded
+    version) in one query rather than N+1 lazy loads."""
+    stmt = (
+        select(ClientAwardEvidence)
+        .where(ClientAwardEvidence.is_deleted.is_(False))
+        .options(
+            joinedload(ClientAwardEvidence.quotation)
+            .joinedload(Quotation.project)
+            .joinedload(Project.client),
+            joinedload(ClientAwardEvidence.awarded_quotation_version),
+        )
+        .order_by(ClientAwardEvidence.id.desc())
+    )
+    return list(session.execute(stmt).unique().scalars().all())
+
+
+def list_client_award_evidence_for_quotation(session: Session, quotation_id: int) -> list[ClientAwardEvidence]:
+    """Every client award/PO recorded against one quotation -- almost
+    always zero or one, but never enforced as unique here: a second PO
+    confirmed against an already-awarded quotation is valid additional
+    evidence (see `confirm_client_award_evidence_import`'s own
+    docstring), and the same is true of a second manually-recorded one."""
+    stmt = (
+        select(ClientAwardEvidence)
+        .where(ClientAwardEvidence.quotation_id == quotation_id, ClientAwardEvidence.is_deleted.is_(False))
+        .options(joinedload(ClientAwardEvidence.awarded_quotation_version))
+        .order_by(ClientAwardEvidence.id.desc())
+    )
+    return list(session.execute(stmt).unique().scalars().all())
+
+
+def get_client_award_evidence(session: Session, client_award_evidence_id: int) -> ClientAwardEvidence | None:
+    evidence = session.get(ClientAwardEvidence, client_award_evidence_id)
+    if evidence is None or evidence.is_deleted:
+        return None
+    return evidence
+
+
+def get_client_award_evidence_source_document(
+    session: Session, client_award_evidence_id: int
+) -> ImportedDocument | None:
+    """The original file this award traces back to, if any --
+    `resulting_client_award_evidence_id` is set either by
+    `confirm_client_award_evidence_import` (the OCR path) or by
+    `attach_client_award_evidence_document` below (a PDF attached to a
+    manually-recorded award). `None` for a manual award with nothing
+    attached -- honest, not a missing feature: a Client PO recorded from
+    a phone call or an email has no source document to show."""
+    stmt = select(ImportedDocument).where(
+        ImportedDocument.resulting_client_award_evidence_id == client_award_evidence_id
+    )
+    return session.execute(stmt).scalars().first()
+
+
+def record_client_award_evidence(
+    session: Session,
+    quotation: Quotation,
+    *,
+    po_reference_number: str,
+    po_date: date | None = None,
+    net_value: Decimal | None = None,
+    tax_value: Decimal | None = None,
+    gross_value: Decimal | None = None,
+    currency: Currency | None = None,
+    notes: str | None = None,
+) -> ClientAwardEvidence:
+    """Manually record a client award/PO against `quotation` -- what a
+    "Record Client PO" button on the Quotations screen calls, as
+    opposed to a PO arriving through the OCR-import staging pipeline.
+
+    Idempotent by `po_reference_number`, exactly like the import path,
+    but *raises* on a duplicate here rather than silently returning the
+    existing row: a form submission needs a clear "already recorded"
+    error, not a silent success carrying someone else's data.
+
+    Same one-shot award trigger as the import path: the first time any
+    PO (manual or imported) is recorded against a not-yet-awarded
+    quotation, this calls the existing, unmodified
+    `quotation_service.mark_awarded` -- the ONLY place `Project.
+    contract_value` is ever set. A second PO against an
+    already-awarded quotation is recorded as additional evidence only,
+    never re-awarding.
+
+    The quotation's own `quoted_value` is never read back and
+    overwritten with the awarded value -- `net_value`/`tax_value`/
+    `gross_value` are stored only on this new row, independently. Any
+    variance between the two is a read-time comparison the API layer
+    computes, never persisted or reconciled away (see
+    `schemas_sales.ClientAwardEvidenceRead.variance`).
+    """
+    normalized_reference = normalize_whitespace(po_reference_number)
+    if not normalized_reference:
+        raise ValidationError("A client PO reference number is required.")
+    if _find_existing_client_award_evidence(session, normalized_reference) is not None:
+        raise ValidationError(f"A client PO with reference '{normalized_reference}' is already recorded.")
+
+    current_version = quotation_service.get_current_version(session, quotation)
+    if current_version is None:
+        raise ValidationError(f"Quotation '{quotation.reference_number}' has no version to award.")
+
+    project = quotation.project
+    already_awarded = project.contract_value is not None
+
+    contract_value: Decimal | None = None
+    if not already_awarded:
+        if net_value is not None and net_value > 0:
+            contract_value = net_value
+        elif current_version.quoted_value is not None and current_version.quoted_value > 0:
+            contract_value = current_version.quoted_value
+        if contract_value is None:
+            raise ValidationError(
+                "Cannot record this award: neither the client PO nor the quotation's current "
+                "version has a usable positive value. Enter an awarded value before recording."
+            )
+
+    client_award_evidence = ClientAwardEvidence(
+        quotation_id=quotation.id,
+        po_reference_number=normalized_reference,
+        po_date=po_date,
+        net_value=net_value,
+        tax_value=tax_value,
+        gross_value=gross_value,
+        currency=currency or current_version.currency,
+        notes=(notes or "").strip() or None,
+    )
+    session.add(client_award_evidence)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        # Defense in depth against the proactive check above racing a
+        # concurrent insert of the same reference -- the DB's own unique
+        # constraint is the real guarantee; this just turns it into the
+        # same clean error message rather than a raw 500.
+        session.rollback()
+        raise ValidationError(f"A client PO with reference '{normalized_reference}' is already recorded.") from exc
+
+    if already_awarded:
+        client_award_evidence.awarded_quotation_version_id = project.winning_quotation_version_id
+    else:
+        quotation_service.mark_awarded(session, current_version, contract_value=contract_value)
+        client_award_evidence.awarded_quotation_version_id = current_version.id
+
+    session.flush()
+    return client_award_evidence
+
+
+def attach_client_award_evidence_document(
+    session: Session, client_award_evidence: ClientAwardEvidence, path: Path, *, original_filename: str
+) -> ImportedDocument:
+    """Attach an already-uploaded client PO PDF to `client_award_evidence`
+    as its source document -- reuses the exact same storage/hashing
+    primitives `import_service.stage_document` uses for every other
+    source document (SHA-256 dedup, `ImportedDocument` as the durable
+    provenance record), imported locally rather than at module level to
+    avoid a circular import (`import_service` already imports this
+    module for `reconcile_unmatched_client_award_evidence`).
+
+    Deliberately does NOT call `run_extraction`: the reviewer just
+    typed every field on this award by hand, so there is nothing for
+    OCR to usefully extract, and running it anyway risks the extractor
+    guessing a *different* `document_kind`/quotation match than the one
+    the human already confirmed -- exactly the "OCR must never create
+    financial truth" rule this whole pipeline exists to enforce. The
+    document is stored and marked `CONFIRMED` immediately, with
+    `resulting_client_award_evidence_id` set directly; if OCR-assisted
+    Client PO documents are wanted later, that is a new, explicit
+    candidate/review flow, not a reason to run today's quotation/PO
+    extractor against a file it was never designed to read.
+    """
+    from app.services.import_service import compute_file_hash, find_existing_by_hash
+
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        raise ValidationError(f"File not found: {path}")
+
+    try:
+        file_size = path.stat().st_size
+        file_hash = compute_file_hash(path)
+    except OSError as exc:
+        raise ValidationError(f"Could not read '{original_filename}': {exc}") from exc
+
+    existing = find_existing_by_hash(session, file_hash)
+    if existing is not None:
+        raise ValidationError(
+            f"'{original_filename}' was already uploaded on {existing.created_at:%d %b %Y} "
+            f"as '{existing.filename}' (staging record #{existing.id})."
+        )
+
+    document = ImportedDocument(
+        source_type=DocumentSourceType.LOCAL,
+        document_kind=ImportDocumentKind.PURCHASE_ORDER,
+        original_path=str(path),
+        filename=original_filename,
+        extension=path.suffix.lower().lstrip("."),
+        file_size=file_size,
+        file_hash=file_hash,
+        extraction_status=ExtractionStatus.EXTRACTION_COMPLETE,
+        review_status=ImportReviewStatus.CONFIRMED,
+        resulting_client_award_evidence_id=client_award_evidence.id,
+        confirmed_at=datetime.now(UTC).replace(tzinfo=None),
+        notes="Attached directly to a manually-recorded client PO -- not OCR-extracted.",
+    )
+    session.add(document)
+    session.flush()
+    _log(
+        session,
+        document,
+        ImportAuditEventType.CONFIRMED,
+        note=f"Attached as source document for client PO #{client_award_evidence.id}, entered manually.",
+    )
+    session.flush()
+    return document

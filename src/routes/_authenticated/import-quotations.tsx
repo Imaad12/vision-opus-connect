@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, FileText, Loader2, Upload } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type RefObject,
+} from "react";
 import { toast } from "sonner";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
@@ -274,6 +281,14 @@ function ImportWorkspace() {
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   const [newBatchLabel, setNewBatchLabel] = useState("");
   const [reviewing, setReviewing] = useState<number | null>(null);
+  // Tracked in React state (not read from the ref only at submit time) so
+  // the UI can show what's actually selected and gate the Upload button on
+  // it -- previously nothing displayed the selection at all, and Upload
+  // stayed enabled with zero files chosen (a silent no-op on click, easily
+  // mistaken for "the picker isn't working"). `fileInputRef` itself is
+  // still needed too: clearing `input.value` after a successful upload is
+  // the only way to actually reset a native file input's selection.
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
   const batchesQuery = useQuery({
     queryKey: ["import-batches"],
@@ -342,15 +357,24 @@ function ImportWorkspace() {
       toast.success(`${result.accepted_files.length} ${t("imp.upload.accepted_suffix")}`);
       invalidateBatch();
       if (fileInputRef.current) fileInputRef.current.value = "";
+      setSelectedFiles([]);
     },
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
+  const handleFilesChosen = (e: ChangeEvent<HTMLInputElement>) => {
+    setSelectedFiles(Array.from(e.target.files ?? []));
+  };
+
   const handleUpload = (e: FormEvent) => {
     e.preventDefault();
-    const files = fileInputRef.current?.files;
-    if (!files || files.length === 0 || selectedBatchId === null) return;
-    uploadMutation.mutate(Array.from(files));
+    // Reads from state (populated by the input's own onChange), not from
+    // `fileInputRef.current.files` at submit time -- both point at the
+    // same underlying FileList in practice, but state is what the button's
+    // `disabled` check below also uses, so there's exactly one source of
+    // truth for "are files selected" rather than two that could disagree.
+    if (selectedFiles.length === 0 || selectedBatchId === null) return;
+    uploadMutation.mutate(selectedFiles);
   };
 
   const summary = summaryQuery.data;
@@ -396,26 +420,14 @@ function ImportWorkspace() {
 
         {selectedBatchId !== null && (
           <>
-            <form className="surface-panel space-y-3 p-4" onSubmit={handleUpload}>
-              <p className="text-sm font-medium">{t("imp.upload.title")}</p>
-              <p className="text-xs text-muted-foreground">{t("imp.upload.hint")}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
-                />
-                <Button type="submit" disabled={uploadMutation.isPending} className="gap-1.5">
-                  {uploadMutation.isPending ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <Upload className="size-4" />
-                  )}
-                  {t("imp.upload.button")}
-                </Button>
-              </div>
-            </form>
+            <UploadFilesForm
+              fileInputRef={fileInputRef}
+              selectedFiles={selectedFiles}
+              onFilesChosen={handleFilesChosen}
+              onSubmit={handleUpload}
+              submitting={uploadMutation.isPending}
+              t={t}
+            />
 
             {summary && (
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -514,6 +526,73 @@ function ImportWorkspace() {
         onChanged={invalidateBatch}
       />
     </>
+  );
+}
+
+/** The batch upload form -- a plain, exported subcomponent (not inlined
+ * into `ImportWorkspace`) specifically so it can be rendered and clicked
+ * in isolation by a DOM-level test (`import-quotations.upload.test.tsx`)
+ * without needing to mock this page's Supabase/react-query/router
+ * dependencies. See the file input's own inline comment for why it's a
+ * genuine native `<input type="file">` clicked directly, not a hidden
+ * input behind a ref.click() proxy. */
+export function UploadFilesForm({
+  fileInputRef,
+  selectedFiles,
+  onFilesChosen,
+  onSubmit,
+  submitting,
+  t,
+}: {
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  selectedFiles: File[];
+  onFilesChosen: (e: ChangeEvent<HTMLInputElement>) => void;
+  onSubmit: (e: FormEvent) => void;
+  submitting: boolean;
+  t: (key: string) => string;
+}) {
+  return (
+    <form className="surface-panel space-y-3 p-4" onSubmit={onSubmit}>
+      <p className="text-sm font-medium">{t("imp.upload.title")}</p>
+      <p className="text-xs text-muted-foreground">{t("imp.upload.hint")}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* A genuine native <input type="file">, clicked directly by
+            the user -- deliberately NOT a hidden input behind a
+            styled <button> + ref.click() proxy (that indirection is
+            exactly what tends to silently break: a wrapping form/
+            button swallowing the click, a re-render replacing the
+            node, a disabled/overlay state creeping in). Tailwind's
+            `file:*` classes style this element's own native
+            "Choose Files" button in place, so there is no separate
+            click target that can fall out of sync with it -- this
+            works identically in Chrome/Safari on macOS and in the
+            Tauri desktop WebView, none of which need any special
+            handling for a plain file input. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="application/pdf"
+          onChange={onFilesChosen}
+          aria-label={t("imp.upload.choose_files")}
+          className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+        />
+        <Button
+          type="submit"
+          disabled={submitting || selectedFiles.length === 0}
+          className="gap-1.5"
+        >
+          {submitting ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+          {t("imp.upload.button")}
+        </Button>
+      </div>
+      {selectedFiles.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-testid="imp-selected-files">
+          {selectedFiles.length} {t("imp.upload.selected_suffix")}:{" "}
+          {selectedFiles.map((f) => f.name).join(", ")}
+        </p>
+      )}
+    </form>
   );
 }
 

@@ -1,10 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { FileText, ListOrdered, Plus, Search, Send, ShieldCheck, Upload, X } from "lucide-react";
-import { useState } from "react";
+import {
+  Award,
+  ExternalLink,
+  FileSignature,
+  FileText,
+  ListOrdered,
+  Plus,
+  Search,
+  Send,
+  ShieldCheck,
+  Upload,
+  X,
+} from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { NoAccess, PageHeader } from "@/components/app-shell";
+import type { ClientAwardEvidence } from "@/routes/_authenticated/client-po";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,7 +33,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useMe } from "@/hooks/use-auth";
 import { ApiError, api } from "@/lib/api";
 import { formatDate, formatMoney, useI18n } from "@/lib/i18n";
-import { QK_PROJECTS, QK_QUOTATIONS } from "@/lib/shared-query-keys";
+import { QK_CLIENT_AWARD_EVIDENCE, QK_PROJECTS, QK_QUOTATIONS } from "@/lib/shared-query-keys";
 
 // This page is deliberately NOT built on the generic `ResourcePage`
 // (see resource-page.tsx / customers.tsx / suppliers.tsx / projects.tsx):
@@ -103,12 +116,14 @@ function QuotationsPage() {
   const [revisionTarget, setRevisionTarget] = useState<QuotationVersion | null>(null);
   const [awardTarget, setAwardTarget] = useState<QuotationVersion | null>(null);
   const [boqTarget, setBoqTarget] = useState<QuotationVersion | null>(null);
+  const [clientPoTarget, setClientPoTarget] = useState<QuotationVersion | null>(null);
 
   const canView = me.can("quotations.view");
   const canCreate = me.can("quotations.create");
   const canSubmit = me.can("quotations.submit");
   const canEdit = me.can("quotations.edit");
   const canApprove = me.can("quotations.approve");
+  const canCreateContract = me.can("contracts.create");
 
   const listQuery = useQuery({
     queryKey: QK_QUOTATIONS,
@@ -116,7 +131,26 @@ function QuotationsPage() {
     queryFn: () => api.get<QuotationVersion[]>("/quotations"),
   });
 
+  // Client-award-evidence ("Client PO") rows, keyed by *quotation* id (not
+  // version id) so a WON quotation's row can look up whether a Client PO
+  // has already been recorded against it -- see client-po.tsx for the
+  // full domain explanation. Shares one cache entry with that page via
+  // QK_CLIENT_AWARD_EVIDENCE.
+  const evidenceQuery = useQuery({
+    queryKey: QK_CLIENT_AWARD_EVIDENCE,
+    enabled: canView,
+    queryFn: () => api.get<ClientAwardEvidence[]>("/client-award-evidence"),
+  });
+  const evidenceByQuotation = new Map<number, ClientAwardEvidence[]>();
+  for (const e of evidenceQuery.data ?? []) {
+    const list = evidenceByQuotation.get(e.quotation_id) ?? [];
+    list.push(e);
+    evidenceByQuotation.set(e.quotation_id, list);
+  }
+
   const refresh = () => void queryClient.invalidateQueries({ queryKey: QK_QUOTATIONS });
+  const refreshEvidence = () =>
+    void queryClient.invalidateQueries({ queryKey: QK_CLIENT_AWARD_EVIDENCE });
 
   const transition = useMutation({
     mutationFn: (args: { versionId: number; action: string; body?: unknown }) =>
@@ -124,6 +158,15 @@ function QuotationsPage() {
     onSuccess: () => {
       toast.success(t("common.saved"));
       refresh();
+    },
+    onError: (e: unknown) => toast.error(errorMessage(e)),
+  });
+
+  const createContract = useMutation({
+    mutationFn: (projectId: number) => api.post(`/projects/${projectId}/contracts`, {}),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      refreshEvidence();
     },
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
@@ -154,6 +197,11 @@ function QuotationsPage() {
         title={t("nav.quotations")}
         actions={
           <>
+            <Button variant="outline" className="gap-1.5" asChild>
+              <Link to="/client-po">
+                <Award className="size-4" /> {t("nav.client_po")}
+              </Link>
+            </Button>
             {canCreate && (
               <Button variant="outline" className="gap-1.5" asChild>
                 <Link to="/import-quotations">
@@ -194,26 +242,46 @@ function QuotationsPage() {
                 <th className="px-3 py-2.5 text-start">{t("quote.quoted_value")}</th>
                 <th className="px-3 py-2.5 text-start">{t("quote.valid_until")}</th>
                 <th className="px-3 py-2.5 text-start">{t("common.status")}</th>
+                <th className="px-3 py-2.5 text-start">{t("nav.client_po")}</th>
                 <th className="px-3 py-2.5 text-end">{t("common.actions")}</th>
               </tr>
             </thead>
             <tbody>
               {listQuery.isLoading && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
+                  <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">
                     {t("common.loading")}
                   </td>
                 </tr>
               )}
               {!listQuery.isLoading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-10 text-center text-muted-foreground">
+                  <td colSpan={10} className="px-3 py-10 text-center text-muted-foreground">
                     {t("common.empty")}
                   </td>
                 </tr>
               )}
               {rows.map((v) => {
                 const versionStatus = v.status;
+                const evidenceForQuotation = evidenceByQuotation.get(v.quotation_id) ?? [];
+                const primaryEvidence = evidenceForQuotation[0] ?? null;
+                // `record_client_award_evidence` performs the award itself
+                // (via `mark_awarded`) the first time any PO is recorded
+                // against a SUBMITTED quotation, exactly like the
+                // pre-existing bare "Award" (ShieldCheck) action does --
+                // so a recorded PO is possible, and shown identically,
+                // whether the version is still SUBMITTED or already WON
+                // (awarded through the older bare-value flow).
+                const clientPoStatus =
+                  versionStatus === "LOST"
+                    ? "lost"
+                    : primaryEvidence !== null
+                      ? evidenceForQuotation.some((e) => e.contracted)
+                        ? "contracted"
+                        : "client_po_recorded"
+                      : versionStatus === "SUBMITTED" || versionStatus === "WON"
+                        ? "awaiting_client_po"
+                        : "not_awarded";
                 return (
                   <tr
                     key={v.id}
@@ -230,6 +298,16 @@ function QuotationsPage() {
                     <td className="px-3 py-2.5">{formatDate(v.valid_until, lang)}</td>
                     <td className="px-3 py-2.5">
                       <StatusBadge value={versionStatus} />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex flex-col gap-0.5">
+                        <StatusBadge value={clientPoStatus} />
+                        {primaryEvidence && (
+                          <span className="text-xs text-muted-foreground">
+                            {primaryEvidence.po_reference_number}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-end whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
@@ -284,6 +362,36 @@ function QuotationsPage() {
                               <X className="size-4 text-destructive" />
                             </Button>
                           )}
+                        {(versionStatus === "SUBMITTED" || versionStatus === "WON") &&
+                          !primaryEvidence &&
+                          canApprove && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title={t("client_po.record_action")}
+                              onClick={() => setClientPoTarget(v)}
+                            >
+                              <Award className="size-4 text-[color:var(--success)]" />
+                            </Button>
+                          )}
+                        {primaryEvidence && !primaryEvidence.contracted && canCreateContract && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t("client_po.create_contract")}
+                            disabled={createContract.isPending}
+                            onClick={() => createContract.mutate(v.quotation.project.id)}
+                          >
+                            <FileSignature className="size-4" />
+                          </Button>
+                        )}
+                        {primaryEvidence && (
+                          <Button variant="ghost" size="icon" title={t("nav.client_po")} asChild>
+                            <Link to="/client-po">
+                              <ExternalLink className="size-4 text-muted-foreground" />
+                            </Link>
+                          </Button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -306,6 +414,11 @@ function QuotationsPage() {
         onAwarded={refresh}
       />
       <BoqDialog version={boqTarget} onOpenChange={(o) => !o && setBoqTarget(null)} />
+      <RecordClientPoDialog
+        version={clientPoTarget}
+        onOpenChange={(o) => !o && setClientPoTarget(null)}
+        onRecorded={refreshEvidence}
+      />
     </>
   );
 }
@@ -629,6 +742,180 @@ function AwardDialog({
             </Button>
             <Button type="submit" disabled={award.isPending}>
               {t("quote.award")}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RecordClientPoDialog({
+  version,
+  onOpenChange,
+  onRecorded,
+}: {
+  version: QuotationVersion | null;
+  onOpenChange: (v: boolean) => void;
+  onRecorded: () => void;
+}) {
+  const { t, lang } = useI18n();
+  const [poReferenceNumber, setPoReferenceNumber] = useState("");
+  const [poDate, setPoDate] = useState("");
+  const [netValue, setNetValue] = useState("");
+  const [taxValue, setTaxValue] = useState("");
+  const [grossValue, setGrossValue] = useState("");
+  const [currency, setCurrency] = useState("SAR");
+  const [notes, setNotes] = useState("");
+
+  // Pre-populate from the quotation each time a new version is targeted
+  // (P5). The awarded value stays independent from the quotation's
+  // quoted_value from here on -- the user may adjust it before saving,
+  // and nothing here ever writes back to the quotation itself.
+  useEffect(() => {
+    if (version) {
+      setPoReferenceNumber("");
+      setPoDate("");
+      setNetValue(version.quoted_value ?? "");
+      setTaxValue("");
+      setGrossValue("");
+      setCurrency(version.currency);
+      setNotes("");
+    }
+  }, [version]);
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post(`/quotations/${version?.quotation_id}/client-award-evidence`, {
+        po_reference_number: poReferenceNumber,
+        po_date: poDate || null,
+        net_value: netValue || null,
+        tax_value: taxValue || null,
+        gross_value: grossValue || null,
+        currency,
+        notes: notes || null,
+      }),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      onOpenChange(false);
+      onRecorded();
+    },
+    onError: (e: unknown) => toast.error(errorMessage(e)),
+  });
+
+  const quotedValue = version?.quoted_value ? Number(version.quoted_value) : null;
+  const variance = quotedValue !== null && netValue !== "" ? Number(netValue) - quotedValue : null;
+
+  return (
+    <Dialog open={version !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("client_po.dialog_title")}</DialogTitle>
+        </DialogHeader>
+        {version && (
+          <p className="-mt-2 text-xs text-muted-foreground">
+            {version.quotation.reference_number ?? "—"} · {version.quotation.project.name} ·{" "}
+            {version.quotation.project.client.name}
+          </p>
+        )}
+        <form
+          className="grid gap-4 sm:grid-cols-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            create.mutate();
+          }}
+        >
+          <div className="sm:col-span-2">
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("client_po.po_number")}
+            </Label>
+            <Input
+              value={poReferenceNumber}
+              onChange={(e) => setPoReferenceNumber(e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("client_po.po_date")}
+            </Label>
+            <Input type="date" value={poDate} onChange={(e) => setPoDate(e.target.value)} />
+          </div>
+          <div>
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("quote.currency")}
+            </Label>
+            <select
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              value={currency}
+              onChange={(e) => setCurrency(e.target.value)}
+            >
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("client_po.awarded_value")}
+            </Label>
+            <Input
+              type="number"
+              step="any"
+              min={0}
+              value={netValue}
+              onChange={(e) => setNetValue(e.target.value)}
+            />
+            {quotedValue !== null && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("client_po.quoted_value")}: {formatMoney(quotedValue, lang)}
+                {variance !== null && variance !== 0 && (
+                  <span className="text-[color:var(--warning)]">
+                    {" "}
+                    ({t("client_po.variance")}: {formatMoney(variance, lang)})
+                  </span>
+                )}
+              </p>
+            )}
+          </div>
+          <div>
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("client_po.vat")}
+            </Label>
+            <Input
+              type="number"
+              step="any"
+              min={0}
+              value={taxValue}
+              onChange={(e) => setTaxValue(e.target.value)}
+            />
+          </div>
+          <div>
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("client_po.total_value")}
+            </Label>
+            <Input
+              type="number"
+              step="any"
+              min={0}
+              value={grossValue}
+              onChange={(e) => setGrossValue(e.target.value)}
+            />
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("quote.notes")}
+            </Label>
+            <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
+          </div>
+          <DialogFooter className="sm:col-span-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button type="submit" disabled={create.isPending || !poReferenceNumber.trim()}>
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </form>

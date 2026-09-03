@@ -1,6 +1,7 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  Award,
   BadgeCheck,
   Building2,
   ClipboardList,
@@ -66,6 +67,12 @@ const SECTIONS: NavSection[] = [
         to: "/quotations",
         labelKey: "nav.quotations",
         icon: FileText,
+        perms: ["quotations.view"],
+      },
+      {
+        to: "/client-po",
+        labelKey: "nav.client_po",
+        icon: Award,
         perms: ["quotations.view"],
       },
       {

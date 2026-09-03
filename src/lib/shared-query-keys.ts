@@ -29,3 +29,10 @@ export const QK_QUOTATIONS = ["quotations"] as const;
 export const QK_PROJECTS = ["projects"] as const;
 export const QK_MANAGEMENT_CASH_FLOW = ["management-cash-flow"] as const;
 export const QK_MANAGEMENT_OPERATING_INCOME = ["management-operating-income"] as const;
+/** `GET /client-award-evidence` -- the "POs Awarded by Client" domain
+ * (`app.models.client_award_evidence.ClientAwardEvidence`, NOT the
+ * unrelated Supplier `/purchase-orders` above). Shared between that
+ * page and the Quotations list (which needs it to show each
+ * quotation's own award/PO status), same cache-locality reasoning as
+ * every other key in this file. */
+export const QK_CLIENT_AWARD_EVIDENCE = ["client-award-evidence"] as const;

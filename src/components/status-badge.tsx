@@ -56,6 +56,13 @@ const MAP: Record<string, { tone: keyof typeof TONES; en: string; ar: string }> 
   paid: { tone: "success", en: "Paid", ar: "مدفوعة" },
   overdue: { tone: "danger", en: "Overdue", ar: "متأخرة" },
   superseded: { tone: "neutral", en: "Superseded", ar: "مستبدل" },
+  // client-awarded PO (derived, client-side -- see quotations.tsx/
+  // client-po.tsx; NOT a stored status column anywhere. `awarded` and
+  // `lost` above are reused as-is for this same column.)
+  not_awarded: { tone: "neutral", en: "Not Awarded", ar: "لم يُرسَ" },
+  awaiting_client_po: { tone: "warning", en: "Awaiting Client PO", ar: "بانتظار أمر الشراء" },
+  client_po_recorded: { tone: "success", en: "Client PO Recorded", ar: "تم تسجيل أمر الشراء" },
+  contracted: { tone: "success", en: "Contracted", ar: "تم التعاقد" },
 };
 
 export function StatusBadge({ value }: { value: string | null | undefined }) {

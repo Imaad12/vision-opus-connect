@@ -14,6 +14,7 @@ import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedApprovalsRouteImport } from './routes/_authenticated/approvals'
 import { Route as AuthenticatedAuditLogsRouteImport } from './routes/_authenticated/audit-logs'
+import { Route as AuthenticatedClientPoRouteImport } from './routes/_authenticated/client-po'
 import { Route as AuthenticatedContactsRouteImport } from './routes/_authenticated/contacts'
 import { Route as AuthenticatedContractsRouteImport } from './routes/_authenticated/contracts'
 import { Route as AuthenticatedCustomersRouteImport } from './routes/_authenticated/customers'
@@ -58,6 +59,11 @@ const AuthenticatedApprovalsRoute = AuthenticatedApprovalsRouteImport.update({
 const AuthenticatedAuditLogsRoute = AuthenticatedAuditLogsRouteImport.update({
   id: '/audit-logs',
   path: '/audit-logs',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedClientPoRoute = AuthenticatedClientPoRouteImport.update({
+  id: '/client-po',
+  path: '/client-po',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedContactsRoute = AuthenticatedContactsRouteImport.update({
@@ -176,6 +182,7 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/approvals': typeof AuthenticatedApprovalsRoute
   '/audit-logs': typeof AuthenticatedAuditLogsRoute
+  '/client-po': typeof AuthenticatedClientPoRoute
   '/contacts': typeof AuthenticatedContactsRoute
   '/contracts': typeof AuthenticatedContractsRoute
   '/customers': typeof AuthenticatedCustomersRoute
@@ -203,6 +210,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/approvals': typeof AuthenticatedApprovalsRoute
   '/audit-logs': typeof AuthenticatedAuditLogsRoute
+  '/client-po': typeof AuthenticatedClientPoRoute
   '/contacts': typeof AuthenticatedContactsRoute
   '/contracts': typeof AuthenticatedContractsRoute
   '/customers': typeof AuthenticatedCustomersRoute
@@ -231,6 +239,7 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_authenticated/approvals': typeof AuthenticatedApprovalsRoute
   '/_authenticated/audit-logs': typeof AuthenticatedAuditLogsRoute
+  '/_authenticated/client-po': typeof AuthenticatedClientPoRoute
   '/_authenticated/contacts': typeof AuthenticatedContactsRoute
   '/_authenticated/contracts': typeof AuthenticatedContractsRoute
   '/_authenticated/customers': typeof AuthenticatedCustomersRoute
@@ -260,6 +269,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/approvals'
     | '/audit-logs'
+    | '/client-po'
     | '/contacts'
     | '/contracts'
     | '/customers'
@@ -287,6 +297,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/approvals'
     | '/audit-logs'
+    | '/client-po'
     | '/contacts'
     | '/contracts'
     | '/customers'
@@ -314,6 +325,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_authenticated/approvals'
     | '/_authenticated/audit-logs'
+    | '/_authenticated/client-po'
     | '/_authenticated/contacts'
     | '/_authenticated/contracts'
     | '/_authenticated/customers'
@@ -378,6 +390,13 @@ declare module '@tanstack/react-router' {
       path: '/audit-logs'
       fullPath: '/audit-logs'
       preLoaderRoute: typeof AuthenticatedAuditLogsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/client-po': {
+      id: '/_authenticated/client-po'
+      path: '/client-po'
+      fullPath: '/client-po'
+      preLoaderRoute: typeof AuthenticatedClientPoRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/contacts': {
@@ -548,6 +567,7 @@ const AuthenticatedSettingsRouteWithChildren =
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedApprovalsRoute: typeof AuthenticatedApprovalsRoute
   AuthenticatedAuditLogsRoute: typeof AuthenticatedAuditLogsRoute
+  AuthenticatedClientPoRoute: typeof AuthenticatedClientPoRoute
   AuthenticatedContactsRoute: typeof AuthenticatedContactsRoute
   AuthenticatedContractsRoute: typeof AuthenticatedContractsRoute
   AuthenticatedCustomersRoute: typeof AuthenticatedCustomersRoute
@@ -572,6 +592,7 @@ interface AuthenticatedRouteRouteChildren {
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedApprovalsRoute: AuthenticatedApprovalsRoute,
   AuthenticatedAuditLogsRoute: AuthenticatedAuditLogsRoute,
+  AuthenticatedClientPoRoute: AuthenticatedClientPoRoute,
   AuthenticatedContactsRoute: AuthenticatedContactsRoute,
   AuthenticatedContractsRoute: AuthenticatedContractsRoute,
   AuthenticatedCustomersRoute: AuthenticatedCustomersRoute,

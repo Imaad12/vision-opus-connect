@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.auth import SupabaseUnavailableError
 from app.api.logging_middleware import AccessLogMiddleware
 from app.api.routers import (
+    client_award_evidence,
     clients,
     company,
     contacts,
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(vendors.router)
     app.include_router(projects.router)
     app.include_router(quotations.router)
+    app.include_router(client_award_evidence.router)
     app.include_router(contracts.router)
     app.include_router(dashboard.router)
     app.include_router(purchase_requests.router)
