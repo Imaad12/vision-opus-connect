@@ -574,6 +574,48 @@ def test_deactivating_a_non_super_admin_is_never_blocked(api_client: TestClient)
     assert response.json()["is_active"] is False
 
 
+# ---- No permanent delete (P5) ----
+
+
+def test_there_is_no_delete_route_for_users(api_client: TestClient):
+    """Regression guard, not a behavior test: this application must never
+    grow a way to permanently delete a VINCO user -- lifecycle is
+    Active/Inactive only (`PUT /users/{id}` with `is_active`), enforced
+    via Supabase Auth's real ban mechanism (`SupabaseAdmin.set_banned`),
+    never `auth.admin.deleteUser`. `DELETE /users/{id}` matches no route
+    at all (FastAPI returns 405, not 404, for a path that exists under a
+    different method) -- if this ever starts returning 200/204/404
+    instead, a delete route was added and this test exists specifically
+    to catch that."""
+    created = api_client.post("/users", json=_create_payload()).json()
+
+    response = api_client.delete(f"/users/{created['id']}")
+    assert response.status_code == 405
+
+
+def test_deactivation_preserves_role_and_employee_linkage(api_client: TestClient, engine: Engine):
+    """Deactivating must be a pure `is_active` flip -- it must never
+    clear the role, the HR employee link, or any other field a real
+    delete would have destroyed along with the row itself."""
+    employee_id = _seed_employee(engine, full_name="Priya Patel")
+    created = api_client.post(
+        "/users", json=_create_payload(employee_id=employee_id, role="admin")
+    ).json()
+
+    response = api_client.put(f"/users/{created['id']}", json={"is_active": False})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["is_active"] is False
+    assert body["role"] == "admin"
+    assert body["employee_id"] == employee_id
+
+    # Still fully present and listable -- never removed from the roster.
+    listed = api_client.get("/users").json()
+    still_there = next(u for u in listed if u["id"] == created["id"])
+    assert still_there["employee_id"] == employee_id
+    assert still_there["role"] == "admin"
+
+
 # ---- Login tracking (Part 2/3/4: real, not fabricated, last-login data) ----
 
 
