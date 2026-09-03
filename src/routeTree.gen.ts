@@ -22,6 +22,7 @@ import { Route as AuthenticatedDocumentsRouteImport } from './routes/_authentica
 import { Route as AuthenticatedEmployeesRouteImport } from './routes/_authenticated/employees'
 import { Route as AuthenticatedExpensesRouteImport } from './routes/_authenticated/expenses'
 import { Route as AuthenticatedHrEmployeesRouteImport } from './routes/_authenticated/hr-employees'
+import { Route as AuthenticatedImportQuotationsRouteImport } from './routes/_authenticated/import-quotations'
 import { Route as AuthenticatedInvoicesRouteImport } from './routes/_authenticated/invoices'
 import { Route as AuthenticatedLeadsRouteImport } from './routes/_authenticated/leads'
 import { Route as AuthenticatedManagementRouteImport } from './routes/_authenticated/management'
@@ -32,6 +33,7 @@ import { Route as AuthenticatedQuotationsRouteImport } from './routes/_authentic
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
 import { Route as AuthenticatedVatRouteImport } from './routes/_authenticated/vat'
+import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings.index'
 import { Route as AuthenticatedSettingsUsersRouteImport } from './routes/_authenticated/settings.users'
 
 const IndexRoute = IndexRouteImport.update({
@@ -99,6 +101,12 @@ const AuthenticatedHrEmployeesRoute =
     path: '/hr-employees',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedImportQuotationsRoute =
+  AuthenticatedImportQuotationsRouteImport.update({
+    id: '/import-quotations',
+    path: '/import-quotations',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedInvoicesRoute = AuthenticatedInvoicesRouteImport.update({
   id: '/invoices',
   path: '/invoices',
@@ -150,6 +158,12 @@ const AuthenticatedVatRoute = AuthenticatedVatRouteImport.update({
   path: '/vat',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedSettingsIndexRoute =
+  AuthenticatedSettingsIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => AuthenticatedSettingsRoute,
+  } as any)
 const AuthenticatedSettingsUsersRoute =
   AuthenticatedSettingsUsersRouteImport.update({
     id: '/users',
@@ -170,6 +184,7 @@ export interface FileRoutesByFullPath {
   '/employees': typeof AuthenticatedEmployeesRoute
   '/expenses': typeof AuthenticatedExpensesRoute
   '/hr-employees': typeof AuthenticatedHrEmployeesRoute
+  '/import-quotations': typeof AuthenticatedImportQuotationsRoute
   '/invoices': typeof AuthenticatedInvoicesRoute
   '/leads': typeof AuthenticatedLeadsRoute
   '/management': typeof AuthenticatedManagementRoute
@@ -181,6 +196,7 @@ export interface FileRoutesByFullPath {
   '/suppliers': typeof AuthenticatedSuppliersRoute
   '/vat': typeof AuthenticatedVatRoute
   '/settings/users': typeof AuthenticatedSettingsUsersRoute
+  '/settings/': typeof AuthenticatedSettingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -195,6 +211,7 @@ export interface FileRoutesByTo {
   '/employees': typeof AuthenticatedEmployeesRoute
   '/expenses': typeof AuthenticatedExpensesRoute
   '/hr-employees': typeof AuthenticatedHrEmployeesRoute
+  '/import-quotations': typeof AuthenticatedImportQuotationsRoute
   '/invoices': typeof AuthenticatedInvoicesRoute
   '/leads': typeof AuthenticatedLeadsRoute
   '/management': typeof AuthenticatedManagementRoute
@@ -202,10 +219,10 @@ export interface FileRoutesByTo {
   '/projects': typeof AuthenticatedProjectsRoute
   '/purchase-orders': typeof AuthenticatedPurchaseOrdersRoute
   '/quotations': typeof AuthenticatedQuotationsRoute
-  '/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/suppliers': typeof AuthenticatedSuppliersRoute
   '/vat': typeof AuthenticatedVatRoute
   '/settings/users': typeof AuthenticatedSettingsUsersRoute
+  '/settings': typeof AuthenticatedSettingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -222,6 +239,7 @@ export interface FileRoutesById {
   '/_authenticated/employees': typeof AuthenticatedEmployeesRoute
   '/_authenticated/expenses': typeof AuthenticatedExpensesRoute
   '/_authenticated/hr-employees': typeof AuthenticatedHrEmployeesRoute
+  '/_authenticated/import-quotations': typeof AuthenticatedImportQuotationsRoute
   '/_authenticated/invoices': typeof AuthenticatedInvoicesRoute
   '/_authenticated/leads': typeof AuthenticatedLeadsRoute
   '/_authenticated/management': typeof AuthenticatedManagementRoute
@@ -233,6 +251,7 @@ export interface FileRoutesById {
   '/_authenticated/suppliers': typeof AuthenticatedSuppliersRoute
   '/_authenticated/vat': typeof AuthenticatedVatRoute
   '/_authenticated/settings/users': typeof AuthenticatedSettingsUsersRoute
+  '/_authenticated/settings/': typeof AuthenticatedSettingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -249,6 +268,7 @@ export interface FileRouteTypes {
     | '/employees'
     | '/expenses'
     | '/hr-employees'
+    | '/import-quotations'
     | '/invoices'
     | '/leads'
     | '/management'
@@ -260,6 +280,7 @@ export interface FileRouteTypes {
     | '/suppliers'
     | '/vat'
     | '/settings/users'
+    | '/settings/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -274,6 +295,7 @@ export interface FileRouteTypes {
     | '/employees'
     | '/expenses'
     | '/hr-employees'
+    | '/import-quotations'
     | '/invoices'
     | '/leads'
     | '/management'
@@ -281,10 +303,10 @@ export interface FileRouteTypes {
     | '/projects'
     | '/purchase-orders'
     | '/quotations'
-    | '/settings'
     | '/suppliers'
     | '/vat'
     | '/settings/users'
+    | '/settings'
   id:
     | '__root__'
     | '/'
@@ -300,6 +322,7 @@ export interface FileRouteTypes {
     | '/_authenticated/employees'
     | '/_authenticated/expenses'
     | '/_authenticated/hr-employees'
+    | '/_authenticated/import-quotations'
     | '/_authenticated/invoices'
     | '/_authenticated/leads'
     | '/_authenticated/management'
@@ -311,6 +334,7 @@ export interface FileRouteTypes {
     | '/_authenticated/suppliers'
     | '/_authenticated/vat'
     | '/_authenticated/settings/users'
+    | '/_authenticated/settings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -412,6 +436,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedHrEmployeesRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/import-quotations': {
+      id: '/_authenticated/import-quotations'
+      path: '/import-quotations'
+      fullPath: '/import-quotations'
+      preLoaderRoute: typeof AuthenticatedImportQuotationsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/invoices': {
       id: '/_authenticated/invoices'
       path: '/invoices'
@@ -482,6 +513,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedVatRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/settings/': {
+      id: '/_authenticated/settings/'
+      path: '/'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof AuthenticatedSettingsIndexRouteImport
+      parentRoute: typeof AuthenticatedSettingsRoute
+    }
     '/_authenticated/settings/users': {
       id: '/_authenticated/settings/users'
       path: '/users'
@@ -494,10 +532,12 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedSettingsRouteChildren {
   AuthenticatedSettingsUsersRoute: typeof AuthenticatedSettingsUsersRoute
+  AuthenticatedSettingsIndexRoute: typeof AuthenticatedSettingsIndexRoute
 }
 
 const AuthenticatedSettingsRouteChildren: AuthenticatedSettingsRouteChildren = {
   AuthenticatedSettingsUsersRoute: AuthenticatedSettingsUsersRoute,
+  AuthenticatedSettingsIndexRoute: AuthenticatedSettingsIndexRoute,
 }
 
 const AuthenticatedSettingsRouteWithChildren =
@@ -516,6 +556,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedEmployeesRoute: typeof AuthenticatedEmployeesRoute
   AuthenticatedExpensesRoute: typeof AuthenticatedExpensesRoute
   AuthenticatedHrEmployeesRoute: typeof AuthenticatedHrEmployeesRoute
+  AuthenticatedImportQuotationsRoute: typeof AuthenticatedImportQuotationsRoute
   AuthenticatedInvoicesRoute: typeof AuthenticatedInvoicesRoute
   AuthenticatedLeadsRoute: typeof AuthenticatedLeadsRoute
   AuthenticatedManagementRoute: typeof AuthenticatedManagementRoute
@@ -539,6 +580,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedEmployeesRoute: AuthenticatedEmployeesRoute,
   AuthenticatedExpensesRoute: AuthenticatedExpensesRoute,
   AuthenticatedHrEmployeesRoute: AuthenticatedHrEmployeesRoute,
+  AuthenticatedImportQuotationsRoute: AuthenticatedImportQuotationsRoute,
   AuthenticatedInvoicesRoute: AuthenticatedInvoicesRoute,
   AuthenticatedLeadsRoute: AuthenticatedLeadsRoute,
   AuthenticatedManagementRoute: AuthenticatedManagementRoute,

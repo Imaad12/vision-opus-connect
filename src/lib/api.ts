@@ -159,12 +159,18 @@ function handleUnauthorized(): void {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
+  // A `FormData` body (file uploads -- see `api.uploadFiles` below) must
+  // never get an explicit `Content-Type: application/json`: the browser
+  // sets its own `multipart/form-data; boundary=...` value from the
+  // FormData instance itself, which this fetch() call has no other way
+  // to reproduce correctly.
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
       headers: {
-        "Content-Type": "application/json",
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
         ...(await authHeaders()),
         ...init?.headers,
       },
@@ -231,4 +237,13 @@ export const api = {
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
+  /** Multipart file upload -- `fieldName` must match the backend
+   * route's `UploadFile`/`list[UploadFile]` parameter name (see
+   * app/api/routers/imports.py's `files: list[UploadFile]`, which
+   * expects the field name "files" repeated once per file). */
+  uploadFiles: <T>(path: string, fieldName: string, files: File[]) => {
+    const formData = new FormData();
+    for (const file of files) formData.append(fieldName, file);
+    return request<T>(path, { method: "POST", body: formData });
+  },
 };

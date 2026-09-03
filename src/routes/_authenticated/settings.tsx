@@ -1,59 +1,25 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
 
-import { NoAccess, PageHeader } from "@/components/app-shell";
-import { useMe } from "@/hooks/use-auth";
-import { useI18n } from "@/lib/i18n";
-
+/**
+ * Pure pass-through layout for the whole `/settings/*` subtree.
+ *
+ * TanStack Router's flat file-based routing nests `settings.users.tsx`
+ * (and any other `settings.*` file) under this route by file-naming
+ * convention alone -- this file becoming a parent layout is not
+ * optional once a `settings.users.tsx` sibling exists, regardless of
+ * whether it was intended as one. Previously this file both was that
+ * parent layout AND rendered the Company Settings page's own content
+ * directly, with no `<Outlet />` anywhere -- so `/settings/users`
+ * matched `AuthenticatedSettingsUsersRoute` correctly, but its
+ * component was never mounted: the parent's own static content was
+ * all that ever rendered, for any `/settings/*` URL. Splitting the
+ * previous content out to `settings.index.tsx` (matches `/settings`
+ * exactly) and reducing this file to a bare `<Outlet />` fixes the
+ * mapping structurally, rather than special-casing any one child
+ * route -- the same fix that makes `/settings` and `/settings/users`
+ * both render correctly also correctly serves any future
+ * `/settings/*` route added the same way.
+ */
 export const Route = createFileRoute("/_authenticated/settings")({
-  head: () => ({
-    meta: [
-      { title: "Company settings — VINCO ERP" },
-      {
-        name: "description",
-        content: "Company identity, VAT rate and document numbering conventions used across VINCO ERP.",
-      },
-      { property: "og:title", content: "Company settings — VINCO ERP" },
-      { property: "og:description", content: "Company identity, VAT rate and numbering." },
-    ],
-  }),
-  component: SettingsPage,
+  component: () => <Outlet />,
 });
-
-function SettingsPage() {
-  const { t } = useI18n();
-  const me = useMe();
-
-  if (!me.can("admin.settings")) {
-    return (
-      <>
-        <PageHeader title={t("nav.settings")} />
-        <NoAccess />
-      </>
-    );
-  }
-
-  const rows = [
-    { label: "Company", value: "Vision Contracting Co. · شركة الرؤية للمقاولات" },
-    { label: "Country", value: "Kingdom of Saudi Arabia" },
-    { label: "Currency", value: "SAR (﷼)" },
-    { label: "Standard VAT rate", value: "15%" },
-    { label: "Quotation numbering", value: "QT-YYYY-#####" },
-    { label: "Purchase order numbering", value: "PO-YYYY-#####" },
-    { label: "Invoice numbering", value: "INV-YYYY-#####" },
-    { label: "Approval rule", value: "Separation of duties enforced in the database" },
-  ];
-
-  return (
-    <>
-      <PageHeader title={t("nav.settings")} />
-      <div className="surface-panel divide-y divide-border">
-        {rows.map((r) => (
-          <div key={r.label} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
-            <span className="text-muted-foreground">{r.label}</span>
-            <span className="font-medium">{r.value}</span>
-          </div>
-        ))}
-      </div>
-    </>
-  );
-}

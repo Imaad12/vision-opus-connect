@@ -147,9 +147,32 @@ describe("api client error handling", () => {
       throw new Error("expected api.get to reject");
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError);
-      expect((e as InstanceType<typeof ApiError>).describe()).toContain("no response from the server");
+      expect((e as InstanceType<typeof ApiError>).describe()).toContain(
+        "no response from the server",
+      );
       expect((e as InstanceType<typeof ApiError>).describe()).toContain("GET /clients");
     }
+  });
+
+  it("uploadFiles sends a multipart FormData body without a JSON Content-Type header", async () => {
+    let capturedInit: RequestInit | undefined;
+    global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 201 }));
+    }) as typeof fetch;
+
+    const file = new File(["hello"], "quote.txt", { type: "text/plain" });
+    await api.uploadFiles("/imports/batches/1/documents", "files", [file]);
+
+    expect(capturedInit?.body).toBeInstanceOf(FormData);
+    const body = capturedInit?.body as FormData;
+    expect(body.get("files")).toBe(file);
+    // Explicitly NOT set -- letting the browser generate its own
+    // multipart boundary is the whole point (see api.ts's `isFormData`
+    // check); a hardcoded "application/json" here would make the
+    // backend fail to parse the multipart body at all.
+    const headers = new Headers(capturedInit?.headers);
+    expect(headers.get("Content-Type")).not.toBe("application/json");
   });
 });
 
@@ -160,7 +183,9 @@ describe("api client error handling", () => {
 // project whose env vars were never set).
 describe("assertApiUrlConfiguredInProduction", () => {
   it("throws when no URL is configured and this is a production build", () => {
-    expect(() => assertApiUrlConfiguredInProduction(false, true)).toThrow(/VITE_API_URL is not set/);
+    expect(() => assertApiUrlConfiguredInProduction(false, true)).toThrow(
+      /VITE_API_URL is not set/,
+    );
   });
 
   it("does not throw when a URL is configured, even in production", () => {

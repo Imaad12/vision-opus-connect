@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
-import { FileText, ListOrdered, Plus, Search, Send, ShieldCheck, X } from "lucide-react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { FileText, ListOrdered, Plus, Search, Send, ShieldCheck, Upload, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -153,11 +153,20 @@ function QuotationsPage() {
       <PageHeader
         title={t("nav.quotations")}
         actions={
-          canCreate && (
-            <Button onClick={() => setNewOpen(true)} className="gap-1.5">
-              <Plus className="size-4" /> {t("quote.new")}
-            </Button>
-          )
+          <>
+            {canCreate && (
+              <Button variant="outline" className="gap-1.5" asChild>
+                <Link to="/import-quotations">
+                  <Upload className="size-4" /> {t("quote.import_historical")}
+                </Link>
+              </Button>
+            )}
+            {canCreate && (
+              <Button onClick={() => setNewOpen(true)} className="gap-1.5">
+                <Plus className="size-4" /> {t("quote.new")}
+              </Button>
+            )}
+          </>
         }
       />
 
