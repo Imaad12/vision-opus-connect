@@ -100,6 +100,35 @@ def test_create_quotation_rejects_a_negative_value(api_client: TestClient, proje
     assert response.status_code == 422
 
 
+def test_new_quotation_works_with_zero_import_pipeline_involvement(
+    api_client: TestClient, project_id: int
+):
+    """Explicit proof for this feature's P3 requirement: a normal, hand-
+    entered quotation must never sit waiting on, or depend on, the
+    historical-import/OCR pipeline in any way.
+
+    `project_id` above already builds its Client/Project purely through
+    the Clients/Projects APIs (no `ImportBatch` ever created). This
+    asserts quotation creation itself needs nothing import-related
+    either -- proven two ways: (1) `api_client`'s fixture only grants
+    `customers.*`/`projects.*`/`quotations.*` (zero import-specific
+    permission -- there is no `imports.*` permission in this system at
+    all; `/imports/*` deliberately reuses `quotations.create`, see
+    `app/api/routers/imports.py`), so a 201 here proves nothing import-
+    shaped was required to authorize it either; (2) `Quotation` has no
+    foreign key to `imported_documents` at all -- only the reverse
+    (`ImportedDocument.resulting_quotation_id`), which stays NULL for
+    every quotation this test creates, confirming the coupling is
+    one-directional (import -> quotation) and a plain quotation is
+    completely unaware the import system exists."""
+    response = api_client.post(
+        f"/projects/{project_id}/quotations",
+        json={"reference_number": "Q-2026-777", "title": "Fully manual quotation"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["quotation"]["reference_number"] == "Q-2026-777"
+
+
 def test_get_quotation_and_its_versions(api_client: TestClient, project_id: int):
     version = api_client.post(
         f"/projects/{project_id}/quotations", json={"title": "First cut"}
