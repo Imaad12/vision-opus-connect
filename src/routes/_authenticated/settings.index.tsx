@@ -31,16 +31,25 @@ import type { Tables, TablesUpdate } from "@/integrations/supabase/types";
  * gate below matches the RLS policy exactly rather than duplicating a
  * looser or stricter rule client-side.
  *
- * Document numbering (`next_doc_number()`/`doc_counters`) and
- * separation-of-duties approval rules are real, live systems (see that
- * same migration) but are NOT stored as editable data anywhere --
- * numbering's format is a literal in a SECURITY DEFINER SQL function,
- * and SoD is enforced by fixed DB triggers, not a rule table. Making
- * either configurable would need a real schema change to a function
- * that already generates real, live document numbers -- out of scope
- * here (see this session's own report); both are shown below as
- * accurate, read-only system information instead of fabricated form
- * fields.
+ * Document numbering (`next_doc_number()`/`doc_counters`) and the SoD
+ * (`enforce_quotation_sod`/etc.) triggers ARE real SQL in that same
+ * migration -- but they're wired to that migration's own Supabase-
+ * native `public.quotations`/`purchase_orders`/`invoices`/etc. tables,
+ * which this application no longer reads or writes anywhere (verified:
+ * no `db.from("quotations"|"purchase_orders"|"contracts"|"customers")`
+ * call exists in this frontend at all). Every quotation this app
+ * actually creates today goes through the FastAPI backend instead
+ * (`POST /projects/{id}/quotations` -> `quotation_service.
+ * create_quotation`, see backend/app/models/quotation.py), which has
+ * no numbering generator and no SoD trigger of its own --
+ * `reference_number` there is plain reviewer/user-entered text, gated
+ * only by `require_permission("quotations.approve")` for the approval
+ * step. So numbering/SoD are real SQL, but orphaned: neither actually
+ * governs a live quotation today. `SystemInfoPanel` below describes
+ * this honestly (a naming convention, not an enforced system) rather
+ * than repeating the panel's original, inaccurate "system-enforced"
+ * framing -- see this session's own report on the historical-quotation-
+ * numbering investigation that found this.
  */
 export const Route = createFileRoute("/_authenticated/settings/")({
   head: () => ({
@@ -242,10 +251,15 @@ function CompanySettingsForm({
   );
 }
 
-/** Numbering and approval rules: real, live systems (see this file's
- * top docstring), just not stored as editable data anywhere yet --
- * shown as accurate read-only information rather than fabricated as
- * editable fields. */
+/** Numbering/approval conventions -- see this file's top docstring for
+ * why these are shown as conventions, not enforced settings: the real
+ * `next_doc_number()`/SoD-trigger SQL from `20260818103802_*.sql` is
+ * orphaned (wired to a Supabase-native `quotations`/`purchase_orders`/
+ * etc. schema this app no longer reads or writes), not applied to any
+ * quotation this app actually creates today. Shown as accurate,
+ * honestly-labeled read-only information rather than fabricated as
+ * editable fields, and rather than repeating the previous, incorrect
+ * "system-enforced" claim. */
 function SystemInfoPanel() {
   const { t } = useI18n();
   const rows = [

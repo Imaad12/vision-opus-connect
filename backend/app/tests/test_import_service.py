@@ -283,6 +283,39 @@ def test_confirm_import_creates_new_client_project_and_quotation(db_session: Ses
     assert document.confirmed_at is not None
 
 
+@pytest.mark.parametrize(
+    "historical_reference",
+    ["123", "QTN/2018/004", "Quotation-18-22", "ABC-2018-001"],
+)
+def test_confirm_import_preserves_non_standard_historical_reference_numbers_verbatim(
+    db_session: Session, tmp_path: Path, historical_reference: str
+) -> None:
+    """P6: `Quotation.reference_number` must never be forced through a
+    generator or reformatted -- historical archives use reference styles
+    a `QT-YYYY-#####` pattern would reject or mangle. There is, in fact,
+    no reference-number generator anywhere in this codebase today (the
+    'QT-YYYY-####' text on the Company Settings page is a purely
+    informational label, never applied by any code path -- see this
+    feature's own report): `reference_number` is free text end-to-end
+    for both a hand-created quotation (`quotation_service.
+    create_quotation`) and an imported one (`confirm_import`, exercised
+    here). This directly proves each of the reviewer's own example
+    formats survives confirm_import byte-for-byte."""
+    document = stage_document(db_session, _write_quotation_txt(tmp_path))
+    update_quotation_candidate(
+        db_session, document, document.quotation_candidate, quotation_number=historical_reference
+    )
+
+    version = confirm_import(
+        db_session,
+        document,
+        new_client_name="Historical Co",
+        new_project_name="Historical Project",
+    )
+
+    assert version.quotation.reference_number == historical_reference
+
+
 def test_confirm_import_currency_fallback_uses_the_projects_company_not_the_hardcoded_default(
     db_session: Session, tmp_path: Path
 ) -> None:
