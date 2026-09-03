@@ -244,6 +244,11 @@ def test_accepts_a_real_python_3_12_or_newer(isolated_backend_minimal: Path, tmp
     assert "[bootstrap] Creating virtual environment" in result.stdout
     assert "Python 3.12" in result.stdout or "Python 3.13" in result.stdout
     assert "[bootstrap] Installing backend dependencies" in result.stdout
+    # The interpreter actually in use must be shown unconditionally
+    # (not just on the "creating a new venv" branch) so a real run's
+    # output is never ambiguous about what was actually selected.
+    assert "[bootstrap] Using Python: " in result.stdout
+    assert str(isolated_backend_minimal / ".venv" / "bin" / "python3") in result.stdout
     # Got all the way past bootstrap to a real DB connection attempt
     # against the deliberately-unreachable VISION_DATABASE_URL (same
     # signal `test_skips_reinstalling_when_dependencies_are_already_
@@ -337,6 +342,14 @@ def test_failed_dependency_install_exits_immediately_before_the_database_prompt(
     assert "pip install -e . failed" in result.stderr or "'pip install -e .' failed" in result.stderr
     assert "Paste VISION_DATABASE_URL" not in result.stderr
     assert "Safety checks FAILED" not in result.stdout  # never reached that stage either
+    # The exact symptom of the real incident this guards against: with
+    # the pip failure correctly caught, the script must never reach the
+    # Python heredoc that does `import alembic` at all, so no
+    # ModuleNotFoundError -- and Alembic itself is never invoked.
+    combined = result.stdout + result.stderr
+    assert "ModuleNotFoundError" not in combined
+    assert "alembic upgrade" not in combined
+    assert "alembic stamp" not in combined
 
 
 def test_no_database_prompt_occurs_after_bootstrap_failure(isolated_backend: Path, tmp_path: Path) -> None:
@@ -382,3 +395,9 @@ def test_skips_reinstalling_when_dependencies_are_already_present(
     assert "Connection refused" in (result.stdout + result.stderr) or "OperationalError" in (
         result.stdout + result.stderr
     )
+    # Reusing an existing venv must ALSO show which interpreter is in
+    # use -- this is the exact branch that previously printed nothing
+    # at all about the selected interpreter, the real gap a genuinely
+    # confusing real-world run would hit.
+    assert "[bootstrap] Using Python: " in result.stdout
+    assert str(isolated_backend / ".venv" / "bin" / "python3") in result.stdout

@@ -94,10 +94,35 @@ version_is_new_enough() {
 # by name, verify after") so a same-named-but-wrong-version `python3.12`
 # is skipped in favor of trying the next candidate, rather than being
 # returned and only failing a separate check later.
+
+# Well-known install locations for a manually installed / Homebrew
+# Python on macOS, tried only after every PATH-based name above has
+# been rejected. PATH is user- and shell-profile-dependent (a script
+# invoked via `bash script.sh` doesn't necessarily load the same PATH
+# a login shell would), so a real, valid interpreter can be present on
+# disk and still invisible to `command -v` -- this covers that gap
+# without ever trusting a path by its name/location alone either: the
+# exact same `version_is_new_enough` check applies to every one of
+# these before it can be selected.
+_MACOS_PYTHON_CANDIDATE_PATHS="
+/opt/homebrew/bin/python3.13
+/opt/homebrew/bin/python3.12
+/usr/local/bin/python3.13
+/usr/local/bin/python3.12
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+"
+
 find_valid_system_python() {
   for candidate in python3.13 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1 && version_is_new_enough "$candidate"; then
       echo "$candidate"
+      return 0
+    fi
+  done
+  for candidate_path in $_MACOS_PYTHON_CANDIDATE_PATHS; do
+    if [ -x "$candidate_path" ] && version_is_new_enough "$candidate_path"; then
+      echo "$candidate_path"
       return 0
     fi
   done
@@ -122,13 +147,20 @@ fi
 if [ ! -x "$VENV_PYTHON" ]; then
   SYSTEM_PYTHON="$(find_valid_system_python)" || {
     echo "[UNSAFE] No Python 3.12+ found on PATH (checked python3.13, python3.12, " \
-         "python3 -- by ACTUAL reported version, not name alone). Install one " \
-         "(e.g. 'brew install python@3.12' on macOS) and re-run. Nothing was " \
-         "installed or connected to." >&2
+         "python3 by ACTUAL reported version, not name alone) or at the well-known " \
+         "macOS install locations (Homebrew, python.org's Framework installer). " \
+         "VINCO requires Python >=3.12. Install one (e.g. 'brew install python@3.12' " \
+         "on macOS) and re-run. Nothing was installed or connected to." >&2
     for candidate in python3.13 python3.12 python3; do
       if command -v "$candidate" >/dev/null 2>&1; then
         echo "  - found '$candidate' at $(command -v "$candidate"), but it reports " \
              "Python $(python_version_string "$candidate")" >&2
+      fi
+    done
+    for candidate_path in $_MACOS_PYTHON_CANDIDATE_PATHS; do
+      if [ -x "$candidate_path" ]; then
+        echo "  - found $candidate_path, but it reports " \
+             "Python $(python_version_string "$candidate_path")" >&2
       fi
     done
     exit 1
@@ -149,6 +181,23 @@ if [ ! -x "$VENV_PYTHON" ]; then
     exit 1
   fi
 fi
+
+# Always shown -- whether the venv above was just created or a valid
+# one already existed and this whole block was skipped -- so a real
+# run's output is never ambiguous about which interpreter is actually
+# about to be used. Also doubles as one final, authoritative version
+# check performed immediately before anything is installed into it:
+# every check so far has been against $VENV_PYTHON at an earlier point
+# in this same run, so this repeats it once more right at the point of
+# use rather than trusting an earlier result to still hold.
+if ! version_is_new_enough "$VENV_PYTHON"; then
+  echo "[UNSAFE] $VENV_PYTHON no longer reports Python 3.12+ immediately before " \
+       "use, despite passing an earlier check in this same run. Refusing to " \
+       "install into it or connect to any database -- this needs a human to look " \
+       "at why $VENV_PYTHON's own reported version changed mid-run." >&2
+  exit 1
+fi
+echo "[bootstrap] Using Python: $VENV_PYTHON (Python $(python_version_string "$VENV_PYTHON"))"
 
 if ! dependencies_importable "$VENV_PYTHON"; then
   echo "[bootstrap] Installing backend dependencies into $VENV_DIR (pip install -e .) ..."
@@ -177,6 +226,11 @@ ALEMBIC="$VENV_DIR/bin/alembic"
 if [ ! -x "$ALEMBIC" ]; then
   echo "[UNSAFE] Dependencies installed, but $ALEMBIC does not exist -- the venv is " \
        "incomplete. Stopping before touching the database." >&2
+  exit 1
+fi
+if ! "$ALEMBIC" --version >/dev/null 2>&1; then
+  echo "[UNSAFE] $ALEMBIC exists but 'alembic --version' failed to run -- the venv " \
+       "is incomplete or broken. Stopping before touching the database." >&2
   exit 1
 fi
 
