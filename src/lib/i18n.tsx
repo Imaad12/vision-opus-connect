@@ -245,6 +245,22 @@ export const dict: Dict = {
     en: "No direct permission overrides for this user.",
     ar: "لا توجد استثناءات صلاحيات مباشرة لهذا المستخدم.",
   },
+  "detail.access.super_admin_note": {
+    en: "Super Admin has full access to every module — permissions cannot be restricted for this role.",
+    ar: "مسؤول النظام لديه صلاحية كاملة على جميع الوحدات — لا يمكن تقييد الصلاحيات لهذا الدور.",
+  },
+  "detail.access.read_only_note": {
+    en: "You need the Manage roles & permissions permission to edit this checklist.",
+    ar: "تحتاج إلى صلاحية إدارة الأدوار والصلاحيات لتعديل هذه القائمة.",
+  },
+  "detail.access.checklist_hint": {
+    en: "Checked = this user currently has access. Unchecked boxes follow the role's own default unless explicitly overridden below.",
+    ar: "محدد = لدى هذا المستخدم صلاحية الوصول حالياً. الخيارات غير المحددة تتبع الإعداد الافتراضي للدور ما لم يتم تجاوزها أدناه.",
+  },
+  "detail.access.reset_to_role_default": {
+    en: "Reset to role default",
+    ar: "إعادة لإعداد الدور الافتراضي",
+  },
   "detail.recovery.title": { en: "Account Recovery", ar: "استرداد الحساب" },
   "detail.recovery.admin_reset": { en: "Admin-set password", ar: "كلمة مرور يحددها المسؤول" },
   "detail.recovery.admin_reset_desc": {

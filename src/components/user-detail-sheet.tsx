@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PERMISSION_GROUPS } from "@/hooks/use-auth";
 import { db, type Row } from "@/lib/db";
 import { formatDate, useI18n } from "@/lib/i18n";
-import type { EmployeeSummary } from "@/lib/vinco-access-control";
+import { computePermissionOverrideAction, type EmployeeSummary } from "@/lib/vinco-access-control";
 import { APP_ROLE_TO_SUPABASE_ROLE, ROLE_LABELS, type AppUser } from "@/lib/vinco-users";
 
 type LinkedEmployee = EmployeeSummary & { email: string | null };
@@ -47,6 +47,9 @@ export function UserDetailSheet({
   toggleActivePending,
   onLinkEmployee,
   linkEmployeePending,
+  canManageOverrides,
+  onSetPermissionOverride,
+  permissionOverridePending,
 }: {
   user: AppUser | null;
   onOpenChange: (open: boolean) => void;
@@ -61,6 +64,19 @@ export function UserDetailSheet({
   toggleActivePending: boolean;
   onLinkEmployee: (employeeId: number | null) => void;
   linkEmployeePending: boolean;
+  /** `admin.roles` -- the same permission the `user_permissions_manage`/
+   * `user_roles_manage` RLS policies themselves require (see the
+   * `20260818103534_...` migration). Without it the checklist below is
+   * shown read-only: this sheet must never let someone toggle a
+   * checkbox that the database would silently refuse to write. */
+  canManageOverrides: boolean;
+  /** Writes (or clears) one `user_permissions` override row -- see
+   * `employees.tsx`'s `setPermissionOverrideMutation`, which is the
+   * only place this ever actually writes to Supabase. "clear" removes
+   * the override entirely so the permission goes back to following
+   * whatever the user's role grants by default. */
+  onSetPermissionOverride: (permission: string, action: "grant" | "deny" | "clear") => void;
+  permissionOverridePending: boolean;
 }) {
   const { t, lang } = useI18n();
   const [linking, setLinking] = useState(false);
@@ -84,6 +100,12 @@ export function UserDetailSheet({
   if (!user) return null;
 
   const supabaseRole = APP_ROLE_TO_SUPABASE_ROLE[user.role];
+  // The backend's own `has_permission()` (see the `20260818103534_...`
+  // migration) unconditionally grants a super_admin every permission
+  // regardless of role_permissions/user_permissions content -- an
+  // editable checklist for this role would be actively misleading,
+  // since unchecking a box here could never actually restrict them.
+  const isSuperAdmin = supabaseRole === "super_admin";
   const rolePerms = new Set(
     rolePermissions
       .filter((rp) => rp["role"] === supabaseRole)
@@ -242,47 +264,80 @@ export function UserDetailSheet({
 
           <TabsContent value="access" className="space-y-4 text-sm">
             <DetailRow label={t("users.role")}>{ROLE_LABELS[user.role][lang]}</DetailRow>
-            {deniedDirectly.length > 0 || grantedDirectly.length > 0 ? (
-              <div className="space-y-1">
-                {grantedDirectly.map((p) => (
-                  <div key={p} className="flex items-center justify-between text-xs">
-                    <span>{p}</span>
-                    <Badge variant="default">{t("detail.access.granted_directly")}</Badge>
-                  </div>
-                ))}
-                {deniedDirectly.map((p) => (
-                  <div key={p} className="flex items-center justify-between text-xs">
-                    <span>{p}</span>
-                    <Badge variant="destructive">{t("detail.access.denied_directly")}</Badge>
-                  </div>
-                ))}
-              </div>
+
+            {isSuperAdmin ? (
+              <p className="rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
+                {t("detail.access.super_admin_note")}
+              </p>
             ) : (
-              <p className="text-xs text-muted-foreground">{t("detail.access.no_overrides")}</p>
-            )}
-            <div>
-              <p className="mb-2 font-medium">{t("detail.access.effective_permissions")}</p>
-              <div className="space-y-3">
-                {PERMISSION_GROUPS.map((group) => {
-                  const held = group.permissions.filter((p) => effective.has(p));
-                  if (held.length === 0) return null;
-                  return (
+              <>
+                {!canManageOverrides && (
+                  <p className="rounded-md bg-muted/60 p-2 text-xs text-muted-foreground">
+                    {t("detail.access.read_only_note")}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">{t("detail.access.checklist_hint")}</p>
+                <div className="space-y-4">
+                  {PERMISSION_GROUPS.map((group) => (
                     <div key={group.key}>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         {lang === "ar" ? group.ar : group.en}
                       </p>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {held.map((p) => (
-                          <Badge key={p} variant="outline" className="font-normal">
-                            {p}
-                          </Badge>
-                        ))}
+                      <div className="space-y-1 rounded-md border border-border/70 p-2">
+                        {group.permissions.map((p) => {
+                          const isGranted = grantedDirectly.includes(p);
+                          const isDenied = deniedDirectly.includes(p);
+                          const isOverridden = isGranted || isDenied;
+                          const isChecked = effective.has(p);
+                          return (
+                            <div key={p} className="flex items-center justify-between gap-2 py-0.5">
+                              <label className="flex flex-1 items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  disabled={!canManageOverrides || permissionOverridePending}
+                                  onChange={(e) =>
+                                    onSetPermissionOverride(
+                                      p,
+                                      computePermissionOverrideAction(
+                                        e.target.checked,
+                                        rolePerms.has(p),
+                                      ),
+                                    )
+                                  }
+                                />
+                                <span className="text-xs">{p}</span>
+                              </label>
+                              {isOverridden && (
+                                <div className="flex items-center gap-1.5">
+                                  <Badge
+                                    variant={isGranted ? "default" : "destructive"}
+                                    className="text-[10px] font-normal"
+                                  >
+                                    {isGranted
+                                      ? t("detail.access.granted_directly")
+                                      : t("detail.access.denied_directly")}
+                                  </Badge>
+                                  {canManageOverrides && (
+                                    <button
+                                      type="button"
+                                      className="text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+                                      onClick={() => onSetPermissionOverride(p, "clear")}
+                                    >
+                                      {t("detail.access.reset_to_role_default")}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
+                  ))}
+                </div>
+              </>
+            )}
           </TabsContent>
 
           <TabsContent value="recovery" className="space-y-4 text-sm">

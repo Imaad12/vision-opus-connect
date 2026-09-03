@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computePermissionOverrideAction,
   computeRoleSummary,
   computeUserSummary,
   filterAndSearchUsers,
@@ -244,5 +245,23 @@ describe("wouldRemoveLastActiveSuperAdmin", () => {
   it("does not flag an already-inactive Super Admin", () => {
     const users = [user({ id: "boss", role: "super_admin", is_active: false })];
     expect(wouldRemoveLastActiveSuperAdmin(users, "boss", { role: "admin" })).toBe(false);
+  });
+});
+
+describe("computePermissionOverrideAction", () => {
+  it("clears the override when checking a box the role already grants", () => {
+    expect(computePermissionOverrideAction(true, true)).toBe("clear");
+  });
+
+  it("clears the override when unchecking a box the role never granted", () => {
+    expect(computePermissionOverrideAction(false, false)).toBe("clear");
+  });
+
+  it("grants explicitly when checking a box the role does not grant", () => {
+    expect(computePermissionOverrideAction(true, false)).toBe("grant");
+  });
+
+  it("denies explicitly when unchecking a box the role grants by default", () => {
+    expect(computePermissionOverrideAction(false, true)).toBe("deny");
   });
 });

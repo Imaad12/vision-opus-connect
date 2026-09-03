@@ -198,6 +198,59 @@ function EmployeesPage() {
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
+  const setPermissionOverrideMutation = useMutation({
+    mutationFn: async ({
+      userId,
+      permission,
+      action,
+    }: {
+      userId: string;
+      permission: string;
+      action: "grant" | "deny" | "clear";
+    }) => {
+      if (action === "clear") {
+        // Removing the override row entirely -- not the same as denying
+        // the permission -- lets it go back to following whatever the
+        // user's role grants by default (see UserDetailSheet's own
+        // "reset to role default" affordance).
+        const { error } = await db
+          .from("user_permissions")
+          .delete()
+          .eq("user_id", userId)
+          .eq("permission", permission);
+        if (error) throw error;
+        return;
+      }
+      const { error } = await db
+        .from("user_permissions")
+        .upsert(
+          { user_id: userId, permission, granted: action === "grant" },
+          { onConflict: "user_id,permission" },
+        );
+      if (error) throw error;
+    },
+    onSuccess: (_data, { userId, permission, action }) => {
+      void queryClient.invalidateQueries({ queryKey: ["employees"] });
+      // The permission-editing admin may be looking at their own row (or
+      // any other already-loaded session's) -- `useMe()`'s cache must
+      // reflect a write immediately, the same way every other
+      // permission-affecting mutation elsewhere in this app already
+      // invalidates it.
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+      const target = users.find((u) => u.id === userId);
+      void logAudit({
+        action: "permission_override_changed",
+        entity_type: "app_users",
+        entity_id: userId,
+        summary:
+          action === "clear"
+            ? `Reset ${permission} to role default for ${target?.username ?? userId}`
+            : `${action === "grant" ? "Granted" : "Denied"} ${permission} directly for ${target?.username ?? userId}`,
+      });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const linkEmployeeMutation = useMutation({
     mutationFn: ({ id, employee_id }: { id: string; employee_id: number | null }) =>
       api.put<AppUser>(`/users/${id}/employee-link`, { employee_id }),
@@ -503,6 +556,12 @@ function EmployeesPage() {
           linkEmployeeMutation.mutate({ id: viewingUser.id, employee_id: employeeId })
         }
         linkEmployeePending={linkEmployeeMutation.isPending}
+        canManageOverrides={canManageRoles}
+        onSetPermissionOverride={(permission, action) =>
+          viewingUser &&
+          setPermissionOverrideMutation.mutate({ userId: viewingUser.id, permission, action })
+        }
+        permissionOverridePending={setPermissionOverrideMutation.isPending}
       />
     </>
   );

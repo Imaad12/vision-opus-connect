@@ -168,3 +168,24 @@ export function wouldRemoveLastActiveSuperAdmin(
   ).length;
   return otherActiveSuperAdmins === 0;
 }
+
+/**
+ * Decides what a permission-checklist checkbox toggle should actually
+ * write to `user_permissions` (see `UserDetailSheet`'s Access tab and
+ * `employees.tsx`'s `setPermissionOverrideMutation`).
+ *
+ * `user_permissions` is an *override* table, not a full copy of a
+ * user's effective permissions -- ticking a checkbox back to exactly
+ * what the user's role already grants by default should clear any
+ * existing override row rather than pin a redundant explicit grant
+ * (and likewise for unticking it back to the role's own "doesn't
+ * grant" default). Only a genuine divergence from the role's default
+ * is ever written as an explicit grant/deny row.
+ */
+export function computePermissionOverrideAction(
+  checked: boolean,
+  roleGrantsByDefault: boolean,
+): "grant" | "deny" | "clear" {
+  if (checked === roleGrantsByDefault) return "clear";
+  return checked ? "grant" : "deny";
+}
