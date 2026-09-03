@@ -88,6 +88,17 @@ def test_clean_scanned_quotation_is_staged_with_high_confidence(db_session: Sess
 
 
 def test_ocr_engine_unavailable_stays_ocr_required_with_no_candidate(db_session: Session, tmp_path: Path) -> None:
+    """Regression test for a real production incident: every scanned
+    quotation landed on OCR_REQUIRED with NO explanation at all --
+    `extraction_error` stayed `None` because `run_extraction` only ever
+    read `unsupported_reason` (populated for a genuinely unsupported
+    file, e.g. password-protected), never `warnings` (what
+    `extract_via_ocr` actually uses to report "the OCR engine itself
+    isn't available on this machine" -- the real, common cause, since
+    Tesseract is a system binary this backend's own Dockerfile never
+    installed -- see that Dockerfile's own fix). A reviewer facing a
+    silently-stalled document with no reason is indistinguishable from
+    a broken pipeline; this asserts the actual reason is now surfaced."""
     path = _placeholder_scan(tmp_path)
     with patch(_PATCH_TARGET, return_value=RawExtraction(requires_ocr=True, warnings=["engine not available"])):
         document = stage_document(db_session, path)
@@ -95,6 +106,7 @@ def test_ocr_engine_unavailable_stays_ocr_required_with_no_candidate(db_session:
     assert document.extraction_status == ExtractionStatus.OCR_REQUIRED
     assert document.extraction_engine is None
     assert document.quotation_candidate is None
+    assert document.extraction_error == "engine not available"
 
 
 def test_ocr_extraction_raising_unexpectedly_is_caught_and_marked_failed(db_session: Session, tmp_path: Path) -> None:

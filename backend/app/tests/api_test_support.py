@@ -15,6 +15,7 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.database.session as db_session_module
 from app.api.auth import AuthenticatedUser
 from app.api.deps import get_current_user, get_db, get_supabase_auth
 from app.api.main import create_app
@@ -107,6 +108,33 @@ def make_api_client(engine: Engine, granted: set[str]) -> Generator[TestClient, 
     )
     app.dependency_overrides[get_supabase_auth] = lambda: auth
 
-    with TestClient(app) as client:
-        client.granted = auth.granted  # type: ignore[attr-defined]
-        yield client
+    # `app.database.session.session_scope()` is a plain module-level
+    # function, not something `app.dependency_overrides` can touch at
+    # all -- it's what a FastAPI *background task* uses (see
+    # app/api/routers/imports.py's upload-then-background-process
+    # split), since that code runs after the request (and its
+    # `Depends(get_db)`) has already finished, with no request context
+    # to inject a dependency into. Left alone, it lazily builds a REAL
+    # engine from `settings.resolved_database_url` the first time
+    # anything calls it -- in this sandbox, an already-set
+    # VISION_DATABASE_URL pointing at a real Supabase Postgres instance,
+    # which a background-task test discovered the hard way (a real
+    # connection attempt that hung against this environment's network
+    # policy instead of failing fast). Monkeypatching the SAME
+    # engine/factory this fixture already built for `get_db` into that
+    # module's globals makes any code calling `session_scope()` during
+    # this test -- present or future, in this router or another --
+    # transparently use the identical in-memory test database, with no
+    # possibility of ever reaching a real one regardless of what's set
+    # in the environment.
+    original_engine = db_session_module._engine
+    original_factory = db_session_module._SessionFactory
+    db_session_module._engine = engine
+    db_session_module._SessionFactory = factory
+    try:
+        with TestClient(app) as client:
+            client.granted = auth.granted  # type: ignore[attr-defined]
+            yield client
+    finally:
+        db_session_module._engine = original_engine
+        db_session_module._SessionFactory = original_factory

@@ -109,6 +109,47 @@ type ImportedDocumentDetail = ImportedDocumentSummary & {
   quotation_candidate: ImportedQuotationCandidate | null;
 };
 
+type BatchUploadAccepted = {
+  accepted_files: string[];
+};
+
+/** Mirrors `app.core.enums.ExtractionStatus` -- extraction hasn't
+ * reached a terminal outcome yet, so the frontend should keep polling
+ * (see `documentsQuery`/`summaryQuery`'s `refetchInterval` below).
+ * PENDING covers both "just staged, not started yet" (effectively
+ * instant in practice) and "queued behind other work in this batch's
+ * background task". */
+const NON_TERMINAL_EXTRACTION_STATUSES = new Set(["PENDING", "EXTRACTING"]);
+
+/** Human-readable label for each `ExtractionStatus` value, matching the
+ * "Uploading... / OCR processing... / Extracting quotation... / Ready
+ * for review / Failed — [reason]" progression this feature was asked
+ * for. `extraction_error` (when present) is appended separately by the
+ * caller, not baked in here, so the same label works whether or not
+ * there's a message to show. */
+function extractionStatusLabel(status: string, t: (key: string) => string): string {
+  switch (status) {
+    case "PENDING":
+      return t("imp.status.pending");
+    case "EXTRACTING":
+      return t("imp.status.extracting");
+    case "EXTRACTION_COMPLETE":
+      return t("imp.status.complete");
+    case "OCR_REQUIRED":
+      return t("imp.status.ocr_required");
+    case "SEGMENTS_PROPOSED":
+      return t("imp.status.segments_proposed");
+    case "MULTIPLE_QUOTATIONS_DETECTED":
+      return t("imp.status.multiple_quotations");
+    case "UNSUPPORTED":
+      return t("imp.status.unsupported");
+    case "FAILED":
+      return t("imp.status.failed");
+    default:
+      return status;
+  }
+}
+
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.describe();
   if (e instanceof Error) return e.message;
@@ -155,17 +196,38 @@ function ImportWorkspace() {
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
-  const summaryQuery = useQuery({
-    queryKey: ["import-batch-summary", selectedBatchId],
-    enabled: selectedBatchId !== null,
-    queryFn: () => api.get<ImportDashboardSummary>(`/imports/batches/${selectedBatchId}/summary`),
-  });
-
   const documentsQuery = useQuery({
     queryKey: ["import-batch-documents", selectedBatchId],
     enabled: selectedBatchId !== null,
     queryFn: () =>
       api.get<ImportedDocumentSummary[]>(`/imports/batches/${selectedBatchId}/documents`),
+    // Extraction runs in a background task after upload (see the
+    // backend router) -- there is no push/websocket channel, so this
+    // page polls while anything is still mid-pipeline (PENDING or
+    // EXTRACTING) and stops once every document has reached a terminal
+    // extraction_status, so the user sees "Uploading... -> OCR
+    // processing... -> Ready for review" happen live rather than having
+    // to manually refresh.
+    refetchInterval: (query) => {
+      const documents = query.state.data ?? [];
+      const stillProcessing = documents.some((d) =>
+        NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status),
+      );
+      return stillProcessing ? 1500 : false;
+    },
+  });
+
+  const summaryQuery = useQuery({
+    queryKey: ["import-batch-summary", selectedBatchId],
+    enabled: selectedBatchId !== null,
+    queryFn: () => api.get<ImportDashboardSummary>(`/imports/batches/${selectedBatchId}/summary`),
+    refetchInterval: () => {
+      const documents = documentsQuery.data ?? [];
+      const stillProcessing = documents.some((d) =>
+        NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status),
+      );
+      return stillProcessing ? 1500 : false;
+    },
   });
 
   const invalidateBatch = () => {
@@ -176,9 +238,13 @@ function ImportWorkspace() {
 
   const uploadMutation = useMutation({
     mutationFn: (files: File[]) =>
-      api.uploadFiles(`/imports/batches/${selectedBatchId}/documents`, "files", files),
-    onSuccess: () => {
-      toast.success(t("common.saved"));
+      api.uploadFiles<BatchUploadAccepted>(
+        `/imports/batches/${selectedBatchId}/documents`,
+        "files",
+        files,
+      ),
+    onSuccess: (result) => {
+      toast.success(`${result.accepted_files.length} ${t("imp.upload.accepted_suffix")}`);
       invalidateBatch();
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -305,7 +371,26 @@ function ImportWorkspace() {
                     <tr key={d.id} className="border-b border-border/70 last:border-0">
                       <td className="px-3 py-2.5 font-medium">{d.filename}</td>
                       <td className="px-3 py-2.5">
-                        <Badge variant="outline">{d.extraction_status}</Badge>
+                        <div className="flex items-center gap-1.5">
+                          {NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status) && (
+                            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                          )}
+                          <Badge
+                            variant={
+                              d.extraction_status === "FAILED" ||
+                              d.extraction_status === "UNSUPPORTED"
+                                ? "destructive"
+                                : d.extraction_status === "OCR_REQUIRED"
+                                  ? "secondary"
+                                  : "outline"
+                            }
+                          >
+                            {extractionStatusLabel(d.extraction_status, t)}
+                          </Badge>
+                        </div>
+                        {d.extraction_error && (
+                          <p className="mt-1 text-xs text-muted-foreground">{d.extraction_error}</p>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         <Badge

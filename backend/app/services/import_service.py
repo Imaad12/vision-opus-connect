@@ -320,7 +320,19 @@ def run_extraction(session: Session, document: ImportedDocument) -> None:
             document.extraction_status = (
                 ExtractionStatus.UNSUPPORTED if ocr_raw.unsupported else ExtractionStatus.OCR_REQUIRED
             )
-            document.extraction_error = ocr_raw.unsupported_reason
+            # `extract_via_ocr` reports "engine unavailable" via
+            # `warnings`, not `unsupported_reason` (that field is only
+            # populated for the `unsupported` branch, e.g. a
+            # password-protected file) -- previously this left
+            # `extraction_error` at `None` for the single most common
+            # real-world OCR_REQUIRED cause (Tesseract not installed on
+            # this machine), so the reviewer saw a stalled document with
+            # no explanation at all. Prefer the explicit reason; fall
+            # back to the first warning if one exists for some other
+            # reason `requires_ocr` came back true.
+            document.extraction_error = ocr_raw.unsupported_reason or (
+                ocr_raw.warnings[0] if ocr_raw.warnings else None
+            )
             document.raw_extracted_data = _serialize_raw_extraction(ocr_raw)
             session.flush()
             return

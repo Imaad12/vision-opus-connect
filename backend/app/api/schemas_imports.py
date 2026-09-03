@@ -43,20 +43,20 @@ class ImportDashboardSummaryRead(BaseModel):
     purchase_order_count: int
 
 
-class FileIngestionOutcomeRead(BaseModel):
-    filename: str
-    action: str
-    document_id: int | None
-    error: str | None
+class BatchUploadAccepted(BaseModel):
+    """Response for `POST /imports/batches/{batch_id}/documents`.
 
+    Deliberately does NOT report per-file outcomes (staged/resumed/
+    skipped_duplicate/failed) the way an earlier version of this
+    endpoint did: actual staging/hashing/extraction now runs in a
+    background task (see that route's docstring on why -- OCR can be
+    slow enough to risk hanging the HTTP request), so those outcomes
+    aren't known yet when this response is sent. The caller should poll
+    `GET /imports/batches/{batch_id}/documents` (and the summary
+    endpoint) to watch documents appear and move through
+    PENDING -> EXTRACTING -> a terminal extraction_status."""
 
-class BatchUploadResult(BaseModel):
-    """Response for `POST /imports/batches/{batch_id}/documents` -- one
-    outcome per uploaded file, in the order they were sent. `action` is
-    exactly `FileIngestionOutcome.action` (staged/resumed/
-    skipped_duplicate/failed) -- see `import_service._ingest_batch`."""
-
-    outcomes: list[FileIngestionOutcomeRead]
+    accepted_files: list[str]
 
 
 class ImportedQuotationCandidateRead(BaseModel):

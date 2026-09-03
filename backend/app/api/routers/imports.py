@@ -24,17 +24,17 @@ staging/extraction/matching/confirmation logic is reimplemented.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_permission
 from app.api.schemas_imports import (
-    BatchUploadResult,
+    BatchUploadAccepted,
     ConfirmImportRequest,
-    FileIngestionOutcomeRead,
     ImportBatchCreate,
     ImportBatchRead,
     ImportDashboardSummaryRead,
@@ -44,6 +44,7 @@ from app.api.schemas_imports import (
     RejectImportRequest,
 )
 from app.core.config import settings
+from app.database.session import session_scope
 from app.models.import_staging import ImportedDocument
 from app.services import import_service
 from app.services.import_dashboard_service import compute_import_dashboard_summary
@@ -52,6 +53,7 @@ from app.services.errors import ValidationError
 router = APIRouter(prefix="/imports", tags=["imports"])
 
 _PERMISSION = "quotations.create"
+_logger = logging.getLogger("app.api")
 
 
 def _get_batch_or_404(session: Session, batch_id: int):
@@ -155,33 +157,89 @@ def list_batch_documents(
     return [ImportedDocumentSummary.model_validate(d) for d in documents]
 
 
+def _process_uploaded_batch_files(
+    batch_id: int, saved_paths: list[Path], original_names: dict[str, str]
+) -> None:
+    """Runs AFTER the HTTP response for `upload_batch_documents` has
+    already been sent (see that route's `BackgroundTasks.add_task` call)
+    -- this is what actually stages/hashes/extracts, off the request
+    thread, so a slow OCR pass can never hang or time out the upload
+    request itself. Opens its own database session: by the time this
+    runs, the request's own `Depends(get_db)` session has already
+    committed and closed, and a background job needs a session with its
+    own independent lifetime regardless.
+
+    Reuses `ingest_quotation_batch` completely unchanged -- every actual
+    staging/hashing/dedup/extraction decision is still made by that same
+    already-tested function; this only changes WHEN it's called relative
+    to the HTTP response, never HOW it behaves.
+    """
+    with session_scope() as session:
+        batch = import_service.get_import_batch(session, batch_id)
+        if batch is None:
+            # Nothing in this codebase ever deletes a batch -- this is
+            # defensive, not an expected path.
+            _logger.warning("Import batch %s vanished before background processing could run", batch_id)
+            return
+        try:
+            summary = import_service.ingest_quotation_batch(session, saved_paths, batch=batch)
+        except ValidationError:
+            _logger.exception("Background import processing failed for batch %s", batch_id)
+            return
+
+        for outcome in summary.outcomes:
+            # `stage_document` (inside ingest_quotation_batch) names the
+            # document after the path it was actually given -- the
+            # random uuid-prefixed storage filename, not what the
+            # browser sent. Only true for a genuinely NEW document
+            # ("staged"); a "resumed"/"skipped_duplicate" one already
+            # has its original first-upload filename recorded.
+            if outcome.action == "staged" and outcome.document_id is not None:
+                original_name = original_names.get(str(outcome.path), outcome.path.name)
+                staged_document = import_service.get_imported_document(session, outcome.document_id)
+                if staged_document is not None:
+                    staged_document.filename = original_name
+
+
 @router.post(
-    "/batches/{batch_id}/documents", response_model=BatchUploadResult, status_code=status.HTTP_201_CREATED
+    "/batches/{batch_id}/documents",
+    response_model=BatchUploadAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def upload_batch_documents(
     batch_id: int,
     files: list[UploadFile],
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_db),
     _user=Depends(require_permission(_PERMISSION)),
-) -> BatchUploadResult:
+) -> BatchUploadAccepted:
     """Writes each uploaded file to `settings.imports_storage_dir`
     (persistently -- see that setting's own docstring on why, and its
     known limitation on an ephemeral-disk host) under a random-uuid-
     prefixed name (never trusting the browser-supplied filename as a
-    path component), then reuses `ingest_quotation_batch` unchanged for
-    every actual staging/hashing/dedup/extraction step -- this route
-    only bridges "bytes over HTTP" to "a real path on disk", nothing
-    about the pipeline itself.
+    path component) -- fast, synchronous, just disk I/O. The actual
+    staging/hashing/extraction (`_process_uploaded_batch_files` above)
+    then runs as a FastAPI background task, AFTER this response is
+    already sent: a scanned document's OCR pass has no fixed time
+    budget, and running it inline risked hanging or timing out the
+    upload request for exactly the documents this feature exists to
+    handle. 202 Accepted (not 201 Created) reflects that honestly --
+    nothing has been fully processed yet when this response is sent.
+    `BackgroundTasks` is FastAPI's own built-in mechanism (no new
+    dependency, no new infrastructure); the caller is expected to poll
+    `GET .../documents` and `.../summary` to watch documents actually
+    appear and progress (see the frontend's polling).
     """
     if not files:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="No files were uploaded.")
 
-    batch = _get_batch_or_404(session, batch_id)
+    _get_batch_or_404(session, batch_id)
     storage_dir = settings.imports_storage_dir
     storage_dir.mkdir(parents=True, exist_ok=True)
 
     saved_paths: list[Path] = []
     original_names: dict[str, str] = {}
+    accepted_files: list[str] = []
     for upload in files:
         original_name = upload.filename or "upload"
         suffix = Path(original_name).suffix
@@ -191,35 +249,10 @@ def upload_batch_documents(
             f.write(upload.file.read())
         saved_paths.append(dest)
         original_names[str(dest)] = original_name
+        accepted_files.append(original_name)
 
-    try:
-        summary = import_service.ingest_quotation_batch(session, saved_paths, batch=batch)
-    except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-
-    outcomes = []
-    for outcome in summary.outcomes:
-        original_name = original_names.get(str(outcome.path), outcome.path.name)
-        # `stage_document` (inside ingest_quotation_batch) names the
-        # document after the path it was actually given -- the random
-        # uuid-prefixed storage filename, not what the browser sent.
-        # Only true for a genuinely NEW document ("staged"); a
-        # "resumed"/"skipped_duplicate" one already has its original
-        # first-upload filename recorded and must keep it.
-        if outcome.action == "staged" and outcome.document_id is not None:
-            staged_document = import_service.get_imported_document(session, outcome.document_id)
-            if staged_document is not None:
-                staged_document.filename = original_name
-                session.flush()
-        outcomes.append(
-            FileIngestionOutcomeRead(
-                filename=original_name,
-                action=outcome.action,
-                document_id=outcome.document_id,
-                error=outcome.error,
-            )
-        )
-    return BatchUploadResult(outcomes=outcomes)
+    background_tasks.add_task(_process_uploaded_batch_files, batch_id, saved_paths, original_names)
+    return BatchUploadAccepted(accepted_files=accepted_files)
 
 
 @router.get("/documents/{document_id}", response_model=ImportedDocumentRead)

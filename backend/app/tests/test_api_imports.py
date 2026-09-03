@@ -8,6 +8,19 @@ Same `make_api_client`/`make_memory_engine` pattern as
 `tmp_path`) so every test exercises the real file-write -> real
 `ingest_quotation_batch` path end-to-end, never a mock of the pipeline
 itself.
+
+Upload processing runs as a FastAPI `BackgroundTasks` job (see the
+router's own docstring on why), not inline in the request -- but
+Starlette's `TestClient` runs a request's background tasks to
+completion before `client.post(...)` returns control to the caller
+(verified empirically here, not just assumed), so these tests can still
+assert on the resulting document/state immediately after the upload
+call returns, exactly as if it were synchronous. `api_test_support.
+make_api_client` also redirects `app.database.session`'s module-level
+engine/factory (what the background task's `session_scope()` actually
+resolves to) at the same in-memory test database `get_db` uses -- see
+that fixture's own comment on the real production-database hang this
+closes.
 """
 
 from __future__ import annotations
@@ -56,6 +69,17 @@ def _upload(client: TestClient, batch_id: int, *, filename: str = "quote.txt", t
     )
 
 
+def _upload_and_get_document(
+    client: TestClient, batch_id: int, *, filename: str = "quote.txt", text: str = QUOTATION_TEXT
+) -> dict:
+    """Uploads one file and returns the resulting `ImportedDocumentSummary`
+    row from the batch's document list -- the background-processed
+    equivalent of the old synchronous "outcomes[0]" shortcut."""
+    _upload(client, batch_id, filename=filename, text=text)
+    documents = client.get(f"/imports/batches/{batch_id}/documents").json()
+    return next(d for d in documents if d["filename"] == filename)
+
+
 def test_create_batch(api_client: TestClient):
     response = api_client.post("/imports/batches", json={"label": "2018 archive box 3"})
     assert response.status_code == 201, response.text
@@ -85,19 +109,25 @@ def test_get_missing_batch_is_404(api_client: TestClient):
     assert response.status_code == 404
 
 
-def test_upload_stages_a_document_and_writes_it_to_persistent_storage(
+def test_upload_response_accepts_files_without_synchronous_outcomes(api_client: TestClient):
+    """The upload endpoint itself only confirms bytes were received and
+    background processing was scheduled (202 Accepted) -- it can't know
+    staged/duplicate/failed yet, since that determination now happens
+    after this response is sent (see the router's own docstring)."""
+    batch = api_client.post("/imports/batches", json={"label": "Pilot"}).json()
+    response = _upload(api_client, batch["id"])
+    assert response.status_code == 202, response.text
+    assert response.json() == {"accepted_files": ["quote.txt"]}
+
+
+def test_upload_eventually_stages_a_document_and_writes_it_to_persistent_storage(
     api_client: TestClient, storage_dir: Path
 ):
     batch = api_client.post("/imports/batches", json={"label": "Pilot"}).json()
-    response = _upload(api_client, batch["id"])
-    assert response.status_code == 201, response.text
-    body = response.json()
-    assert len(body["outcomes"]) == 1
-    outcome = body["outcomes"][0]
-    assert outcome["action"] == "staged"
-    assert outcome["filename"] == "quote.txt"
-    assert outcome["document_id"] is not None
-    assert outcome["error"] is None
+    document = _upload_and_get_document(api_client, batch["id"])
+
+    assert document["extraction_status"] in ("EXTRACTING", "EXTRACTION_COMPLETE", "PENDING")
+    assert document["review_status"] == "NEEDS_REVIEW"
 
     # The uploaded bytes actually landed in the configured persistent
     # storage directory (not a discarded temp file) -- see this feature's
@@ -106,6 +136,18 @@ def test_upload_stages_a_document_and_writes_it_to_persistent_storage(
     saved_files = list(storage_dir.glob("*.txt"))
     assert len(saved_files) == 1
     assert saved_files[0].read_text(encoding="utf-8") == QUOTATION_TEXT
+
+
+def test_upload_reaches_a_terminal_extraction_status_for_a_real_text_quotation(api_client: TestClient):
+    """A deterministic (non-OCR) text document's extraction is fast and
+    fully synchronous inside the background task -- by the time the
+    document is visible at all, it should already be past PENDING/
+    EXTRACTING and have real candidate data, proving the pipeline
+    actually ran end-to-end rather than just creating a staged row."""
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+    assert document["extraction_status"] == "EXTRACTION_COMPLETE"
+    assert document["extraction_error"] is None
 
 
 def test_upload_updates_batch_counts(api_client: TestClient):
@@ -119,12 +161,16 @@ def test_upload_updates_batch_counts(api_client: TestClient):
 def test_upload_duplicate_file_is_skipped_not_restaged(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
     _upload(api_client, batch["id"], filename="first.txt")
-    response = _upload(api_client, batch["id"], filename="second.txt")  # same content
-    outcome = response.json()["outcomes"][0]
-    assert outcome["action"] == "skipped_duplicate"
+    _upload(api_client, batch["id"], filename="second.txt")  # same content
 
     documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
     assert len(documents) == 1  # the duplicate never got its own row
+
+    refreshed = api_client.get(f"/imports/batches/{batch['id']}").json()
+    assert refreshed["skipped_duplicate_count"] == 1
+
+    summary = api_client.get(f"/imports/batches/{batch['id']}/summary").json()
+    assert summary["duplicates"] == 1
 
 
 def test_upload_no_files_is_422(api_client: TestClient):
@@ -136,6 +182,9 @@ def test_upload_no_files_is_422(api_client: TestClient):
 def test_upload_to_missing_batch_is_404(api_client: TestClient):
     response = _upload(api_client, 999)
     assert response.status_code == 404
+    # A 404 on the batch must be checked before anything is written or
+    # scheduled -- no orphaned file, no background task for a batch that
+    # was never confirmed to exist.
 
 
 def test_list_batch_documents(api_client: TestClient):
@@ -159,12 +208,11 @@ def test_batch_summary_counts(api_client: TestClient):
 
 def test_get_document_returns_extracted_candidate_fields(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
-    upload = _upload(api_client, batch["id"]).json()
-    document_id = upload["outcomes"][0]["document_id"]
+    document = _upload_and_get_document(api_client, batch["id"])
 
-    document = api_client.get(f"/imports/documents/{document_id}").json()
-    assert document["review_status"] == "NEEDS_REVIEW"
-    candidate = document["quotation_candidate"]
+    detail = api_client.get(f"/imports/documents/{document['id']}").json()
+    assert detail["review_status"] == "NEEDS_REVIEW"
+    candidate = detail["quotation_candidate"]
     assert candidate is not None
     assert candidate["quotation_number"] == "Q-2024-0091"
     assert candidate["client_name"] == "ABC Holdings"
@@ -178,11 +226,10 @@ def test_get_missing_document_is_404(api_client: TestClient):
 
 def test_confirm_document_creates_client_project_and_quotation(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
-    upload = _upload(api_client, batch["id"]).json()
-    document_id = upload["outcomes"][0]["document_id"]
+    document = _upload_and_get_document(api_client, batch["id"])
 
     response = api_client.post(
-        f"/imports/documents/{document_id}/confirm",
+        f"/imports/documents/{document['id']}/confirm",
         json={
             "new_client_name": "ABC Holdings",
             "new_project_name": "Villa ABC Renovation",
@@ -208,10 +255,8 @@ def test_confirm_document_creates_client_project_and_quotation(api_client: TestC
 
 def test_confirm_document_with_no_client_info_is_422(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
-    upload = _upload(api_client, batch["id"]).json()
-    document_id = upload["outcomes"][0]["document_id"]
-
-    response = api_client.post(f"/imports/documents/{document_id}/confirm", json={})
+    document = _upload_and_get_document(api_client, batch["id"])
+    response = api_client.post(f"/imports/documents/{document['id']}/confirm", json={})
     assert response.status_code == 422
 
 
@@ -222,11 +267,10 @@ def test_confirm_missing_document_is_404(api_client: TestClient):
 
 def test_reject_document(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
-    upload = _upload(api_client, batch["id"]).json()
-    document_id = upload["outcomes"][0]["document_id"]
+    document = _upload_and_get_document(api_client, batch["id"])
 
     response = api_client.post(
-        f"/imports/documents/{document_id}/reject", json={"reason": "Illegible scan"}
+        f"/imports/documents/{document['id']}/reject", json={"reason": "Illegible scan"}
     )
     assert response.status_code == 200, response.text
     assert response.json()["review_status"] == "REJECTED"
@@ -239,12 +283,12 @@ def test_reject_missing_document_is_404(api_client: TestClient):
 
 def test_confirmed_document_cannot_be_rejected_afterward(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
-    upload = _upload(api_client, batch["id"]).json()
-    document_id = upload["outcomes"][0]["document_id"]
+    document = _upload_and_get_document(api_client, batch["id"])
     api_client.post(
-        f"/imports/documents/{document_id}/confirm", json={"new_client_name": "X", "new_project_name": "Y"}
+        f"/imports/documents/{document['id']}/confirm",
+        json={"new_client_name": "X", "new_project_name": "Y"},
     )
-    response = api_client.post(f"/imports/documents/{document_id}/reject", json={})
+    response = api_client.post(f"/imports/documents/{document['id']}/reject", json={})
     assert response.status_code == 422
 
 
