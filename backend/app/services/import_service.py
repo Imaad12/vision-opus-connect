@@ -119,11 +119,27 @@ def check_for_duplicate(session: Session, path: Path) -> ImportedDocument | None
 # --- Listing -----------------------------------------------------------------
 
 
-def list_imported_documents(session: Session, *, search: str | None = None) -> list[ImportedDocument]:
+def list_imported_documents(
+    session: Session, *, search: str | None = None, batch_id: int | None = None
+) -> list[ImportedDocument]:
     stmt = select(ImportedDocument).order_by(ImportedDocument.created_at.desc())
     if search:
         stmt = stmt.where(ImportedDocument.filename.ilike(f"%{search}%"))
+    if batch_id is not None:
+        stmt = stmt.where(ImportedDocument.batch_id == batch_id)
     return list(session.execute(stmt).scalars().all())
+
+
+def list_import_batches(session: Session) -> list[ImportBatch]:
+    """Every batch, newest first -- the "select an existing batch" list
+    for the import UI. `ImportBatch` itself already carries its own
+    staged/resumed/skipped/failed counts (see that model)."""
+    stmt = select(ImportBatch).order_by(ImportBatch.created_at.desc())
+    return list(session.execute(stmt).scalars().all())
+
+
+def get_import_batch(session: Session, batch_id: int) -> ImportBatch | None:
+    return session.get(ImportBatch, batch_id)
 
 
 def get_imported_document(session: Session, document_id: int) -> ImportedDocument | None:
@@ -1704,6 +1720,8 @@ __all__ = [
     "check_for_duplicate",
     "list_imported_documents",
     "get_imported_document",
+    "list_import_batches",
+    "get_import_batch",
     "get_segment",
     "stage_document",
     "run_extraction",

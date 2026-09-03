@@ -42,9 +42,16 @@ class _FakeSupabaseAdmin:
         self.roles_set: list[tuple[str, str]] = []
         self.banned: list[tuple[str, bool]] = []
         self.passwords_reset: list[tuple[str, str]] = []
+        self.emails_set: list[tuple[str, str]] = []
         self._next_id = 1
         self.reject_role: str | None = None
         self.unavailable: bool = False
+        #: user_id -> existing Supabase role, consulted only by
+        #: `get_user_role` (the `claim_native_identity` tests) -- mimics
+        #: an account that already has a real `public.user_roles` row
+        #: (e.g. the legacy-bootstrapped Super Admin) before it ever
+        #: touches `app_users`.
+        self.existing_roles: dict[str, str] = {}
 
     def create_auth_user(self, *, email: str, password: str, full_name: str) -> str:
         if self.unavailable:
@@ -66,6 +73,12 @@ class _FakeSupabaseAdmin:
 
     def set_password(self, user_id: str, password: str) -> None:
         self.passwords_reset.append((user_id, password))
+
+    def set_email(self, user_id: str, email: str) -> None:
+        self.emails_set.append((user_id, email))
+
+    def get_user_role(self, user_id: str) -> str | None:
+        return self.existing_roles.get(user_id)
 
 
 @pytest.fixture
@@ -760,6 +773,137 @@ def test_mark_own_password_changed_requires_a_bearer_token(engine: Engine, fake_
         response = client.post("/users/me/password-changed")
 
     assert response.status_code == 401
+
+
+# ---- POST /users/me/claim (self-service native-identity migration) ----
+#
+# The real incident this covers: `handle_new_user()`'s Supabase trigger
+# makes the very first Supabase user ever created `super_admin`
+# automatically, with a real `public.user_roles` row but no
+# `app_users` row -- `POST /users` was never involved. `GET /users/me`
+# 404s for that account, which is also why the Change Password dialog
+# previously rendered nothing for it (see change-password-dialog.tsx).
+
+
+def test_claim_success(api_client: TestClient, fake_admin: _FakeSupabaseAdmin):
+    fake_admin.existing_roles["admin-caller"] = "super_admin"
+    response = api_client.post(
+        "/users/me/claim", json={"username": "the.admin", "display_name": "The Admin"}
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["id"] == "admin-caller"
+    assert body["username"] == "the.admin"
+    assert body["role"] == "super_admin"
+    assert body["must_change_password"] is True
+    assert isinstance(body["temporary_password"], str)
+    assert len(body["temporary_password"]) >= 12
+
+    # The SAME existing identity is repointed -- never a new one.
+    assert fake_admin.created == []
+    assert fake_admin.emails_set == [("admin-caller", "the.admin@vinco.local")]
+    assert fake_admin.passwords_reset == [("admin-caller", body["temporary_password"])]
+
+    # And it's now a real, listable native VINCO account.
+    listed = api_client.get("/users").json()
+    assert any(u["id"] == "admin-caller" for u in listed)
+
+
+def test_claim_maps_every_known_supabase_role_back_to_its_vinco_label():
+    """A single claiming caller can only ever claim once (its own
+    `app_users` row then exists), so this checks the mapping table
+    directly rather than exercising all four through one shared
+    `api_client` -- `test_claim_success` already proves one of these
+    end-to-end through the real route."""
+    from app.services.user_service import SUPABASE_ROLE_TO_ROLE
+
+    assert SUPABASE_ROLE_TO_ROLE == {
+        "employee": "employee",
+        "general_manager": "admin",
+        "super_user": "super_user",
+        "super_admin": "super_admin",
+    }
+
+
+def test_claim_rejects_an_account_that_already_has_a_native_login(
+    api_client: TestClient, engine: Engine, fake_admin: _FakeSupabaseAdmin
+):
+    _seed_app_user(engine, id="admin-caller", username="already.here")
+    fake_admin.existing_roles["admin-caller"] = "super_admin"
+
+    response = api_client.post(
+        "/users/me/claim", json={"username": "new.name", "display_name": "New Name"}
+    )
+    assert response.status_code == 422
+    assert "already has a native VINCO login" in response.text
+    # Never touched Supabase at all once the existing-row check failed.
+    assert fake_admin.emails_set == []
+    assert fake_admin.passwords_reset == []
+
+
+def test_claim_rejects_a_username_already_taken_by_someone_else(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    api_client.post("/users", json=_create_payload(username="taken"))
+    fake_admin.existing_roles["admin-caller"] = "super_admin"
+
+    response = api_client.post(
+        "/users/me/claim", json={"username": "taken", "display_name": "Someone Else"}
+    )
+    assert response.status_code == 422
+    assert "already taken" in response.text
+    assert fake_admin.emails_set == []
+
+
+def test_claim_rejects_when_caller_has_no_existing_supabase_role_at_all(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """No `public.user_roles` row for this identity at all -- refuses
+    rather than silently defaulting to some role, since this can't
+    happen for a real signed-in Supabase user (handle_new_user() always
+    inserts one) and is worth surfacing as needing a human to look at."""
+    response = api_client.post(
+        "/users/me/claim", json={"username": "no.role", "display_name": "No Role"}
+    )
+    assert response.status_code == 422
+    assert fake_admin.emails_set == []
+    assert fake_admin.passwords_reset == []
+
+
+def test_claim_never_creates_a_new_supabase_auth_identity(
+    api_client: TestClient, fake_admin: _FakeSupabaseAdmin
+):
+    """The whole point: this migrates the CALLER's own already-existing
+    identity in place, never `create_auth_user`s a fresh one the way
+    `POST /users` does."""
+    fake_admin.existing_roles["admin-caller"] = "employee"
+    api_client.post("/users/me/claim", json={"username": "claimer", "display_name": "Claimer"})
+    assert fake_admin.created == []
+
+
+def test_claim_requires_a_bearer_token(engine: Engine, fake_admin: _FakeSupabaseAdmin):
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: iter([factory()])
+    app.dependency_overrides[get_supabase_auth] = lambda: _FakeSupabaseAuth(set())
+    app.dependency_overrides[get_supabase_admin] = lambda: fake_admin
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/users/me/claim", json={"username": "anyone", "display_name": "Anyone"}
+        )
+
+    assert response.status_code == 401
+
+
+def test_claim_never_returned_by_list_or_get(api_client: TestClient, fake_admin: _FakeSupabaseAdmin):
+    fake_admin.existing_roles["admin-caller"] = "employee"
+    claimed = api_client.post(
+        "/users/me/claim", json={"username": "claimer2", "display_name": "Claimer2"}
+    ).json()
+    listed = api_client.get("/users").json()
+    mine = next(u for u in listed if u["id"] == claimed["id"])
+    assert "temporary_password" not in mine
 
 
 # ---- Structured error responses (Part A2's status-code table) ----

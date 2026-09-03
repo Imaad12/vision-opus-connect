@@ -43,6 +43,19 @@ class Settings(BaseSettings):
 
     database_path: Path = PROJECT_ROOT / "vision_contracting.db"
 
+    #: Where uploaded historical-import source files are written and kept
+    #: (see app/api/routers/imports.py) -- the desktop-era import pipeline
+    #: (app/services/import_service.py) was built assuming a local file
+    #: already sitting on disk indefinitely (`ImportedDocument.original_path`
+    #: is a reference, never a copy), so a web upload needs somewhere
+    #: durable to land before `stage_document`/`ingest_quotation_batch`
+    #: ever see it. On a host with an ephemeral filesystem (e.g. Render's
+    #: default disk), this directory does NOT survive a redeploy -- see
+    #: this feature's own report for that known limitation; production
+    #: hardening (object storage) is a deliberate follow-up, not silently
+    #: assumed solved here.
+    imports_storage_dir: Path = PROJECT_ROOT / "data" / "imports"
+
     #: A full SQLAlchemy connection string (e.g.
     #: "postgresql+psycopg://user:pass@host:5432/dbname") for production
     #: use, read from VISION_DATABASE_URL. Empty by default, in which case

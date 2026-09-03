@@ -307,6 +307,50 @@ class SupabaseAdmin:
                 f"Failed to reset password for {user_id}: {response.status_code} {response.text}"
             )
 
+    def set_email(self, user_id: str, email: str) -> None:
+        """Used only by `user_service.claim_native_identity`: repoints an
+        EXISTING Supabase Auth identity's login email at the synthetic
+        `<username>@vinco.local` address username-based login expects
+        (see `create_auth_user`'s docstring on why that address is
+        synthetic and never a real inbox). `email_confirm: true` for the
+        same reason as `create_auth_user`: this backend has already
+        chosen the address, so there is nothing for Supabase's normal
+        confirmation-email flow to accomplish here."""
+        response = self._request(
+            "PUT",
+            f"{self._project_url}/auth/v1/admin/users/{user_id}",
+            json={"email": email, "email_confirm": True},
+            headers=self._headers(),
+        )
+        if response.status_code != 200:
+            raise SupabaseAdminError(
+                f"Failed to set email for {user_id}: {response.status_code} {response.text}"
+            )
+
+    def get_user_role(self, user_id: str) -> str | None:
+        """Reads `user_id`'s current `public.user_roles` row (there is
+        at most one -- see `set_user_role`), bypassing RLS via the
+        service-role key. Used only by `user_service.claim_native_identity`
+        to mirror a caller's OWN already-existing Supabase role onto their
+        new `app_users` row -- read server-side, from the same identity
+        the caller's verified token names, never trusted from the request
+        body. Returns `None` if the user has no role row at all."""
+        response = self._request(
+            "GET",
+            f"{self._project_url}/rest/v1/user_roles",
+            params={"user_id": f"eq.{user_id}", "select": "role"},
+            headers=self._headers(),
+        )
+        if response.status_code != 200:
+            raise SupabaseAdminError(
+                f"Failed to look up role for {user_id}: {response.status_code} {response.text}"
+            )
+        rows = response.json()
+        if not rows:
+            return None
+        role = rows[0].get("role")
+        return role if isinstance(role, str) else None
+
     def set_banned(self, user_id: str, *, banned: bool) -> None:
         """The active/inactive toggle: Supabase Auth's own account-level
         ban, which `verify_token`/`signInWithPassword` both already

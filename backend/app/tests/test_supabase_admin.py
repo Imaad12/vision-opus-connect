@@ -100,6 +100,64 @@ def test_set_password_puts_to_admin_users_id() -> None:
     assert captured["body"] == {"password": "new-password-1"}
 
 
+def test_set_password_raises_on_failure_response() -> None:
+    admin = _admin_with_transport(lambda r: httpx.Response(500, json={"msg": "internal error"}))
+    with pytest.raises(SupabaseAdminError, match="500"):
+        admin.set_password("user-abc-123", "new-password-1")
+
+
+def test_set_email_puts_to_admin_users_id_with_email_confirm() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "user-abc-123"})
+
+    admin = _admin_with_transport(handler)
+    admin.set_email("user-abc-123", "the.admin@vinco.local")
+
+    assert captured["method"] == "PUT"
+    assert captured["url"] == "https://example.supabase.co/auth/v1/admin/users/user-abc-123"
+    assert captured["body"] == {"email": "the.admin@vinco.local", "email_confirm": True}
+
+
+def test_set_email_raises_on_failure_response() -> None:
+    admin = _admin_with_transport(lambda r: httpx.Response(500, json={"msg": "internal error"}))
+    with pytest.raises(SupabaseAdminError, match="500"):
+        admin.set_email("user-abc-123", "x@vinco.local")
+
+
+def test_get_user_role_queries_user_roles_by_id_and_returns_the_role() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[{"role": "super_admin"}])
+
+    admin = _admin_with_transport(handler)
+    role = admin.get_user_role("user-abc-123")
+
+    assert role == "super_admin"
+    assert captured["method"] == "GET"
+    assert "rest/v1/user_roles" in captured["url"]
+    assert "user_id=eq.user-abc-123" in captured["url"]
+    assert "select=role" in captured["url"]
+
+
+def test_get_user_role_returns_none_when_no_role_row_exists() -> None:
+    admin = _admin_with_transport(lambda r: httpx.Response(200, json=[]))
+    assert admin.get_user_role("user-abc-123") is None
+
+
+def test_get_user_role_raises_on_failure_response() -> None:
+    admin = _admin_with_transport(lambda r: httpx.Response(500, json={"msg": "internal error"}))
+    with pytest.raises(SupabaseAdminError, match="500"):
+        admin.get_user_role("user-abc-123")
+
+
 @pytest.mark.parametrize(
     "banned,expected_duration",
     [(True, "876000h"), (False, "none")],

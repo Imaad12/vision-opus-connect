@@ -10,3 +10,10 @@ dist/
 .env
 .DS_Store
 logs/
+
+# Uploaded historical-import source files (app/api/routers/imports.py's
+# `settings.imports_storage_dir`) -- real business documents, never
+# committed. On a host with an ephemeral filesystem this directory does
+# not survive a redeploy anyway; see imports_storage_dir's own docstring
+# in app/core/config.py.
+data/

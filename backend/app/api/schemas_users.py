@@ -38,6 +38,32 @@ class AppUserRead(BaseModel):
     password_changed_at: datetime | None = None
 
 
+class AppUserClaimRequest(BaseModel):
+    """`POST /users/me/claim` -- no `role`, `is_active`, or `employee_id`
+    field: unlike `AppUserCreate`, this is self-service (the caller is
+    claiming their OWN already-authenticated Supabase identity, not
+    creating one for someone else), so the role is read from the
+    caller's own existing `public.user_roles` row server-side (see
+    `user_service.claim_native_identity`) rather than trusted from the
+    request body."""
+
+    username: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("username")
+    @classmethod
+    def _username_shape(cls, value: str) -> str:
+        import re
+
+        normalized = value.strip().lower()
+        if not re.match(_USERNAME_PATTERN, normalized):
+            raise ValueError(
+                "Username must be 3-64 characters, lowercase letters/numbers/"
+                "dots/hyphens/underscores, starting with a letter or number."
+            )
+        return normalized
+
+
 class AppUserCreate(BaseModel):
     """No `password` field: the backend always generates a fresh,
     cryptographically random temporary password (see

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import AuthenticatedUser, SupabaseAdmin
 from app.api.deps import get_current_user, get_db, get_supabase_admin, require_permission
 from app.api.schemas_users import (
+    AppUserClaimRequest,
     AppUserCreate,
     AppUserCreateResult,
     AppUserEmployeeLinkUpdate,
@@ -69,6 +70,37 @@ def get_own_user(
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No native VINCO account.")
     return target
+
+
+@router.post("/me/claim", response_model=AppUserCreateResult, status_code=status.HTTP_201_CREATED)
+def claim_own_native_identity(
+    payload: AppUserClaimRequest,
+    session: Session = Depends(get_db),
+    admin: SupabaseAdmin = Depends(get_supabase_admin),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AppUserCreateResult:
+    """No permission requirement beyond a valid token, deliberately --
+    this is the self-service migration path for an account that (by
+    definition) has no `app_users` row yet, so it can't be gated behind
+    `admin.users` the way `POST /users` is. Safe regardless: it only
+    ever touches the caller's OWN identity (`user.id`, from their
+    verified token -- never a request parameter), and mirrors their own
+    already-existing Supabase role rather than accepting one from the
+    request (see `user_service.claim_native_identity`), so this can
+    never grant elevated access or let one account claim another's."""
+    try:
+        app_user, temporary_password = user_service.claim_native_identity(
+            session,
+            admin,
+            user_id=user.id,
+            username=payload.username,
+            display_name=payload.display_name,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    return AppUserCreateResult(
+        **AppUserRead.model_validate(app_user).model_dump(), temporary_password=temporary_password
+    )
 
 
 @router.post("/me/password-changed", status_code=status.HTTP_204_NO_CONTENT)

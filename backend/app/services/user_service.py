@@ -28,6 +28,7 @@ __all__ = [
     "list_users",
     "get_user",
     "create_user",
+    "claim_native_identity",
     "update_user",
     "update_user_role",
     "update_employee_link",
@@ -90,6 +91,12 @@ ROLE_TO_SUPABASE_ROLE: dict[str, str] = {
     "super_user": "super_user",
     "super_admin": "super_admin",
 }
+
+#: The reverse of ROLE_TO_SUPABASE_ROLE, used only by
+#: `claim_native_identity` to translate a caller's own already-existing
+#: Supabase role back into VINCO's simplified label for their new
+#: `app_users` row.
+SUPABASE_ROLE_TO_ROLE: dict[str, str] = {v: k for k, v in ROLE_TO_SUPABASE_ROLE.items()}
 
 
 def _username_email(username: str) -> str:
@@ -206,6 +213,87 @@ def create_user(
         role=role,
         is_active=is_active,
         employee_id=employee_id,
+    )
+    session.add(app_user)
+    session.flush()
+    return app_user, temporary_password
+
+
+def claim_native_identity(
+    session: Session,
+    admin: SupabaseAdmin,
+    *,
+    user_id: str,
+    username: str,
+    display_name: str,
+) -> tuple[AppUser, str]:
+    """Self-service migration path for an EXISTING Supabase Auth identity
+    that has no `app_users` row -- the real production gap this closes:
+    `handle_new_user()`'s trigger (see the Supabase migration) makes the
+    very first Supabase user ever created `super_admin` automatically,
+    with no `app_users` row and no involvement from `create_user` at
+    all. Anyone who reaches this account today (e.g. via Supabase's own
+    email/OAuth sign-in) has a real, working Supabase identity but no
+    native VINCO username -- `GET /users/me` 404s for them, which is
+    also why the "Change Password" UI previously rendered nothing.
+
+    Unlike `create_user`, this never calls `admin.create_auth_user`: no
+    new Supabase identity is created. `user_id` already exists and keeps
+    its full `user_roles`/`user_scopes` history untouched by this
+    function -- `admin.get_user_role` only *reads* it, to mirror the
+    caller's own already-existing role onto the new `app_users` row
+    (never accepted from the request body, so this can't be used to
+    grant a role the caller didn't already have -- see the route, which
+    passes `user_id` from the caller's own verified token, never from
+    the request).
+
+    Two things about the existing identity are overwritten, both
+    necessary for username-based login to find it afterward:
+      1. Its Supabase Auth email becomes the synthetic
+         `<username>@vinco.local` address (see `USERNAME_EMAIL_DOMAIN`)
+         -- whatever real/legacy email it had before is not recoverable
+         through this endpoint.
+      2. A fresh admin-generated temporary password is set on it (same
+         one-time-reveal convention as `create_user`/`reset_password`;
+         never persisted, logged, or audit-logged here either).
+    """
+    existing = session.execute(select(AppUser).where(AppUser.id == user_id)).scalar_one_or_none()
+    if existing is not None:
+        raise ValidationError(
+            "This account already has a native VINCO login -- use Change Password instead."
+        )
+    username_taken = session.execute(
+        select(AppUser).where(AppUser.username == username)
+    ).scalar_one_or_none()
+    if username_taken is not None:
+        raise ValidationError(f"Username {username!r} is already taken.")
+
+    try:
+        supabase_role = admin.get_user_role(user_id)
+    except SupabaseAdminError as exc:
+        raise ValidationError(str(exc)) from exc
+    role = SUPABASE_ROLE_TO_ROLE.get(supabase_role or "")
+    if role is None:
+        raise ValidationError(
+            f"Could not determine a VINCO role for this account (Supabase role: "
+            f"{supabase_role!r}) -- this needs a human to look at its "
+            "public.user_roles row before it can be claimed."
+        )
+
+    temporary_password = generate_temporary_password()
+    try:
+        admin.set_email(user_id, _username_email(username))
+        admin.set_password(user_id, temporary_password)
+    except SupabaseAdminError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    app_user = AppUser(
+        id=user_id,
+        username=username,
+        display_name=display_name,
+        role=role,
+        is_active=True,
+        employee_id=None,
     )
     session.add(app_user)
     session.flush()
