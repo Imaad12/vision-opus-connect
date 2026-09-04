@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import (
@@ -36,6 +36,7 @@ from app.core.enums import (
     ExtractionStatus,
     ImportAuditEventType,
     ImportDocumentKind,
+    ImportJobStatus,
     ImportReviewStatus,
     ClientAwardEvidenceMatchStatus,
     SegmentReviewStatus,
@@ -96,6 +97,21 @@ class ImportBatch(Base, TimestampMixin):
     #: resumability means re-running is always safe regardless.
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    #: Free-text, purely descriptive -- same "never parsed/matched"
+    #: promise as `label` (see P10's "rename/edit label, optionally add
+    #: notes -- don't over-engineer this").
+    notes: Mapped[str | None] = mapped_column(Text)
+    #: Set by an explicit "Archive" action once a batch's documents have
+    #: all reached a terminal outcome and at least one was confirmed into
+    #: a real business record -- see `import_queue_service.
+    #: compute_batch_lifecycle_status` for the full EMPTY/STAGING/
+    #: PROCESSING/COMPLETED/ARCHIVED state machine this participates in.
+    #: `None` means "not archived" (the ordinary case for every batch
+    #: created before this column existed, and every batch not yet
+    #: explicitly archived). Archiving never deletes or modifies a single
+    #: `ImportedDocument` row -- it only marks the batch read-only.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     documents: Mapped[list["ImportedDocument"]] = relationship("ImportedDocument", back_populates="batch")
 
     def __repr__(self) -> str:
@@ -127,6 +143,22 @@ class ImportedDocument(Base, TimestampMixin):
     )
 
     original_path: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Durable object-storage location (P5) -- `app.core.document_storage`
+    #: writes every new upload to Supabase Storage (or, when that isn't
+    #: configured, a local fallback -- see that module's own docstring)
+    #: and records where it landed here, in Postgres, as the single
+    #: source of truth for "where is this file really". `original_path`
+    #: above is left unmodified for every existing row and is still what
+    #: `run_extraction`'s importers actually open -- a worker downloads
+    #: from `storage_bucket`/`storage_key` to a local temp path first
+    #: when this is set (see `import_queue_service.process_import_job`),
+    #: then points `original_path` at that temp copy for the duration of
+    #: extraction only. Both `None` for a document written before this
+    #: column existed, or for the local-storage-fallback path, where
+    #: `original_path` alone is already durable-enough for this
+    #: environment.
+    storage_bucket: Mapped[str | None] = mapped_column(String(120))
+    storage_key: Mapped[str | None] = mapped_column(Text)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     extension: Mapped[str] = mapped_column(String(20), nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -574,4 +606,90 @@ class ImportAuditLogEntry(Base):
         return (
             f"ImportAuditLogEntry(imported_document_id={self.imported_document_id!r}, "
             f"event_type={self.event_type!r})"
+        )
+
+
+class ImportJob(Base, TimestampMixin):
+    """One durable queue row: "run `run_extraction` for this document",
+    surviving independently of the HTTP request that created it, the
+    browser tab, and a web-process restart -- see
+    `app.services.import_queue_service` for the claim/complete/fail/retry
+    logic and `app/worker.py` for the standalone process that consumes
+    these. This is the concrete fix for the previous FastAPI-
+    `BackgroundTask`-based design: that task lived only in the web
+    process's own memory for the lifetime of one Python coroutine, so a
+    Render web-service restart (a deploy, a crash, a scale event) silently
+    lost it mid-run, leaving the document's `extraction_status` stuck at
+    PENDING/EXTRACTING forever with nothing left anywhere that would ever
+    resume it. A row in this table is real, committed, queryable state --
+    it exists whether or not any worker process happens to be running
+    right now, and a new worker (or the same one, restarted) simply picks
+    up where the table says work is still outstanding.
+
+    Exactly one job per `imported_document_id`, ever (see the unique
+    constraint) -- a retry re-queues the SAME row (resets it back to
+    QUEUED) rather than creating a second one, so "how many times has
+    this document's processing been attempted" always has one obvious
+    answer: `attempts` on this one row.
+    """
+
+    __tablename__ = "import_jobs"
+    __table_args__ = (UniqueConstraint("imported_document_id", name="uq_import_jobs_imported_document_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Denormalized from the document purely so batch-scoped queue
+    #: counts (`import_queue_service.compute_queue_summary`) never need a
+    #: join through `imported_documents` -- the document row remains the
+    #: single source of truth for which batch it belongs to; this column
+    #: is set once, at enqueue time, from `ImportedDocument.batch_id`,
+    #: and never disagrees with it because nothing ever moves a document
+    #: to a different batch after creation.
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    imported_document_id: Mapped[int] = mapped_column(
+        ForeignKey("imported_documents.id"), nullable=False, index=True
+    )
+
+    status: Mapped[ImportJobStatus] = mapped_column(
+        SAEnum(ImportJobStatus, native_enum=False),
+        default=ImportJobStatus.QUEUED,
+        nullable=False,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Hard cap so a genuinely broken document (one that crashes the
+    #: worker process itself on every attempt -- not the common case,
+    #: since `run_extraction` already catches ordinary parse failures)
+    #: cannot retry forever and starve the rest of the queue.
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    #: A job is only eligible to be claimed once `now() >= available_at`
+    #: -- set to "now" at enqueue time (immediately claimable) and pushed
+    #: forward on each retry (a short, fixed backoff; see
+    #: `import_queue_service._RETRY_BACKOFF_SECONDS`) so a transient
+    #: failure doesn't hammer the same document back-to-back.
+    available_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    #: Set to a claiming worker's own identity (`{hostname}-{pid}`) the
+    #: moment it claims this row -- purely diagnostic (which process is
+    #: or was working on this), never read by the claim logic itself
+    #: (that only ever looks at `status`/`available_at`/`lease_expires_at`).
+    worker_id: Mapped[str | None] = mapped_column(String(120))
+    #: While `status == PROCESSING`, this is the deadline by which the
+    #: claiming worker must have either completed or failed the job (via
+    #: a periodic heartbeat extending it -- see `import_queue_service.
+    #: heartbeat_import_job`). Past this deadline with no update, the job
+    #: is treated as abandoned (the worker crashed, was killed, or lost
+    #: its database connection) and becomes claimable again -- this is
+    #: what actually satisfies "a worker crash must not permanently
+    #: strand a job", not just documentation of intent.
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    batch: Mapped["ImportBatch | None"] = relationship("ImportBatch")
+    document: Mapped["ImportedDocument"] = relationship("ImportedDocument")
+
+    def __repr__(self) -> str:
+        return (
+            f"ImportJob(id={self.id!r}, imported_document_id={self.imported_document_id!r}, "
+            f"status={self.status!r}, attempts={self.attempts!r})"
         )

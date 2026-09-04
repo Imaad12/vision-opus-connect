@@ -9,18 +9,22 @@ Same `make_api_client`/`make_memory_engine` pattern as
 `ingest_quotation_batch` path end-to-end, never a mock of the pipeline
 itself.
 
-Upload processing runs as a FastAPI `BackgroundTasks` job (see the
-router's own docstring on why), not inline in the request -- but
-Starlette's `TestClient` runs a request's background tasks to
-completion before `client.post(...)` returns control to the caller
-(verified empirically here, not just assumed), so these tests can still
-assert on the resulting document/state immediately after the upload
-call returns, exactly as if it were synchronous. `api_test_support.
-make_api_client` also redirects `app.database.session`'s module-level
-engine/factory (what the background task's `session_scope()` actually
-resolves to) at the same in-memory test database `get_db` uses -- see
-that fixture's own comment on the real production-database hang this
-closes.
+Upload no longer runs extraction at all on the request thread -- not
+inline, not as a `BackgroundTasks` job (see `app/api/routers/imports.py`'s
+own module docstring on the durable-queue redesign this replaced that
+with). `upload_batch_documents` only persists the file and creates a
+QUEUED `ImportJob`; a separate worker process claims and processes it
+completely independently of any HTTP request. These tests simulate that
+worker synchronously via `_process_queue` below (claim-then-process,
+repeated until the queue is empty) wherever a test needs extraction to
+have actually happened before asserting -- the same
+`import_queue_service.claim_next_import_job` / `process_import_job`
+functions `app/worker.py`'s real loop calls, just driven once rather than
+polled forever. `api_test_support.make_api_client` redirects
+`app.database.session`'s module-level engine/factory (what
+`session_scope()` resolves to) at the same in-memory test database
+`get_db` uses, so a session opened directly here reaches the identical
+test database.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ from fastapi.testclient import TestClient
 
 import app.models  # noqa: F401  (registers all models on Base.metadata)
 from app.core.config import settings
+from app.database.session import session_scope
+from app.services import import_queue_service
 from app.tests.api_test_support import make_api_client, make_memory_engine
 
 QUOTATION_TEXT = """\
@@ -70,13 +76,38 @@ def _upload(client: TestClient, batch_id: int, *, filename: str = "quote.txt", t
     )
 
 
+def _process_queue() -> int:
+    """Simulates `app/worker.py`'s loop synchronously: claims and
+    processes every currently-claimable `ImportJob`, once each, until
+    none remain. Returns how many jobs were processed. Claim and process
+    deliberately use separate sessions/commits here too, exactly like
+    the real worker (see `import_queue_service`'s own module docstring
+    on why that separation matters) -- this is not a shortcut that skips
+    the real claim/process boundary, just a synchronous stand-in for
+    what would otherwise be a polling loop in a second process."""
+    processed = 0
+    while True:
+        with session_scope() as session:
+            job = import_queue_service.claim_next_import_job(session, worker_id="test-worker")
+            job_id = job.id if job is not None else None
+        if job_id is None:
+            return processed
+        with session_scope() as session:
+            from app.models import ImportJob
+
+            job = session.get(ImportJob, job_id)
+            import_queue_service.process_import_job(session, job)
+        processed += 1
+
+
 def _upload_and_get_document(
     client: TestClient, batch_id: int, *, filename: str = "quote.txt", text: str = QUOTATION_TEXT
 ) -> dict:
-    """Uploads one file and returns the resulting `ImportedDocumentSummary`
-    row from the batch's document list -- the background-processed
-    equivalent of the old synchronous "outcomes[0]" shortcut."""
+    """Uploads one file, runs it through the queue synchronously (see
+    `_process_queue`), and returns the resulting `ImportedDocumentSummary`
+    row from the batch's document list."""
     _upload(client, batch_id, filename=filename, text=text)
+    _process_queue()
     documents = client.get(f"/imports/batches/{batch_id}/documents").json()
     return next(d for d in documents if d["filename"] == filename)
 
@@ -102,6 +133,7 @@ def _upload_pdf_and_get_document(
         f"/imports/batches/{batch_id}/documents",
         files=[("files", (filename, pdf_path.read_bytes(), "application/pdf"))],
     )
+    _process_queue()
     documents = client.get(f"/imports/batches/{batch_id}/documents").json()
     return next(d for d in documents if d["filename"] == filename)
 
@@ -135,15 +167,27 @@ def test_get_missing_batch_is_404(api_client: TestClient):
     assert response.status_code == 404
 
 
-def test_upload_response_accepts_files_without_synchronous_outcomes(api_client: TestClient):
-    """The upload endpoint itself only confirms bytes were received and
-    background processing was scheduled (202 Accepted) -- it can't know
-    staged/duplicate/failed yet, since that determination now happens
-    after this response is sent (see the router's own docstring)."""
+def test_upload_response_accepts_files_and_reports_queue_counts(api_client: TestClient):
+    """The upload endpoint returns fast (202 Accepted) with exactly what
+    it can know synchronously -- bytes durably persisted and a job
+    queued -- never what extraction will find, which hasn't run yet
+    (P15's "do not conflate UPLOAD SUCCESS with OCR SUCCESS")."""
     batch = api_client.post("/imports/batches", json={"label": "Pilot"}).json()
     response = _upload(api_client, batch["id"])
     assert response.status_code == 202, response.text
-    assert response.json() == {"accepted_files": ["quote.txt"]}
+    body = response.json()
+    assert body["batch_id"] == batch["id"]
+    assert body["accepted_files"] == ["quote.txt"]
+    assert body["accepted_count"] == 1
+    assert body["duplicate_count"] == 0
+    assert body["queued_count"] == 1
+    assert len(body["document_ids"]) == 1
+
+    # Nothing has been extracted yet -- the document is still PENDING,
+    # not because it's about to fail but because no worker has claimed
+    # its job yet (see `_process_queue`, deliberately not called here).
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert documents[0]["extraction_status"] == "PENDING"
 
 
 def test_upload_eventually_stages_a_document_and_writes_it_to_persistent_storage(
@@ -165,9 +209,9 @@ def test_upload_eventually_stages_a_document_and_writes_it_to_persistent_storage
 
 
 def test_upload_reaches_a_terminal_extraction_status_for_a_real_text_quotation(api_client: TestClient):
-    """A deterministic (non-OCR) text document's extraction is fast and
-    fully synchronous inside the background task -- by the time the
-    document is visible at all, it should already be past PENDING/
+    """A deterministic (non-OCR) text document's extraction is fast --
+    once a worker actually claims and processes its job (`_process_queue`,
+    inside `_upload_and_get_document`), it should be past PENDING/
     EXTRACTING and have real candidate data, proving the pipeline
     actually ran end-to-end rather than just creating a staged row."""
     batch = api_client.post("/imports/batches", json={}).json()
@@ -184,10 +228,16 @@ def test_upload_updates_batch_counts(api_client: TestClient):
     assert refreshed["completed_at"] is not None
 
 
-def test_upload_duplicate_file_is_skipped_not_restaged(api_client: TestClient):
+def test_upload_duplicate_of_an_already_processed_document_is_skipped_not_restaged(api_client: TestClient):
     batch = api_client.post("/imports/batches", json={}).json()
     _upload(api_client, batch["id"], filename="first.txt")
-    _upload(api_client, batch["id"], filename="second.txt")  # same content
+    _process_queue()  # the first upload reaches a genuinely terminal extraction outcome
+    response = _upload(api_client, batch["id"], filename="second.txt")  # same content
+
+    body = response.json()
+    assert body["accepted_count"] == 0
+    assert body["duplicate_count"] == 1
+    assert body["queued_count"] == 0
 
     documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
     assert len(documents) == 1  # the duplicate never got its own row
@@ -197,6 +247,29 @@ def test_upload_duplicate_file_is_skipped_not_restaged(api_client: TestClient):
 
     summary = api_client.get(f"/imports/batches/{batch['id']}/summary").json()
     assert summary["duplicates"] == 1
+
+
+def test_upload_duplicate_of_a_still_queued_document_resumes_it_not_a_duplicate(api_client: TestClient):
+    """Uploading the identical bytes again while the first copy hasn't
+    been processed yet (still PENDING/EXTRACTING/OCR_REQUIRED) is a
+    genuine resume, not a wasted duplicate -- it must not create a
+    second document, but it DOES ensure a job is queued for the existing
+    one, exactly like `_ingest_batch`'s own resumable-status rule."""
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload(api_client, batch["id"], filename="first.txt")  # left QUEUED, never processed
+    response = _upload(api_client, batch["id"], filename="second.txt")  # same content
+
+    body = response.json()
+    assert body["accepted_count"] == 0
+    assert body["duplicate_count"] == 0
+    assert body["queued_count"] == 1
+
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert len(documents) == 1  # still no second row
+
+    refreshed = api_client.get(f"/imports/batches/{batch['id']}").json()
+    assert refreshed["skipped_duplicate_count"] == 0
+    assert refreshed["resumed_count"] == 1
 
 
 def test_upload_no_files_is_422(api_client: TestClient):
@@ -222,11 +295,30 @@ def test_list_batch_documents(api_client: TestClient):
     assert documents[0]["batch_id"] == batch["id"]
 
 
-def test_batch_summary_counts(api_client: TestClient):
+def test_batch_summary_counts_immediately_after_upload(api_client: TestClient):
+    """Right after upload, before any worker has run, the document is
+    QUEUED, not yet needing review -- the queue-status endpoint (P16)
+    must reflect that honestly rather than a stale/misleading count."""
     batch = api_client.post("/imports/batches", json={}).json()
     _upload(api_client, batch["id"])
     summary = api_client.get(f"/imports/batches/{batch['id']}/summary").json()
     assert summary["total"] == 1
+    assert summary["queued"] == 1
+    assert summary["processing"] == 0
+    assert summary["extraction_complete"] == 0
+    assert summary["needs_review"] == 0
+    assert summary["confirmed"] == 0
+    assert summary["duplicates"] == 0
+
+
+def test_batch_summary_counts_after_processing(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload_and_get_document(api_client, batch["id"])  # uploads AND processes the queue
+    summary = api_client.get(f"/imports/batches/{batch['id']}/summary").json()
+    assert summary["total"] == 1
+    assert summary["queued"] == 0
+    assert summary["processing"] == 0
+    assert summary["extraction_complete"] == 1
     assert summary["needs_review"] == 1
     assert summary["confirmed"] == 0
     assert summary["duplicates"] == 0
@@ -480,3 +572,150 @@ def test_missing_bearer_token_is_401(storage_dir: Path):
 
     assert response.status_code == 401
     engine.dispose()
+
+
+# ---- Queue status on the document list (P7/P8) ----
+
+
+def test_document_list_reports_job_status(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload(api_client, batch["id"])  # left QUEUED, not processed
+
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert documents[0]["job_status"] == "QUEUED"
+    assert documents[0]["job_attempts"] == 0
+    assert documents[0]["job_last_error"] is None
+
+    _process_queue()
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert documents[0]["job_status"] == "SUCCEEDED"
+    assert documents[0]["job_attempts"] == 1
+
+
+# ---- Retry (P8) ----
+
+
+def test_retry_requeues_a_failed_document(api_client: TestClient):
+    """A file with no recognized importer at all reaches FAILED
+    deterministically -- reused here as a genuine, reproducible failure
+    to retry, rather than mocking `run_extraction`."""
+    batch = api_client.post("/imports/batches", json={}).json()
+    api_client.post(
+        f"/imports/batches/{batch['id']}/documents",
+        files=[("files", ("legacy.doc", b"not a real doc file", "application/msword"))],
+    )
+    _process_queue()
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    document = documents[0]
+    assert document["extraction_status"] == "UNSUPPORTED"
+    assert document["job_status"] == "SUCCEEDED"  # the job itself ran fine; the document just can't be read
+
+    response = api_client.post(f"/imports/documents/{document['id']}/retry")
+    assert response.status_code == 200, response.text
+    assert response.json()["extraction_status"] == "PENDING"
+
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert documents[0]["job_status"] == "QUEUED"
+    assert documents[0]["job_attempts"] == 0  # reset, full retry budget again
+
+    _process_queue()
+    documents = api_client.get(f"/imports/batches/{batch['id']}/documents").json()
+    assert documents[0]["job_status"] == "SUCCEEDED"
+
+
+def test_retry_missing_document_is_404(api_client: TestClient):
+    response = api_client.post("/imports/documents/999/retry")
+    assert response.status_code == 404
+
+
+# ---- Batch lifecycle (P9/P10) ----
+
+
+def test_rename_batch(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={"label": "Old label"}).json()
+    response = api_client.patch(
+        f"/imports/batches/{batch['id']}", json={"label": "2018 Riyadh quotations", "notes": "Box 3"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["label"] == "2018 Riyadh quotations"
+    assert body["notes"] == "Box 3"
+
+
+def test_delete_empty_batch(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    response = api_client.delete(f"/imports/batches/{batch['id']}")
+    assert response.status_code == 204
+    assert api_client.get(f"/imports/batches/{batch['id']}").status_code == 404
+
+
+def test_delete_staging_batch_with_no_confirmed_documents(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload_and_get_document(api_client, batch["id"])
+    response = api_client.delete(f"/imports/batches/{batch['id']}")
+    assert response.status_code == 204
+    assert api_client.get(f"/imports/batches/{batch['id']}").status_code == 404
+
+
+def test_cannot_delete_batch_with_a_confirmed_document(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+    api_client.post(
+        f"/imports/documents/{document['id']}/confirm",
+        json={"new_client_name": "X", "new_project_name": "Y"},
+    )
+    response = api_client.delete(f"/imports/batches/{batch['id']}")
+    assert response.status_code == 422
+    assert "archive" in response.json()["detail"].lower()
+
+
+def test_cannot_delete_a_processing_batch(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload(api_client, batch["id"])  # left QUEUED -- never processed
+    response = api_client.delete(f"/imports/batches/{batch['id']}")
+    assert response.status_code == 422
+    assert "cancel" in response.json()["detail"].lower()
+
+
+def test_cancel_batch_then_delete(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    _upload(api_client, batch["id"])
+
+    cancel_response = api_client.post(f"/imports/batches/{batch['id']}/cancel")
+    assert cancel_response.status_code == 200, cancel_response.text
+
+    delete_response = api_client.delete(f"/imports/batches/{batch['id']}")
+    assert delete_response.status_code == 204
+
+
+def test_archive_completed_batch(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    document = _upload_and_get_document(api_client, batch["id"])
+    api_client.post(
+        f"/imports/documents/{document['id']}/confirm",
+        json={"new_client_name": "X", "new_project_name": "Y"},
+    )
+
+    response = api_client.post(f"/imports/batches/{batch['id']}/archive")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ARCHIVED"
+    assert response.json()["archived_at"] is not None
+
+    # Read-only from here.
+    rename_response = api_client.patch(f"/imports/batches/{batch['id']}", json={"label": "X"})
+    assert rename_response.status_code == 422
+    upload_response = _upload(api_client, batch["id"])
+    assert upload_response.status_code == 422
+
+
+def test_batch_status_reflects_lifecycle(api_client: TestClient):
+    batch = api_client.post("/imports/batches", json={}).json()
+    assert batch["status"] == "EMPTY"
+
+    _upload(api_client, batch["id"])
+    processing = api_client.get(f"/imports/batches/{batch['id']}").json()
+    assert processing["status"] == "PROCESSING"
+
+    _process_queue()
+    staging = api_client.get(f"/imports/batches/{batch['id']}").json()
+    assert staging["status"] == "STAGING"

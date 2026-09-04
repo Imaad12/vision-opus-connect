@@ -84,3 +84,57 @@ services:
       # anything breaks without it.
       - key: VISION_STAGING_SCHEMA
         value: vinco
+
+  # The ingestion worker (P4 of the production-reliability pass -- see
+  # app/worker.py's own module docstring). Same repository, same Docker
+  # image as vinco-api above -- only `dockerCommand` differs, running
+  # `python -m app.worker`'s polling loop instead of `uvicorn`. This is
+  # what actually calls `import_service.run_extraction` for every
+  # document uploaded through POST /imports/batches/{id}/documents; the
+  # web service itself never does (see that route's own docstring on why
+  # FastAPI BackgroundTasks were removed -- they don't survive this same
+  # web service being redeployed/restarted mid-run, which is exactly what
+  # was silently stranding in-progress OCR before this pass).
+  #
+  # `type: worker` on Render never receives HTTP traffic and has no
+  # `healthCheckPath` -- Render's own liveness signal for this service
+  # type is simply "the process is still running"; `app/worker.py`'s own
+  # try/except around `main()` exits non-zero on an unhandled crash so
+  # Render's automatic restart-on-crash behavior still applies.
+  # `preDeployCommand: alembic upgrade head` is deliberately NOT
+  # duplicated here -- only vinco-api runs migrations before its new
+  # image goes live, so exactly one process ever runs `alembic upgrade
+  # head` per deploy, never two services racing to apply the same
+  # migration concurrently.
+  #
+  # Env vars are duplicated from vinco-api's block above rather than
+  # factored into a shared `envVarGroups:` entry -- this keeps every
+  # value this worker actually needs visible in one place without
+  # depending on Render's env-var-group blueprint syntax being verified
+  # against a real deploy from this environment (this repo's own
+  # networking policy cannot reach Render to confirm it); worth
+  # consolidating once someone can verify that syntax against a real
+  # Render account. Every secret below must be set to the SAME value as
+  # vinco-api's in the Render dashboard (this worker reads and writes the
+  # identical database and, when configured, the identical Supabase
+  # Storage bucket).
+  - type: worker
+    name: vinco-import-worker
+    runtime: docker
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerCommand: "python -m app.worker"
+    plan: starter
+    envVars:
+      - key: VISION_DATABASE_URL
+        sync: false
+      - key: VISION_SUPABASE_URL
+        sync: false
+      - key: VISION_SUPABASE_ANON_KEY
+        sync: false
+      - key: VISION_SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: VISION_LOG_LEVEL
+        value: INFO
+      - key: VISION_STAGING_SCHEMA
+        value: vinco

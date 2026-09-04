@@ -1,6 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { ChevronLeft, ChevronRight, FileText, Loader2, Upload } from "lucide-react";
+import {
+  Archive,
+  Ban,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  Loader2,
+  Pencil,
+  RotateCw,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   useEffect,
   useRef,
@@ -60,20 +71,35 @@ export const Route = createFileRoute("/_authenticated/import-quotations")({
   component: ImportQuotationsPage,
 });
 
+type BatchLifecycleStatus = "EMPTY" | "STAGING" | "PROCESSING" | "COMPLETED" | "ARCHIVED";
+
 type ImportBatch = {
   id: number;
   label: string | null;
+  notes: string | null;
   staged_count: number;
   resumed_count: number;
   skipped_duplicate_count: number;
   failed_count: number;
   completed_at: string | null;
+  archived_at: string | null;
   created_at: string;
+  /** Derived server-side (never a stored column) -- see
+   * `app.core.enums.BatchLifecycleStatus`. Governs which of Rename/
+   * Delete/Archive/Cancel are offered below. */
+  status: BatchLifecycleStatus;
 };
 
 type ImportDashboardSummary = {
   total: number;
+  /** Job-table-derived (P16) -- how many documents have a QUEUED/
+   * PROCESSING `ImportJob` right now. This -- not any
+   * `extraction_status` heuristic -- is what drives this page's polling
+   * (see `ImportWorkspace`'s queries below): the queue is the real
+   * source of truth for "is anything still happening". */
+  queued: number;
   processing: number;
+  extraction_complete: number;
   needs_review: number;
   confirmed: number;
   rejected: number;
@@ -82,15 +108,24 @@ type ImportDashboardSummary = {
   purchase_order_count: number;
 };
 
-type ImportedDocumentSummary = {
+type JobStatus = "QUEUED" | "PROCESSING" | "SUCCEEDED" | "FAILED";
+
+export type ImportedDocumentSummary = {
   id: number;
   batch_id: number | null;
   filename: string;
+  file_size: number;
   document_kind: string;
   extraction_status: string;
   review_status: string;
   extraction_error: string | null;
   created_at: string;
+  /** `null` only for a document staged before the durable queue existed
+   * and never retried since -- see `ImportedDocumentSummary`'s own
+   * backend docstring. */
+  job_status: JobStatus | null;
+  job_attempts: number | null;
+  job_last_error: string | null;
 };
 
 type ImportedQuotationCandidate = {
@@ -124,7 +159,12 @@ type ImportedDocumentDetail = ImportedDocumentSummary & {
 };
 
 type BatchUploadAccepted = {
+  batch_id: number;
   accepted_files: string[];
+  accepted_count: number;
+  duplicate_count: number;
+  queued_count: number;
+  document_ids: number[];
 };
 
 /** Mirrors `app.services.import_service._QUOTATION_EDITABLE_FIELDS`
@@ -215,13 +255,32 @@ const CANDIDATE_FIELD_DEFS: {
   { key: "notes", labelKey: "imp.review.notes", inputType: "textarea", primary: false },
 ];
 
-/** Mirrors `app.core.enums.ExtractionStatus` -- extraction hasn't
- * reached a terminal outcome yet, so the frontend should keep polling
- * (see `documentsQuery`/`summaryQuery`'s `refetchInterval` below).
- * PENDING covers both "just staged, not started yet" (effectively
- * instant in practice) and "queued behind other work in this batch's
- * background task". */
-const NON_TERMINAL_EXTRACTION_STATUSES = new Set(["PENDING", "EXTRACTING"]);
+/** A document whose `ImportJob` is still QUEUED or PROCESSING -- used to
+ * decide when to show a spinner and when this page should keep polling
+ * (see `summaryQuery`/`documentsQuery`'s `refetchInterval` below). Job
+ * status, not `extraction_status`, is the real source of truth for "is
+ * anything still happening to this document" now that a durable queue
+ * (not a same-process background task) is what actually runs
+ * extraction -- see `ImportedDocumentSummary.job_status`'s own comment. */
+const ACTIVE_JOB_STATUSES = new Set(["QUEUED", "PROCESSING"]);
+
+/** Extraction outcomes a reviewer can retry (P8) -- a job that ran to
+ * completion (`job_status` is terminal, not QUEUED/PROCESSING) but left
+ * the document somewhere other than ready-for-review or already
+ * decided. */
+const RETRYABLE_EXTRACTION_STATUSES = new Set([
+  "FAILED",
+  "UNSUPPORTED",
+  "OCR_REQUIRED",
+  "MULTIPLE_QUOTATIONS_DETECTED",
+]);
+
+export function isRetryable(document: ImportedDocumentSummary): boolean {
+  return (
+    RETRYABLE_EXTRACTION_STATUSES.has(document.extraction_status) &&
+    !ACTIVE_JOB_STATUSES.has(document.job_status ?? "")
+  );
+}
 
 /** Human-readable label for each `ExtractionStatus` value, matching the
  * "Uploading... / OCR processing... / Extracting quotation... / Ready
@@ -252,6 +311,21 @@ function extractionStatusLabel(status: string, t: (key: string) => string): stri
   }
 }
 
+/** What the "Extraction" column actually shows for one row -- the
+ * queue's own live state (Queued/Processing) takes priority over the
+ * document's last-known `extraction_status` whenever a job is actively
+ * QUEUED/PROCESSING for it, since that status is about to change and
+ * showing a stale terminal-looking label would be misleading. Once the
+ * job is done, falls back to `extractionStatusLabel` exactly as before. */
+export function documentStatusLabel(
+  document: ImportedDocumentSummary,
+  t: (key: string) => string,
+): string {
+  if (document.job_status === "QUEUED") return t("imp.status.queued");
+  if (document.job_status === "PROCESSING") return t("imp.status.processing");
+  return extractionStatusLabel(document.extraction_status, t);
+}
+
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError) return e.describe();
   if (e instanceof Error) return e.message;
@@ -274,6 +348,23 @@ function ImportQuotationsPage() {
   return <ImportWorkspace />;
 }
 
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const BATCH_STATUS_BADGE_VARIANT: Record<
+  BatchLifecycleStatus,
+  "outline" | "secondary" | "destructive"
+> = {
+  EMPTY: "outline",
+  STAGING: "secondary",
+  PROCESSING: "secondary",
+  COMPLETED: "outline",
+  ARCHIVED: "outline",
+};
+
 function ImportWorkspace() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -281,6 +372,7 @@ function ImportWorkspace() {
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   const [newBatchLabel, setNewBatchLabel] = useState("");
   const [reviewing, setReviewing] = useState<number | null>(null);
+  const [editingBatch, setEditingBatch] = useState(false);
   // Tracked in React state (not read from the ref only at submit time) so
   // the UI can show what's actually selected and gate the Upload button on
   // it -- previously nothing displayed the selection at all, and Upload
@@ -306,37 +398,34 @@ function ImportWorkspace() {
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
 
+  const summaryQuery = useQuery({
+    queryKey: ["import-batch-summary", selectedBatchId],
+    enabled: selectedBatchId !== null,
+    queryFn: () => api.get<ImportDashboardSummary>(`/imports/batches/${selectedBatchId}/summary`),
+    // The queue (not any per-document heuristic) decides whether this
+    // page keeps polling: once `queued + processing` reaches zero, every
+    // document this batch's upload(s) created has genuinely finished its
+    // pipeline run -- there is nothing left that could still change.
+    // 4s (P7's "3-5 seconds while jobs are active") replaces the
+    // previous 1.5s interval; combined with the durable queue actually
+    // draining (instead of a BackgroundTask that could silently die and
+    // poll forever), this is both gentler on the backend and, per this
+    // feature's own root-cause finding, less likely to visibly interfere
+    // with the native file picker while a reviewer is mid-selection.
+    refetchInterval: (query) => {
+      const s = query.state.data;
+      return s && s.queued + s.processing > 0 ? 4000 : false;
+    },
+  });
+
   const documentsQuery = useQuery({
     queryKey: ["import-batch-documents", selectedBatchId],
     enabled: selectedBatchId !== null,
     queryFn: () =>
       api.get<ImportedDocumentSummary[]>(`/imports/batches/${selectedBatchId}/documents`),
-    // Extraction runs in a background task after upload (see the
-    // backend router) -- there is no push/websocket channel, so this
-    // page polls while anything is still mid-pipeline (PENDING or
-    // EXTRACTING) and stops once every document has reached a terminal
-    // extraction_status, so the user sees "Uploading... -> OCR
-    // processing... -> Ready for review" happen live rather than having
-    // to manually refresh.
-    refetchInterval: (query) => {
-      const documents = query.state.data ?? [];
-      const stillProcessing = documents.some((d) =>
-        NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status),
-      );
-      return stillProcessing ? 1500 : false;
-    },
-  });
-
-  const summaryQuery = useQuery({
-    queryKey: ["import-batch-summary", selectedBatchId],
-    enabled: selectedBatchId !== null,
-    queryFn: () => api.get<ImportDashboardSummary>(`/imports/batches/${selectedBatchId}/summary`),
     refetchInterval: () => {
-      const documents = documentsQuery.data ?? [];
-      const stillProcessing = documents.some((d) =>
-        NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status),
-      );
-      return stillProcessing ? 1500 : false;
+      const s = summaryQuery.data;
+      return s && s.queued + s.processing > 0 ? 4000 : false;
     },
   });
 
@@ -354,10 +443,52 @@ function ImportWorkspace() {
         files,
       ),
     onSuccess: (result) => {
-      toast.success(`${result.accepted_files.length} ${t("imp.upload.accepted_suffix")}`);
+      const parts = [`${result.accepted_count} ${t("imp.upload.accepted_suffix")}`];
+      if (result.duplicate_count > 0)
+        parts.push(`${result.duplicate_count} ${t("imp.summary.duplicates").toLowerCase()}`);
+      toast.success(parts.join(", "));
       invalidateBatch();
       if (fileInputRef.current) fileInputRef.current.value = "";
       setSelectedFiles([]);
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  const retryMutation = useMutation({
+    mutationFn: (documentId: number) => api.post(`/imports/documents/${documentId}/retry`, {}),
+    onSuccess: () => {
+      toast.success(t("imp.action.retried_note"));
+      invalidateBatch();
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (batchId: number) =>
+      api.post<ImportBatch>(`/imports/batches/${batchId}/archive`, {}),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["import-batches"] });
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (batchId: number) =>
+      api.post<ImportBatch>(`/imports/batches/${batchId}/cancel`, {}),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      invalidateBatch();
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (batchId: number) => api.delete(`/imports/batches/${batchId}`),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      setSelectedBatchId(null);
+      void queryClient.invalidateQueries({ queryKey: ["import-batches"] });
     },
     onError: (e: Error) => toast.error(errorMessage(e)),
   });
@@ -379,6 +510,9 @@ function ImportWorkspace() {
 
   const summary = summaryQuery.data;
   const documents = documentsQuery.data ?? [];
+  const selectedBatch = (batchesQuery.data ?? []).find((b) => b.id === selectedBatchId) ?? null;
+  const isArchived = selectedBatch?.status === "ARCHIVED";
+  const isProcessing = selectedBatch?.status === "PROCESSING";
 
   return (
     <>
@@ -400,6 +534,68 @@ function ImportWorkspace() {
                 </option>
               ))}
             </select>
+
+            {selectedBatch && (
+              <Badge variant={BATCH_STATUS_BADGE_VARIANT[selectedBatch.status]}>
+                {t(`imp.batch.status.${selectedBatch.status}`)}
+              </Badge>
+            )}
+
+            {selectedBatch && !isArchived && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setEditingBatch(true)}
+              >
+                <Pencil className="size-3.5" />
+                {t("imp.batch.rename")}
+              </Button>
+            )}
+            {selectedBatch &&
+              (selectedBatch.status === "EMPTY" || selectedBatch.status === "STAGING") && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-destructive"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => {
+                    if (window.confirm(t("imp.batch.confirm_delete")))
+                      deleteMutation.mutate(selectedBatch.id);
+                  }}
+                >
+                  <Trash2 className="size-3.5" />
+                  {t("imp.batch.delete")}
+                </Button>
+              )}
+            {selectedBatch && isProcessing && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={cancelMutation.isPending}
+                onClick={() => {
+                  if (window.confirm(t("imp.batch.confirm_cancel")))
+                    cancelMutation.mutate(selectedBatch.id);
+                }}
+              >
+                <Ban className="size-3.5" />
+                {t("imp.batch.cancel_processing")}
+              </Button>
+            )}
+            {selectedBatch && selectedBatch.status === "COMPLETED" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={archiveMutation.isPending}
+                onClick={() => archiveMutation.mutate(selectedBatch.id)}
+              >
+                <Archive className="size-3.5" />
+                {t("imp.batch.archive")}
+              </Button>
+            )}
+
             <Input
               value={newBatchLabel}
               onChange={(e) => setNewBatchLabel(e.target.value)}
@@ -416,24 +612,31 @@ function ImportWorkspace() {
               {t("imp.batch.create")}
             </Button>
           </div>
+          {isArchived && (
+            <p className="text-xs text-muted-foreground">{t("imp.batch.archived_readonly")}</p>
+          )}
         </div>
 
         {selectedBatchId !== null && (
           <>
-            <UploadFilesForm
-              fileInputRef={fileInputRef}
-              selectedFiles={selectedFiles}
-              onFilesChosen={handleFilesChosen}
-              onSubmit={handleUpload}
-              submitting={uploadMutation.isPending}
-              t={t}
-            />
+            {!isArchived && (
+              <UploadFilesForm
+                fileInputRef={fileInputRef}
+                selectedFiles={selectedFiles}
+                onFilesChosen={handleFilesChosen}
+                onSubmit={handleUpload}
+                submitting={uploadMutation.isPending}
+                t={t}
+              />
+            )}
 
             {summary && (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
                 {(
                   [
                     ["imp.summary.total", summary.total],
+                    ["imp.summary.queued", summary.queued],
+                    ["imp.summary.processing", summary.processing],
                     ["imp.summary.needs_review", summary.needs_review],
                     ["imp.summary.confirmed", summary.confirmed],
                     ["imp.summary.rejected", summary.rejected],
@@ -454,22 +657,24 @@ function ImportWorkspace() {
                 <thead>
                   <tr className="border-b border-border bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="px-3 py-2.5 text-start">{t("imp.table.filename")}</th>
+                    <th className="px-3 py-2.5 text-start">{t("imp.table.size")}</th>
                     <th className="px-3 py-2.5 text-start">{t("imp.table.extraction")}</th>
                     <th className="px-3 py-2.5 text-start">{t("imp.table.review")}</th>
+                    <th className="px-3 py-2.5 text-start">{t("imp.table.attempts")}</th>
                     <th className="px-3 py-2.5 text-start">{t("common.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {documentsQuery.isLoading && (
                     <tr>
-                      <td colSpan={4} className="px-3 py-8 text-center text-muted-foreground">
+                      <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
                         {t("common.loading")}
                       </td>
                     </tr>
                   )}
                   {!documentsQuery.isLoading && documents.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="px-3 py-8 text-center text-muted-foreground">
+                      <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
                         {t("common.empty")}
                       </td>
                     </tr>
@@ -477,9 +682,12 @@ function ImportWorkspace() {
                   {documents.map((d) => (
                     <tr key={d.id} className="border-b border-border/70 last:border-0">
                       <td className="px-3 py-2.5 font-medium">{d.filename}</td>
+                      <td className="num px-3 py-2.5 text-xs text-muted-foreground">
+                        {formatFileSize(d.file_size)}
+                      </td>
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1.5">
-                          {NON_TERMINAL_EXTRACTION_STATUSES.has(d.extraction_status) && (
+                          {ACTIVE_JOB_STATUSES.has(d.job_status ?? "") && (
                             <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
                           )}
                           <Badge
@@ -492,11 +700,13 @@ function ImportWorkspace() {
                                   : "outline"
                             }
                           >
-                            {extractionStatusLabel(d.extraction_status, t)}
+                            {documentStatusLabel(d, t)}
                           </Badge>
                         </div>
-                        {d.extraction_error && (
-                          <p className="mt-1 text-xs text-muted-foreground">{d.extraction_error}</p>
+                        {(d.extraction_error || d.job_last_error) && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {d.extraction_error ?? d.job_last_error}
+                          </p>
                         )}
                       </td>
                       <td className="px-3 py-2.5">
@@ -506,10 +716,27 @@ function ImportWorkspace() {
                           {d.review_status}
                         </Badge>
                       </td>
+                      <td className="num px-3 py-2.5 text-xs text-muted-foreground">
+                        {d.job_attempts ?? "—"}
+                      </td>
                       <td className="px-3 py-2.5">
-                        <Button variant="outline" size="sm" onClick={() => setReviewing(d.id)}>
-                          {t("imp.action.review")}
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button variant="outline" size="sm" onClick={() => setReviewing(d.id)}>
+                            {t("imp.action.review")}
+                          </Button>
+                          {isRetryable(d) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="gap-1"
+                              disabled={retryMutation.isPending}
+                              onClick={() => retryMutation.mutate(d.id)}
+                            >
+                              <RotateCw className="size-3.5" />
+                              {t("imp.action.retry")}
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -525,7 +752,88 @@ function ImportWorkspace() {
         onOpenChange={(open) => !open && setReviewing(null)}
         onChanged={invalidateBatch}
       />
+      <BatchEditDialog
+        batch={editingBatch ? selectedBatch : null}
+        onOpenChange={(open) => setEditingBatch(open)}
+        onSaved={() => void queryClient.invalidateQueries({ queryKey: ["import-batches"] })}
+      />
     </>
+  );
+}
+
+/** P10's deliberately minimal "Edit batch" -- label and optional notes,
+ * nothing else. */
+function BatchEditDialog({
+  batch,
+  onOpenChange,
+  onSaved,
+}: {
+  batch: ImportBatch | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => void;
+}) {
+  const { t } = useI18n();
+  const [label, setLabel] = useState("");
+  const [notes, setNotes] = useState("");
+
+  useEffect(() => {
+    if (batch) {
+      setLabel(batch.label ?? "");
+      setNotes(batch.notes ?? "");
+    }
+  }, [batch]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      api.patch<ImportBatch>(`/imports/batches/${batch?.id}`, {
+        label: label.trim() || null,
+        notes: notes.trim() || null,
+      }),
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      onOpenChange(false);
+      onSaved();
+    },
+    onError: (e: Error) => toast.error(errorMessage(e)),
+  });
+
+  return (
+    <Dialog open={batch !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t("imp.batch.edit_title")}</DialogTitle>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            saveMutation.mutate();
+          }}
+        >
+          <div className="space-y-1.5">
+            <Label htmlFor="batch-edit-label">{t("imp.batch.label_field")}</Label>
+            <Input id="batch-edit-label" value={label} onChange={(e) => setLabel(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="batch-edit-notes">{t("imp.batch.notes_field")}</Label>
+            <Textarea
+              id="batch-edit-notes"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button type="submit" disabled={saveMutation.isPending}>
+              {t("common.save")}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

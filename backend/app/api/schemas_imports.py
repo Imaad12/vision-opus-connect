@@ -20,21 +20,43 @@ class ImportBatchRead(BaseModel):
 
     id: int
     label: str | None
+    notes: str | None = None
     staged_count: int
     resumed_count: int
     skipped_duplicate_count: int
     failed_count: int
     completed_at: datetime | None
+    archived_at: datetime | None = None
     created_at: datetime
+    #: Derived (P9) -- see `app.core.enums.BatchLifecycleStatus` /
+    #: `import_queue_service.compute_batch_lifecycle_status`. Never a
+    #: stored column; computed fresh on every read.
+    status: str
 
 
 class ImportBatchCreate(BaseModel):
     label: str | None = Field(default=None, max_length=255)
 
 
+class ImportBatchUpdate(BaseModel):
+    """`PATCH /imports/batches/{id}` -- P10's deliberately minimal "Edit
+    batch": label and/or notes. Omit a field to leave it untouched;
+    every field is otherwise applied as given (including clearing it
+    with an empty string)."""
+
+    label: str | None = None
+    notes: str | None = None
+
+
 class ImportDashboardSummaryRead(BaseModel):
     total: int
+    #: Job-table-derived (P16) -- how many of this batch's documents have
+    #: a queued/processing `ImportJob` right now. Distinct from
+    #: `needs_review`/`confirmed`/etc. below, which are all
+    #: `ImportedDocument`-derived exactly as before.
+    queued: int
     processing: int
+    extraction_complete: int
     needs_review: int
     confirmed: int
     rejected: int
@@ -44,19 +66,22 @@ class ImportDashboardSummaryRead(BaseModel):
 
 
 class BatchUploadAccepted(BaseModel):
-    """Response for `POST /imports/batches/{batch_id}/documents`.
+    """Response for `POST /imports/batches/{batch_id}/documents` (P15).
+    Returned as soon as every file's bytes are durably persisted and
+    queued -- before any OCR/extraction has run, which is what makes
+    this endpoint fast regardless of how many files were uploaded or how
+    slow OCR on any one of them will be. `accepted_files` names every
+    file the browser sent, including duplicates (rejected before
+    queuing, per `document_ids`/`queued_count` not counting them) --
+    the caller should poll `GET /imports/batches/{batch_id}/status` (or
+    `.../documents`) to watch queued documents progress."""
 
-    Deliberately does NOT report per-file outcomes (staged/resumed/
-    skipped_duplicate/failed) the way an earlier version of this
-    endpoint did: actual staging/hashing/extraction now runs in a
-    background task (see that route's docstring on why -- OCR can be
-    slow enough to risk hanging the HTTP request), so those outcomes
-    aren't known yet when this response is sent. The caller should poll
-    `GET /imports/batches/{batch_id}/documents` (and the summary
-    endpoint) to watch documents appear and move through
-    PENDING -> EXTRACTING -> a terminal extraction_status."""
-
+    batch_id: int
     accepted_files: list[str]
+    accepted_count: int
+    duplicate_count: int
+    queued_count: int
+    document_ids: list[int]
 
 
 class ImportedQuotationCandidateRead(BaseModel):
@@ -92,11 +117,20 @@ class ImportedDocumentSummary(BaseModel):
     id: int
     batch_id: int | None
     filename: str
+    file_size: int
     document_kind: str
     extraction_status: str
     review_status: str
     extraction_error: str | None
     created_at: datetime
+    #: The queue's own view of this document (P7/P8) -- `None` only for
+    #: a document staged before `ImportJob` existed and never retried
+    #: since (every document staged through the web upload route always
+    #: has exactly one). Populated by the router joining `ImportJob`
+    #: alongside the document, not a model relationship read here.
+    job_status: str | None = None
+    job_attempts: int | None = None
+    job_last_error: str | None = None
 
 
 class ImportedDocumentRead(ImportedDocumentSummary):

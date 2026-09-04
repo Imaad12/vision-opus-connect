@@ -22,7 +22,9 @@ of extracted by OCR.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
@@ -34,12 +36,15 @@ from app.api.schemas_sales import (
     ClientAwardEvidenceDocumentRead,
     ClientAwardEvidenceRead,
 )
+from app.core import document_storage
 from app.core.config import settings
 from app.models import ClientAwardEvidence
 from app.services import client_award_evidence_service, contract_service, quotation_service
 from app.services.errors import ValidationError
 
 router = APIRouter(tags=["client-award-evidence"])
+
+_logger = logging.getLogger("app.api")
 
 _VIEW_PERMISSION = "quotations.view"
 _RECORD_PERMISSION = "quotations.approve"
@@ -190,13 +195,37 @@ def attach_client_award_evidence_document(
     storage_dir = settings.imports_storage_dir
     storage_dir.mkdir(parents=True, exist_ok=True)
     dest = storage_dir / f"{uuid.uuid4().hex}{Path(original_name).suffix}"
+    data = file.file.read()
     with dest.open("wb") as f:
-        f.write(file.file.read())
+        f.write(data)
 
     try:
-        client_award_evidence_service.attach_client_award_evidence_document(
+        document = client_award_evidence_service.attach_client_award_evidence_document(
             session, evidence, dest, original_filename=original_name
         )
     except ValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    # Durable storage (P5) -- same principle, same module, same
+    # best-effort-on-failure behavior as the historical-import upload
+    # route (app/api/routers/imports.py): the local write above already
+    # succeeded, so a Supabase Storage hiccup here is logged, not fatal
+    # to this request.
+    try:
+        key = document_storage.object_key_for(
+            "PURCHASE_ORDER",
+            year=document.created_at.year if document.created_at else date.today().year,
+            batch_id=None,
+            document_id=document.id,
+            suffix=Path(original_name).suffix,
+        )
+        result = document_storage.upload_bytes(
+            data, key=key, content_type=file.content_type or "application/octet-stream"
+        )
+        if result is not None:
+            document.storage_bucket, document.storage_key = result
+            session.flush()
+    except document_storage.DocumentStorageError:
+        _logger.exception("Could not upload client PO document %s to durable storage", document.id)
+
     return _read(session, evidence)

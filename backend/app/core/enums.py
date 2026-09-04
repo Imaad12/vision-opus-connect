@@ -243,6 +243,68 @@ class ImportReviewStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
+class ImportJobStatus(StrEnum):
+    """Lifecycle of one `ImportJob` -- the durable queue row a worker
+    process claims to run `run_extraction` for one `ImportedDocument`,
+    completely independent of the HTTP request that created it (see
+    `app.models.import_staging.ImportJob`, `app.services.
+    import_queue_service`). Deliberately NOT a duplicate of
+    `ExtractionStatus`/`ImportReviewStatus`: this only tracks the JOB's
+    own queue mechanics (has a worker picked this up, did it run to
+    completion), never the pipeline/review outcome, which stays exactly
+    where it already lived, on `ImportedDocument` itself. A job can reach
+    SUCCEEDED even though the document it processed ends up with
+    `extraction_status == FAILED` -- `run_extraction` already turns a
+    corrupt/unreadable file into a clean FAILED status without raising,
+    so the job did exactly what it was supposed to do.
+
+    QUEUED -> PROCESSING -> SUCCEEDED
+                          -> QUEUED (retry, attempts < max_attempts)
+                          -> FAILED (attempts exhausted, or a genuine
+                             infrastructure failure -- not a corrupt PDF,
+                             which `run_extraction` already turns into a
+                             terminal document outcome without raising)
+
+    A PROCESSING row whose `lease_expires_at` has passed (the worker that
+    claimed it crashed, was killed, or lost its DB connection before
+    finishing) is treated as available again by `claim_next_import_job`
+    -- no job is ever permanently stranded by a worker restart."""
+
+    QUEUED = "QUEUED"
+    PROCESSING = "PROCESSING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class BatchLifecycleStatus(StrEnum):
+    """A derived, never-persisted state for one `ImportBatch` (P9) --
+    computed on demand from its documents'/jobs' own already-persisted
+    state by `app.services.import_queue_service.
+    compute_batch_lifecycle_status`, exactly the same "derive, don't
+    store a second copy of the truth" approach this codebase already
+    uses for the Client-PO/award status column on the Quotations page.
+    Governs what batch actions (`rename`/`delete`/`archive`/`cancel`)
+    are allowed -- see that function's own docstring for the exact rules.
+
+    EMPTY: zero documents -- always hard-deletable.
+    STAGING: has documents, none confirmed yet, no active queue jobs --
+        deletable only while nothing in it has been confirmed.
+    PROCESSING: has a QUEUED or PROCESSING job right now -- never hard-
+        deletable; only Cancel is offered.
+    COMPLETED: every document has reached a terminal outcome and at
+        least one was confirmed into a real business record -- never
+        hard-deletable (that would strand a business record's own audit
+        trail); Archive is offered instead.
+    ARCHIVED: explicitly archived -- read-only.
+    """
+
+    EMPTY = "EMPTY"
+    STAGING = "STAGING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    ARCHIVED = "ARCHIVED"
+
+
 class ConfidenceLevel(StrEnum):
     """Categorical extraction confidence. Deliberately not a percentage —
     the deterministic parsers in Phase 4 have no statistically meaningful
@@ -263,6 +325,14 @@ class ImportAuditEventType(StrEnum):
     #: A segment boundary was proposed, accepted, moved, split, merged, or
     #: excluded — see `app.services.import_service`'s segment functions.
     SEGMENTED = "SEGMENTED"
+    #: A reviewer explicitly re-queued a stalled/failed document via the
+    #: "Retry" action (P8) — see `app.services.import_queue_service.
+    #: retry_import_job`. Never fired for the queue's own internal
+    #: transient-failure retries (those bump `ImportJob.attempts`, not
+    #: this audit log — see that model's own docstring on the
+    #: distinction), only for a human explicitly asking for another
+    #: attempt.
+    RETRIED = "RETRIED"
 
 
 class SegmentReviewStatus(StrEnum):

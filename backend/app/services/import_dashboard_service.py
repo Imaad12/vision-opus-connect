@@ -70,6 +70,13 @@ class ImportDashboardSummary:
     #: processing" without a second query, without inventing a new
     #: candidate-count concept `ImportedDocument` doesn't already carry.
     purchase_order_count: int
+    #: Added for the queue-status endpoint (P16) -- documents whose
+    #: extraction finished and produced usable candidate data, whatever
+    #: their review outcome since (still NEEDS_REVIEW, already
+    #: CONFIRMED/REJECTED). A strict subset of `total`, disjoint from
+    #: `processing`/`failed` by construction (`ExtractionStatus.
+    #: EXTRACTION_COMPLETE` is neither a processing nor a failure status).
+    extraction_complete: int = 0
 
 
 def compute_import_dashboard_summary(
@@ -105,6 +112,7 @@ def compute_import_dashboard_summary(
         ImportedDocument.extraction_status.not_in(_FAILED_EXTRACTION_STATUSES),
     )
     purchase_order_count = _count(ImportedDocument.document_kind == ImportDocumentKind.PURCHASE_ORDER)
+    extraction_complete = _count(ImportedDocument.extraction_status == ExtractionStatus.EXTRACTION_COMPLETE)
 
     duplicates: int | None = None
     if batch_id is not None:
@@ -120,6 +128,7 @@ def compute_import_dashboard_summary(
         failed=failed,
         duplicates=duplicates,
         purchase_order_count=purchase_order_count,
+        extraction_complete=extraction_complete,
     )
 
 

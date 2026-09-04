@@ -257,6 +257,7 @@ export const api = {
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
   /** Multipart file upload -- `fieldName` must match the backend
    * route's `UploadFile`/`list[UploadFile]` parameter name (see
    * app/api/routers/imports.py's `files: list[UploadFile]`, which

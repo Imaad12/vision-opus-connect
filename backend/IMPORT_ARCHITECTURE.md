@@ -1749,3 +1749,106 @@ shape or a storage/worker architecture ahead of a real pilot's findings
 would risk exactly the "uncontrolled OCR rewrite" the ticket explicitly
 warned against -- and that a small, safe, fully-tested piece of real
 groundwork is worth more than a larger, unvalidated one.
+
+## 26. Production reliability: durable queue, worker process, durable storage
+
+§25.5 step 1 (the thin API router) shipped in a later round and reached
+real production use -- and real production use is exactly what surfaced
+this round's problem: the API router's upload endpoint ran extraction via
+FastAPI `BackgroundTasks`, a mechanism that lives only in the web
+process's own memory for the lifetime of one coroutine. A Render web-
+service restart (a deploy, a crash, a scale event) silently discarded
+whatever was mid-run, leaving a document's `extraction_status` stuck at
+PENDING/EXTRACTING forever -- observable in production as documents that
+never progress and, because the frontend polled while anything looked
+non-terminal, a batch page that polled indefinitely. This round replaces
+that mechanism, closing exactly the gap §25.5 named ("a background worker
+... sized to what the pilot actually shows, not guessed at now") now that
+real production behavior is the evidence, not a guess.
+
+### 26.1 Durable, database-backed queue
+
+`app.models.import_staging.ImportJob` (new table, one row per
+`ImportedDocument`, unique on `imported_document_id`) is the queue.
+`app.services.import_queue_service` owns its lifecycle:
+`enqueue_import_job` / `claim_next_import_job` (`SELECT ... FOR UPDATE
+SKIP LOCKED` on PostgreSQL, gated by `settings.is_postgres` exactly like
+`app.database.schema_isolation` already gates its own Postgres-only
+behavior) / `complete_import_job` / `fail_import_job` (fixed 30s retry
+backoff, up to 3 attempts, then terminally FAILED) / `retry_import_job`
+(the reviewer-facing "Retry" action -- resets the attempt counter, never
+duplicates the document). A claimed job's `lease_expires_at` (30 minutes,
+sized against §18.1's measured worst-case OCR time) is what lets a
+crashed worker's job be reclaimed instead of stranded -- no heartbeat
+thread; see that field's own docstring for why a fixed generous lease was
+chosen over one.
+
+Deliberately does NOT duplicate `ExtractionStatus`/`ImportReviewStatus`
+onto the job: `ImportJobStatus` (QUEUED/PROCESSING/SUCCEEDED/FAILED)
+tracks only the job's own queue mechanics. A job reaches SUCCEEDED even
+when the document it processed ends up FAILED/UNSUPPORTED --
+`run_extraction` (completely unmodified) already turns a corrupt/
+unreadable file into a clean terminal document outcome without raising,
+so the job did exactly what it was supposed to do; `fail_import_job` is
+reserved for a genuine infrastructure failure escaping that call.
+
+### 26.2 Worker process
+
+`app/worker.py` -- a standalone, single-process, one-document-at-a-time
+polling loop (`python -m app.worker`), the only thing that ever calls
+`import_service.run_extraction` for a web-uploaded document now. Claim
+and process are deliberately separate sessions/transactions (claim
+commits immediately, releasing any row lock, before the potentially
+slow `run_extraction` call begins) so a multi-minute OCR pass never
+holds a database connection the whole time. Runs as its own Render
+service (`render.yaml`'s `vinco-import-worker`, same Docker image,
+`dockerCommand: python -m app.worker`); throughput scales by running
+more worker instances, each safe to run concurrently because of §26.1's
+row-locking claim.
+
+### 26.3 Durable document storage
+
+`app.core.document_storage` -- Supabase Storage (already part of
+VINCO's stack; the same project this backend already authenticates
+against) as the source of truth for original source files, via plain
+`httpx` calls (no new dependency). `imported_documents.storage_bucket`/
+`.storage_key` (new, nullable columns) record where a file's durable
+copy lives; `original_path` is untouched and still what every existing
+caller opens directly. `ensure_present` is the one new integration
+point -- called before `run_extraction` (in `process_import_job`) and
+before the page-preview routes render/count pages -- and is a no-op
+whenever the local file is already there or storage was never
+configured, so local-only development and the test suite are completely
+unaffected. The same module now also backs client-PO document
+attachment (`app.api.routers.client_award_evidence`), closing the other
+half of the durability gap this round's own report was asked to flag.
+Local-disk-only (Supabase env vars unset) keeps today's exact,
+already-documented ephemeral-disk limitation -- this module makes
+durability available, not mandatory, and does not silently migrate or
+delete any existing locally-stored file.
+
+### 26.4 Batch lifecycle
+
+`ImportBatch` gains `notes`/`archived_at` (new, nullable). Status
+(EMPTY/STAGING/PROCESSING/COMPLETED/ARCHIVED) is derived, never stored --
+`import_queue_service.compute_batch_lifecycle_status`, the same "derive
+from already-persisted state" approach the Client-PO/award status column
+already uses elsewhere in this codebase. Governs which of
+rename/delete/archive/cancel the API and UI offer; `delete_import_batch`
+refuses outright (never partially) the moment any document in the batch
+is CONFIRMED, and cascades a real delete (jobs, audit log, candidates,
+segments, then the document rows) via bulk `DELETE` statements for a
+STAGING batch with nothing confirmed.
+
+### 26.5 What remains unverified
+
+Everything above is verified against SQLite (this environment's only
+available database) and, for the `FOR UPDATE SKIP LOCKED` claim path,
+by direct code review against documented PostgreSQL semantics -- not by
+running two real concurrent worker processes against a real Postgres
+instance, which this sandbox cannot provision. Supabase Storage calls
+are verified against `httpx.MockTransport` (real request construction,
+fake network) -- not against a real Supabase Storage bucket, which
+would need real project credentials this sandbox does not have. Both
+are the honest limits of what "run the test suite" can prove here; see
+this round's own final report for the full statement.

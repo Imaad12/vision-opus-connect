@@ -231,6 +231,62 @@ def stage_document(session: Session, path: Path, *, allow_duplicate: bool = Fals
     return document
 
 
+def stage_document_for_queue(
+    session: Session, path: Path, *, original_filename: str, batch_id: int | None = None
+) -> ImportedDocument:
+    """The web-upload counterpart to `stage_document` above, used by
+    `POST /imports/batches/{id}/documents` -- same hashing/duplicate-
+    detection rules, but deliberately does NOT call `run_extraction`.
+    Extraction for a document staged this way happens later, out of
+    process, when a worker claims the `ImportJob` the router creates
+    right after this returns (see `app.services.import_queue_service`) --
+    running it here, inline, is exactly the synchronous-request behavior
+    this queue exists to remove.
+
+    Two further differences from `stage_document`, both deliberate: this
+    ALWAYS raises `ValidationError` on a hash duplicate (no
+    `allow_duplicate` escape hatch -- the router's own per-file loop is
+    what decides how to react to that, e.g. counting it toward
+    `duplicate_count` rather than aborting the whole upload), and
+    `filename` is taken from `original_filename` (the browser's own
+    filename) rather than `path.name` (the random uuid-prefixed name the
+    file is actually stored under on disk) -- the reviewer should see
+    "quotation-042.pdf" immediately, not have to wait for a later patch."""
+    path = Path(path)
+    if not path.exists() or not path.is_file():
+        raise ValidationError(f"File not found: {path}")
+
+    try:
+        file_size = path.stat().st_size
+        file_hash = compute_file_hash(path)
+    except OSError as exc:
+        raise ValidationError(f"Could not read '{original_filename}': {exc}") from exc
+
+    existing = find_existing_by_hash(session, file_hash)
+    if existing is not None:
+        raise ValidationError(
+            f"'{original_filename}' was already imported on {existing.created_at:%d %b %Y} "
+            f"as '{existing.filename}' (staging record #{existing.id})."
+        )
+
+    document = ImportedDocument(
+        batch_id=batch_id,
+        source_type=DocumentSourceType.LOCAL,
+        original_path=str(path),
+        filename=original_filename,
+        extension=path.suffix.lower().lstrip("."),
+        file_size=file_size,
+        file_hash=file_hash,
+        extraction_status=ExtractionStatus.PENDING,
+        review_status=ImportReviewStatus.NEEDS_REVIEW,
+    )
+    session.add(document)
+    session.flush()
+    _log(session, document, ImportAuditEventType.IMPORTED, note=f"Uploaded as '{original_filename}'")
+    session.flush()
+    return document
+
+
 def _serialize_raw_extraction(raw: RawExtraction) -> str:
     return json.dumps(
         {
@@ -1588,6 +1644,16 @@ def reject_import(
 _RESUMABLE_EXTRACTION_STATUSES = frozenset(
     {ExtractionStatus.PENDING, ExtractionStatus.EXTRACTING, ExtractionStatus.OCR_REQUIRED}
 )
+
+
+def is_resumable_extraction_status(extraction_status: ExtractionStatus) -> bool:
+    """Public wrapper over `_RESUMABLE_EXTRACTION_STATUSES` for callers
+    outside this module (the web-upload route's own duplicate-vs-resume
+    decision -- see `app.api.routers.imports.upload_batch_documents`) --
+    exactly the same "PENDING/EXTRACTING/OCR_REQUIRED are still
+    in-progress, not a genuine duplicate" rule `_ingest_batch` already
+    applies, kept as one definition rather than a second copy of the set."""
+    return extraction_status in _RESUMABLE_EXTRACTION_STATUSES
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

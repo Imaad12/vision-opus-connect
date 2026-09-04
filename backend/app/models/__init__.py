@@ -21,6 +21,7 @@ from app.models.import_staging import (
     ImportedDocumentSegment,
     ImportedClientAwardEvidenceCandidate,
     ImportedQuotationCandidate,
+    ImportJob,
 )
 from app.models.invoice import Invoice, Payment
 from app.models.lead import Lead
@@ -55,6 +56,7 @@ __all__ = [
     "ImportedDocumentSegment",
     "ImportedClientAwardEvidenceCandidate",
     "ImportedQuotationCandidate",
+    "ImportJob",
     "Invoice",
     "Payment",
     "Lead",
