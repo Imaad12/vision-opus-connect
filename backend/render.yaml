@@ -5,37 +5,59 @@ services:
     # This backend now lives at backend/ inside the consolidated
     # `vision-opus-connect` repository (merged via `git subtree` from the
     # former standalone `vision-contracting-profit` repo, full history
-    # preserved -- see that repo's root README.md). Render's own service
-    # still points at the OLD standalone backend repo until manually
-    # repointed in the dashboard -- a `branch:` value in this file cannot
-    # change which GitHub repository a Render service is connected to,
-    # only which branch of its *current* one. The one manual step this
-    # consolidation needs: Render dashboard -> vinco-api service ->
-    # Settings -> Build & Deploy -> change the connected repository to
-    # vision-opus-connect, branch `main`, and set Root Directory to
-    # `backend`. `dockerfilePath: ./Dockerfile` below is already correct
-    # for that (resolves relative to Root Directory, i.e.
-    # backend/Dockerfile) and needs no change once Root Directory is set.
-    # Until that manual step happens, the old vision-contracting-profit
-    # repo's `claude/postgres-productionization` branch remains the real
-    # deploy source -- do not archive/delete it first.
+    # preserved -- see that repo's root README.md). Render's service has
+    # since been repointed in the dashboard (Settings -> Build & Deploy)
+    # to this repository, branch `main`, Root Directory `backend` -- but
+    # it is still the SAME service that originally deployed the old
+    # standalone `vision-contracting-profit` repo (its live URL is still
+    # vision-contracting-profit.onrender.com, not vinco-api.onrender.com),
+    # created long before this file existed. That distinction matters:
+    # see the `preDeployCommand` note directly below.
     branch: main
     dockerfilePath: ./Dockerfile
     plan: starter
     healthCheckPath: /health
-    # Runs `alembic upgrade head` against VISION_DATABASE_URL before the
-    # new image is swapped in, on every deploy. Without this, a deploy
-    # only ever changes what code is running -- the live schema stays
-    # wherever it last was, silently, until someone happens to run
-    # migrations by hand. That gap is exactly what caused a real
-    # production incident: code shipped in commits df745ad/cc4a9ce added
+    # Intent: run `alembic upgrade head` against VISION_DATABASE_URL
+    # before the new image is swapped in, on every deploy, so the live
+    # schema can never silently lag the code that's about to start
+    # querying it.
+    #
+    # THIS FIELD ONLY TAKES EFFECT AUTOMATICALLY IF RENDER MANAGES THIS
+    # SERVICE AS A SYNCED BLUEPRINT (created via "New +" -> "Blueprint",
+    # kept in blueprint-sync mode). A service that was created as a
+    # plain Web Service and later just had its connected GitHub repo
+    # swapped in Settings -- exactly this service's own history, per the
+    # comment above -- does NOT thereby start reading `preDeployCommand`
+    # (or any other field) from whatever `render.yaml` the newly
+    # connected repo happens to contain. It keeps running whatever
+    # Pre-Deploy Command is set (or left blank) on that service's own
+    # Settings -> Build & Deploy tab, full stop.
+    #
+    # This is exactly what caused two real production incidents, not
+    # one: code shipped in commits df745ad/cc4a9ce added
     # app_users.must_change_password/password_changed_at (migration
-    # 6d263c6d93a5) and the import_batches table (0316ad9e1d33), neither
-    # of which was ever applied here, so every query touching app_users'
-    # full column set (GET /users/me, POST /users) 500'd with a Postgres
-    # UndefinedColumn error the moment that code went live. Uses the
-    # plain `alembic` CLI, not scripts/safe_production_migrate.sh --
-    # that script's interactive confirmation prompts are for a human
+    # 6d263c6d93a5) and the import_batches table (0316ad9e1d33); later,
+    # code shipped in eae6ae9 added import_batches.notes/.archived_at,
+    # import_jobs, and imported_documents.storage_bucket/.storage_key
+    # (migration 7a1c9e2f5b3d). In both cases this field already said
+    # `alembic upgrade head`, and in both cases the live database never
+    # actually got it, because this service was never wired to run it --
+    # every request touching the new columns/tables 500'd with a
+    # Postgres UndefinedColumn error the moment each deploy went live.
+    #
+    # The durable fix is in the Render dashboard, not this file: set
+    # Settings -> Build & Deploy -> Pre-Deploy Command to
+    # `alembic upgrade head` directly on the service itself. That field
+    # is independent of Blueprint sync and runs regardless of how the
+    # service was created. `GET /health` (app/api/routers/health.py)
+    # also now refuses to report "ok" if the connected PostgreSQL
+    # database is behind this code's own Alembic head, so if this gap
+    # ever reopens, the next deploy fails Render's own health check
+    # instead of going live and 500ing -- see
+    # app/database/schema_check.py's own docstring.
+    #
+    # Uses the plain `alembic` CLI, not scripts/safe_production_migrate.sh
+    # -- that script's interactive confirmation prompts are for a human
     # running it by hand, not an unattended deploy step; the safety this
     # step instead relies on is what it's always relied on: migrations
     # are additive/reviewed-in-PR (see README's "no destructive
