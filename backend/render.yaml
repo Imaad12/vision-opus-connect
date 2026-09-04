@@ -49,12 +49,21 @@ services:
     # Settings -> Build & Deploy -> Pre-Deploy Command to
     # `alembic upgrade head` directly on the service itself. That field
     # is independent of Blueprint sync and runs regardless of how the
-    # service was created. `GET /health` (app/api/routers/health.py)
-    # also now refuses to report "ok" if the connected PostgreSQL
-    # database is behind this code's own Alembic head, so if this gap
-    # ever reopens, the next deploy fails Render's own health check
-    # instead of going live and 500ing -- see
-    # app/database/schema_check.py's own docstring.
+    # service was created.
+    #
+    # A `GET /health` check that compares the live database against
+    # this code's Alembic head was tried as a code-side safety net
+    # (commit ad1a0b9) and reverted immediately after (commit after
+    # ad1a0b9): Render polls `healthCheckPath` continuously as an
+    # ongoing liveness signal, not just once at deploy cutover, so with
+    # the schema genuinely behind -- the exact condition that check was
+    # built to catch -- it turned into repeated 503s against a running
+    # instance and a site that felt broken/unusably slow, a worse
+    # outcome than the silent-500-on-the-one-affected-endpoint case it
+    # was meant to prevent. `/health` is deliberately a plain, DB-free
+    # liveness check again; catching this class of drift belongs in the
+    # deploy step (the Pre-Deploy Command above), not in a route Render
+    # treats as an ongoing health signal.
     #
     # Uses the plain `alembic` CLI, not scripts/safe_production_migrate.sh
     # -- that script's interactive confirmation prompts are for a human
