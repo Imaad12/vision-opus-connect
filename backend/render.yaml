@@ -45,11 +45,19 @@ services:
     # every request touching the new columns/tables 500'd with a
     # Postgres UndefinedColumn error the moment each deploy went live.
     #
-    # The durable fix is in the Render dashboard, not this file: set
-    # Settings -> Build & Deploy -> Pre-Deploy Command to
-    # `alembic upgrade head` directly on the service itself. That field
-    # is independent of Blueprint sync and runs regardless of how the
-    # service was created.
+    # The durable fix no longer depends on a Render dashboard setting at
+    # all (the operator running this service has no Shell/dashboard
+    # access to make one): `backend/Dockerfile`'s own `CMD` now runs
+    # `app.database.migrate_production` (which itself calls `alembic
+    # upgrade head`, wrapped in a PostgreSQL advisory lock -- see that
+    # module's own docstring) and refuses to `exec uvicorn` if it fails.
+    # That runs on every container start, unconditionally, regardless of
+    # Blueprint sync, plan tier, or whether this `preDeployCommand` field
+    # is ever actually honored for this service -- a plain `git push`
+    # is enough. This field is left in place (harmless, and still useful
+    # if this service, or a future one, ever IS Blueprint-managed): both
+    # calling `alembic upgrade head` is always safe to run more than
+    # once -- a database already at head is a no-op for either caller.
     #
     # A `GET /health` check that compares the live database against
     # this code's Alembic head was tried as a code-side safety net

@@ -42,4 +42,15 @@ RUN pip install --no-cache-dir ".[ocr]"
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT}"]
+# `app.database.migrate_production` runs `alembic upgrade head` (see
+# that module's own docstring for the real production incident this
+# fixes) and exits non-zero on any failure -- `&&` means a failed
+# migration never reaches `exec uvicorn`, so this container never
+# starts serving traffic against a schema its own code doesn't match.
+# `exec` replaces this shell with the uvicorn process (not a child of
+# it) so it receives SIGTERM/SIGINT directly from Render/Docker instead
+# of the shell swallowing them. Only this CMD does this -- the worker
+# service's `dockerCommand` (render.yaml) points straight at `python -m
+# app.worker`, bypassing this file's CMD entirely, so exactly one
+# process per deploy ever runs a migration.
+CMD ["sh", "-c", "python -m app.database.migrate_production && exec uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT}"]

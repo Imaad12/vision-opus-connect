@@ -11,9 +11,11 @@ deploy-cutover gate; with the schema genuinely behind (the exact
 condition it was designed to detect), that turned into repeated
 503s on a running instance and a multi-minute-feeling site, which is a
 far worse outcome than the silent-500 case it was meant to prevent.
-Reverted for that reason -- see this repository's own incident history
-for the actual production fix (applying the pending Alembic migration
-through Render's Shell), which does not depend on this route at all.
+Reverted for that reason. The actual production fix for a schema
+lagging behind the code that queries it is `app.database.
+migrate_production` (run from `backend/Dockerfile`'s own `CMD`, before
+`exec uvicorn` -- see that module's own docstring), which happens once
+per container start, not on every poll of this route.
 """
 
 from __future__ import annotations
