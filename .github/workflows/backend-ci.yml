@@ -90,4 +90,4 @@ jobs:
         run: pip install -e ".[dev,ocr]"
 
       - name: Run Postgres-specific + migration-chain tests
-        run: python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.py app/tests/test_clients_api_against_real_postgres.py
+        run: python -m pytest -q app/tests/test_postgres_compat.py app/tests/test_migrations.py app/tests/test_clients_api_against_real_postgres.py app/tests/test_migrate_production.py
