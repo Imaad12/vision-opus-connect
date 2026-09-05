@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import inspect
 import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -167,20 +169,38 @@ class TestAdvisoryLockAgainstRealPostgres:
     def test_two_concurrent_callers_against_the_same_database_both_succeed_without_racing(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        # Resets to a schema Alembic hasn't touched yet, then fires two
-        # `run_migrations()` calls at effectively the same moment on
-        # separate threads -- `subprocess.run` releases the GIL for the
-        # long-running alembic child process, so this is a genuine race
-        # on the real database, not a scripted-safe interleaving. Without
-        # the advisory lock, this is exactly the shape of race that would
-        # let two `alembic upgrade head` invocations attempt the same
-        # `CREATE TABLE` concurrently.
+        # Rolls back to exactly ONE migration behind head -- the real
+        # shape of the production incident this whole fix exists for
+        # (a database missing only the newest migration), not a
+        # from-scratch empty schema. A truly empty PostgreSQL database
+        # needs its own separate, already-documented two-step bootstrap
+        # (`alembic stamp cb86207a716e` before `upgrade head` -- see
+        # migrations/versions/926e160784a0's own docstring, and
+        # test_migrations.py, which exists specifically to guard that
+        # case); starting this test from empty would fail on that
+        # unrelated, already-known limitation instead of testing what
+        # this test is actually for.
         monkeypatch.setattr(settings, "database_url", POSTGRES_TEST_URL)
-        engine = create_engine(POSTGRES_TEST_URL, future=True)
-        with engine.begin() as connection:
-            connection.exec_driver_sql("DROP SCHEMA IF EXISTS vinco CASCADE")
-        engine.dispose()
+        migrate_production.run_migrations()  # ensure the chain has been applied at least once first
+        env = os.environ.copy()
+        env["VISION_DATABASE_URL"] = POSTGRES_TEST_URL
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0316ad9e1d33"],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
+        # Fires two `run_migrations()` calls at effectively the same
+        # moment on separate threads -- `subprocess.run` releases the
+        # GIL for the long-running alembic child process, so this is a
+        # genuine race on the real database, not a scripted-safe
+        # interleaving. Without the advisory lock, this is exactly the
+        # shape of race that would let two `alembic upgrade head`
+        # invocations attempt the same `CREATE TABLE import_jobs`
+        # concurrently.
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(migrate_production.run_migrations) for _ in range(2)]
             for future in futures:
