@@ -55,6 +55,13 @@ ocr = [
     "Pillow>=10.0,<11.0",
 ]
 
+[project.scripts]
+# `vinco-import /path/to/archive` once this package is installed
+# (`pip install -e .`) -- see app/cli/bulk_import.py's own module
+# docstring for what this does and why it exists separately from the
+# web upload route.
+vinco-import = "app.cli.bulk_import:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
